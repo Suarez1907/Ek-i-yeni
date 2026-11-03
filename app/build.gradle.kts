@@ -3,6 +3,7 @@ plugins {
   alias(libs.plugins.kotlin.compose)
   alias(libs.plugins.google.devtools.ksp)
   alias(libs.plugins.secrets)
+  alias(libs.plugins.google.services)
 }
 
 android {
@@ -120,8 +121,11 @@ dependencies {
   // Coil (Image Loading)
   implementation(libs.coil.compose)
 
-  // Google Generative AI SDK (Gemini)
-  implementation(libs.google.generativeai)
+  // Firebase AI Logic (Gemini API) & App Check
+  implementation(platform(libs.firebase.bom))
+  implementation(libs.firebase.ai)
+  implementation(libs.firebase.appcheck.recaptcha)
+  implementation(libs.firebase.appcheck.debug)
 
   // Testing
   testImplementation(libs.androidx.compose.ui.test.junit4)

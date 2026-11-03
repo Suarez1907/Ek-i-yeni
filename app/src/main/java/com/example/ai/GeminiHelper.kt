@@ -1,17 +1,24 @@
 package com.example.ai
 
-import com.example.BuildConfig
+import android.graphics.Bitmap
+import android.util.Log
 import com.example.data.model.EntryItem
-import com.google.ai.client.generativeai.GenerativeModel
-import com.google.ai.client.generativeai.type.BlockThreshold
-import com.google.ai.client.generativeai.type.HarmCategory
-import com.google.ai.client.generativeai.type.SafetySetting
-import com.google.ai.client.generativeai.type.generationConfig
+import com.google.firebase.Firebase
+import com.google.firebase.ai.GenerativeModel
+import com.google.firebase.ai.ai
+import com.google.firebase.ai.type.HarmBlockThreshold
+import com.google.firebase.ai.type.HarmCategory
+import com.google.firebase.ai.type.ImagePart
+import com.google.firebase.ai.type.ResponseModality
+import com.google.firebase.ai.type.SafetySetting
+import com.google.firebase.ai.type.generationConfig
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.withTimeout
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -53,22 +60,21 @@ sealed interface GeminiStreamState {
 }
 
 /**
- * Kullanıcının kişisel API anahtarını (`BuildConfig.GEMINI_API_KEY`) ve `gemini-2.5-flash`
- * modelini (`com.google.ai.client.generativeai.GenerativeModel`) kullanarak o an okunan
- * başlıktaki entry'leri analiz eden ve sonuçları `generateContentStream` ile gerçek zamanlı
- * (streaming) döndüren yardımcı sınıf.
+ * Firebase AI Logic (`Firebase.ai`) ve `gemini-3.8-flash` modelini kullanarak
+ * o an okunan başlıktaki entry'leri analiz eden ve sonuçları `generateContentStream`
+ * ile gerçek zamanlı (streaming) döndüren yardımcı sınıf.
  */
 @Singleton
 class GeminiHelper @Inject constructor() {
 
     private val safetySettings = listOf(
-        SafetySetting(HarmCategory.HARASSMENT, BlockThreshold.ONLY_HIGH),
-        SafetySetting(HarmCategory.HATE_SPEECH, BlockThreshold.ONLY_HIGH),
-        SafetySetting(HarmCategory.SEXUALLY_EXPLICIT, BlockThreshold.ONLY_HIGH),
-        SafetySetting(HarmCategory.DANGEROUS_CONTENT, BlockThreshold.ONLY_HIGH)
+        SafetySetting(HarmCategory.HARASSMENT, HarmBlockThreshold.ONLY_HIGH),
+        SafetySetting(HarmCategory.HATE_SPEECH, HarmBlockThreshold.ONLY_HIGH),
+        SafetySetting(HarmCategory.SEXUALLY_EXPLICIT, HarmBlockThreshold.ONLY_HIGH),
+        SafetySetting(HarmCategory.DANGEROUS_CONTENT, HarmBlockThreshold.ONLY_HIGH)
     )
 
-    private val config = generationConfig {
+    private val textGenerationConfig = generationConfig {
         temperature = 0.35f
         topK = 40
         topP = 0.95f
@@ -76,24 +82,32 @@ class GeminiHelper @Inject constructor() {
     }
 
     /**
-     * İstenirse çalışma zamanında özel API anahtarı veya varsayılan `BuildConfig.GEMINI_API_KEY`
-     * ile `gemini-2.5-flash` model örneği oluşturur.
+     * Lazy initialization (`by lazy`) ile `Firebase.ai.generativeModel("gemini-3.8-flash")`
+     * örneğini ilk kullanımda güvenli şekilde başlatır.
      */
-    private fun createModel(customApiKey: String? = null): GenerativeModel {
-        val resolvedKey = customApiKey?.trim()?.takeIf { it.isNotBlank() }
-            ?: BuildConfig.GEMINI_API_KEY.trim()
-
-        if (resolvedKey.isBlank() || resolvedKey == "MY_GEMINI_API_KEY") {
-            throw IllegalStateException(
-                "GEMINI_API_KEY tanımlanmamış. Lütfen AI Studio Secrets panelinden kişisel Gemini API anahtarınızı ekleyin."
-            )
-        }
-
-        return GenerativeModel(
+    private val textModel: GenerativeModel by lazy {
+        Firebase.ai.generativeModel(
             modelName = MODEL_NAME,
-            apiKey = resolvedKey,
-            generationConfig = config,
+            generationConfig = textGenerationConfig,
             safetySettings = safetySettings
+        )
+    }
+
+    private val nanoBananaImageModel: GenerativeModel by lazy {
+        Firebase.ai.generativeModel(
+            modelName = IMAGE_MODEL_DEFAULT,
+            generationConfig = generationConfig {
+                responseModalities = listOf(ResponseModality.IMAGE)
+            }
+        )
+    }
+
+    private val proImageModel: GenerativeModel by lazy {
+        Firebase.ai.generativeModel(
+            modelName = IMAGE_MODEL_PRO,
+            generationConfig = generationConfig {
+                responseModalities = listOf(ResponseModality.IMAGE)
+            }
         )
     }
 
@@ -103,14 +117,12 @@ class GeminiHelper @Inject constructor() {
      */
     fun summarizeTopicInFiveBulletsStream(
         topicTitle: String,
-        entries: List<EntryItem>,
-        customApiKey: String? = null
+        entries: List<EntryItem>
     ): Flow<GeminiStreamState> {
         return executeStreamingAnalysis(
             mode = GeminiAnalysisMode.FIVE_BULLET_SUMMARY,
             topicTitle = topicTitle,
-            entries = entries,
-            customApiKey = customApiKey
+            entries = entries
         )
     }
 
@@ -120,26 +132,23 @@ class GeminiHelper @Inject constructor() {
      */
     fun extractDisagreementsAndDominantViewStream(
         topicTitle: String,
-        entries: List<EntryItem>,
-        customApiKey: String? = null
+        entries: List<EntryItem>
     ): Flow<GeminiStreamState> {
         return executeStreamingAnalysis(
             mode = GeminiAnalysisMode.DEBATE_AND_CONSENSUS,
             topicTitle = topicTitle,
-            entries = entries,
-            customApiKey = customApiKey
+            entries = entries
         )
     }
 
     /**
-     * Seçilen [GeminiAnalysisMode] için prompt oluşturur ve `model.generateContentStream(prompt)`
-     * akışını başlatır.
+     * Seçilen [GeminiAnalysisMode] için prompt oluşturur ve `textModel.generateContentStream(prompt)`
+     * akışını 60 saniyelik gerçekçi zaman aşımı (`withTimeout(60_000L)`) ile başlatır.
      */
     fun executeStreamingAnalysis(
         mode: GeminiAnalysisMode,
         topicTitle: String,
-        entries: List<EntryItem>,
-        customApiKey: String? = null
+        entries: List<EntryItem>
     ): Flow<GeminiStreamState> = flow {
         emit(GeminiStreamState.Loading(mode))
 
@@ -162,18 +171,19 @@ class GeminiHelper @Inject constructor() {
         val accumulated = StringBuilder()
 
         try {
-            val model = createModel(customApiKey)
-            model.generateContentStream(prompt).collect { responseChunk ->
-                val chunkText = responseChunk.text.orEmpty()
-                if (chunkText.isNotEmpty()) {
-                    accumulated.append(chunkText)
-                    emit(
-                        GeminiStreamState.Streaming(
-                            mode = mode,
-                            partialText = accumulated.toString(),
-                            latestChunk = chunkText
+            withTimeout(60_000L) {
+                textModel.generateContentStream(prompt).collect { responseChunk ->
+                    val chunkText = responseChunk.text.orEmpty()
+                    if (chunkText.isNotEmpty()) {
+                        accumulated.append(chunkText)
+                        emit(
+                            GeminiStreamState.Streaming(
+                                mode = mode,
+                                partialText = accumulated.toString(),
+                                latestChunk = chunkText
+                            )
                         )
-                    )
+                    }
                 }
             }
 
@@ -193,9 +203,18 @@ class GeminiHelper @Inject constructor() {
                     )
                 )
             }
+        } catch (e: TimeoutCancellationException) {
+            Log.e(TAG, "Gemini streaming analizi zaman aşımına uğradı", e)
+            emit(
+                GeminiStreamState.Error(
+                    mode = mode,
+                    message = "Yanıt süresi 60 saniyeyi aştı. Lütfen tekrar deneyin."
+                )
+            )
         } catch (e: CancellationException) {
             throw e
-        } catch (e: Throwable) {
+        } catch (e: Exception) {
+            Log.e(TAG, "Gemini streaming analizi sırasında hata oluştu", e)
             emit(
                 GeminiStreamState.Error(
                     mode = mode,
@@ -204,6 +223,24 @@ class GeminiHelper @Inject constructor() {
             )
         }
     }.flowOn(Dispatchers.IO)
+
+    /**
+     * Firebase AI Logic (`gemini-nano-banana-2.1` veya `gemini-3-pro-image`) ile
+     * metinden görsel üretir.
+     */
+    suspend fun generateImageFromPrompt(
+        promptText: String,
+        modelId: String = IMAGE_MODEL_DEFAULT
+    ): Bitmap? {
+        val targetModel = if (modelId == IMAGE_MODEL_PRO) proImageModel else nanoBananaImageModel
+        val response = withTimeout(60_000L) {
+            targetModel.generateContent(promptText)
+        }
+        val imagePart = response.candidates.firstOrNull()
+            ?.content?.parts?.filterIsInstance<ImagePart>()
+            ?.firstOrNull()
+        return imagePart?.image
+    }
 
     private fun buildPromptForMode(
         mode: GeminiAnalysisMode,
@@ -260,7 +297,10 @@ class GeminiHelper @Inject constructor() {
     }
 
     companion object {
-        const val MODEL_NAME = "gemini-2.5-flash"
+        private const val TAG = "GeminiHelper"
+        const val MODEL_NAME = "gemini-3.8-flash"
+        const val IMAGE_MODEL_DEFAULT = "gemini-nano-banana-2.1"
+        const val IMAGE_MODEL_PRO = "gemini-3-pro-image"
         private const val MAX_ENTRIES_FOR_CONTEXT = 40
         private const val MAX_CHARS_PER_ENTRY = 1200
     }

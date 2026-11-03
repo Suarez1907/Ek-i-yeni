@@ -30,6 +30,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -64,6 +65,7 @@ import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -104,8 +106,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.paging.LoadState
-import androidx.paging.compose.collectAsLazyPagingItems
 import coil.compose.AsyncImage
 import coil.compose.SubcomposeAsyncImage
 import com.example.ai.GeminiAnalysisMode
@@ -124,7 +124,6 @@ import com.example.ui.theme.ActiveThemeState
 import com.example.ui.theme.AppThemeMode
 import com.example.ui.theme.EksiDeepGreen
 import com.example.ui.theme.EksiNeonGreen
-import com.example.ui.theme.OledCardSurface
 import com.example.ui.theme.OledDivider
 import com.example.ui.theme.OledElevatedCard
 import com.example.ui.theme.OledHairlineDivider
@@ -142,14 +141,17 @@ import kotlinx.coroutines.launch
 
 /**
  * Başlık İçi Entry Okuma Ekranı (`TopicDetailScreen.kt`):
- * 1. Varsayılan "Sadece Bugün" (`TODAY_POPULAR` -> `?a=popular`) modu ve bugün hiç entry girilmemişse
- *    otomatik tüm entry'lere fallback.
- * 2. Başlık ekranının hemen üst kısmında (entry listesinin en başında) Ekşin tarzı belirgin
- *    **"Tümünü Göster (İlk Entry'den İtibaren Tüm Başlığı Yükle)"** butonu.
- * 3. Üstte yatay kaydırılabilir modern filtre çipleri:
- *    "Bugün", "Tümü", "🔥 Şükela Bugün", "👑 Şükela Tümü", "🔗 Linkler", "🔍 Ara" ve "✨ AI Özet".
- * 4. Tüm temalarla (OLED Siyah #000000, Koyu Gri #121212, Klasik Beyaz #FFFFFF) tam uyumlu
- *    `MaterialTheme.colorScheme` kullanımı.
+ * 1. Direct Page State (`currentPage`, `totalPages`, `topicPageUiState`):
+ *    Paging 3'ün otomatik `prevKey` / sonsuz geri sarma döngüsü yerine kullanıcının seçtiği
+ *    sayfayı (`?p=X`) doğrudan ekranda gösterir ve sadece `X + 1` sayfasını sessizce önbelleğe alır.
+ * 2. `LaunchedEffect` Sıfırlama Koruması:
+ *    Sadece `topic.id` / `topic.url` ilk kez açıldığında 1 kez çalışır; sayfa değişiminde veya
+ *    recomposition sırasında sayfayı 1'e sıfırlamaz.
+ * 3. Room `ReadState` Çakışma Koruması:
+ *    Kalınan yer bilgisi yalnızca ilk açılışta tek seferlik uygulanır ve temizlenir.
+ * 4. Sayfa Değişiminde Liste Konumu:
+ *    Yeni sayfa (`goToPage(targetPage)`) verisi yüklendikten sonra `listState.scrollToItem(0)`
+ *    çağrılarak liste en başa sarılır.
  */
 @OptIn(ExperimentalMaterial3Api::class, FlowPreview::class)
 @Composable
@@ -160,7 +162,9 @@ fun TopicDetailScreen(
 ) {
     BackHandler { onBack() }
 
-    val entryPagingItems = viewModel.topicEntriesPagingFlow.collectAsLazyPagingItems()
+    val pageUiState by viewModel.topicPageUiState.collectAsStateWithLifecycle()
+    val currentPage by viewModel.currentPage.collectAsStateWithLifecycle()
+    val totalPages by viewModel.totalPages.collectAsStateWithLifecycle()
     val metadata by viewModel.activeTopicMetadata.collectAsStateWithLifecycle()
     val restoredReadState by viewModel.restoredReadState.collectAsStateWithLifecycle()
     val activeFilterMode by viewModel.topicFilterMode.collectAsStateWithLifecycle()
@@ -169,7 +173,6 @@ fun TopicDetailScreen(
     val favoritedIds by viewModel.favoritedEntryIds.collectAsStateWithLifecycle()
     val bkzPreviewState by viewModel.bkzPreviewState.collectAsStateWithLifecycle()
     val geminiStreamState by viewModel.geminiStreamState.collectAsStateWithLifecycle()
-    val scrollToTopEvent by viewModel.scrollToTopEvent.collectAsStateWithLifecycle()
     val themeMode by viewModel.themeMode.collectAsStateWithLifecycle()
     val showThemeDialog by viewModel.showThemeDialog.collectAsStateWithLifecycle()
 
@@ -180,12 +183,24 @@ fun TopicDetailScreen(
     val listState = rememberLazyListState()
     val isHeaderVisible by rememberDetailHeaderVisibility(listState)
 
-    val activeTitle = metadata?.topicTitle ?: topic.title
-    val currentPage = metadata?.currentPage ?: 1
-    val totalPages = (metadata?.pageCount ?: 1).coerceAtLeast(1)
+    val activeTitle = metadata?.topicTitle?.takeIf { it.isNotBlank() } ?: topic.title
+    val safeCurrentPage = currentPage.coerceAtLeast(1)
+    val safeTotalPages = totalPages.coerceAtLeast(safeCurrentPage)
     val isSingleEntryOrFiltered = activeFilterMode != TopicFilterMode.ALL ||
         metadata?.isSingleEntryView == true ||
         topic.url.contains("/entry/", ignoreCase = true)
+
+    val currentEntries: List<EntryItem> = remember(pageUiState, metadata, authorFilter) {
+        val rawEntries = when (val state = pageUiState) {
+            is TopicPageUiState.Success -> state.entries
+            else -> metadata?.entries.orEmpty()
+        }
+        if (authorFilter.isNullOrBlank()) {
+            rawEntries
+        } else {
+            rawEntries.filter { it.author.equals(authorFilter, ignoreCase = true) }
+        }
+    }
 
     if (showThemeDialog) {
         ThemeSelectorDialog(
@@ -195,43 +210,55 @@ fun TopicDetailScreen(
         )
     }
 
-    LaunchedEffect(scrollToTopEvent) {
-        if (scrollToTopEvent > 0) {
+    // 2. KURAL: Sadece topic ilk açıldığında 1 kez kontrol et; recomposition veya sayfa değişiminde
+    // sayfayı asla 1'e sıfırlama.
+    LaunchedEffect(topic.id, topic.url) {
+        viewModel.ensureTopicInitializedOnce(topic)
+    }
+
+    // 4. KURAL: Yeni sayfa verisi yüklendikten (`loadSequence` değiştiğinde) sonra:
+    // - İlk açılışta kaydedilmiş okuma konumu varsa bir kez o entry'ye kaydır ve temizle.
+    // - Kullanıcı sayfa değiştirdiyse (`goToPage`) listeyi en üste (`scrollToItem(0)`) sar.
+    val latestLoadSequence = (pageUiState as? TopicPageUiState.Success)?.loadSequence ?: 0
+    LaunchedEffect(latestLoadSequence) {
+        if (latestLoadSequence <= 0) return@LaunchedEffect
+        val saved = restoredReadState
+        if (saved != null && currentEntries.isNotEmpty()) {
+            val headerOffset = if (isSingleEntryOrFiltered) 1 else 0
+            val matchedEntryIdx = currentEntries.indexOfFirst { it.id == saved.entryId }
+            val targetLazyIndex = if (matchedEntryIdx >= 0) {
+                matchedEntryIdx + headerOffset
+            } else {
+                saved.scrollIndex.coerceIn(0, (currentEntries.size - 1 + headerOffset).coerceAtLeast(0))
+            }
+            listState.scrollToItem(
+                index = targetLazyIndex,
+                scrollOffset = saved.scrollOffset.coerceAtLeast(0)
+            )
+            viewModel.markScrollPositionRestored()
+        } else {
             listState.scrollToItem(0)
         }
     }
 
-    LaunchedEffect(restoredReadState, entryPagingItems.itemCount) {
-        val saved = restoredReadState ?: return@LaunchedEffect
-        if (entryPagingItems.itemCount == 0) return@LaunchedEffect
-
-        val targetIndex = (0 until entryPagingItems.itemCount).firstOrNull { idx ->
-            entryPagingItems.peek(idx)?.id == saved.entryId
-        } ?: saved.scrollIndex.coerceIn(0, (entryPagingItems.itemCount - 1).coerceAtLeast(0))
-
-        listState.scrollToItem(
-            index = targetIndex,
-            scrollOffset = saved.scrollOffset.coerceAtLeast(0)
-        )
-        viewModel.markScrollPositionRestored()
-    }
-
-    LaunchedEffect(listState, entryPagingItems.itemCount) {
+    // 3. KURAL: Kullanıcı okurken kalınan yeri Room'a sessizce kaydet (Room Flow dinlenmez, state ezilmez).
+    LaunchedEffect(listState, currentEntries, isSingleEntryOrFiltered) {
         snapshotFlow {
             listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset
         }
             .distinctUntilChanged()
             .debounce(400L)
             .collect { (firstIndex, offset) ->
-                if (entryPagingItems.itemCount > firstIndex) {
-                    val visibleEntry = entryPagingItems.peek(firstIndex)
-                    if (visibleEntry != null) {
-                        viewModel.saveCurrentScrollPosition(
-                            entry = visibleEntry,
-                            scrollIndex = firstIndex,
-                            scrollOffset = offset
-                        )
-                    }
+                if (currentEntries.isEmpty()) return@collect
+                val headerOffset = if (isSingleEntryOrFiltered) 1 else 0
+                val entryIdx = (firstIndex - headerOffset).coerceIn(0, currentEntries.lastIndex)
+                val visibleEntry = currentEntries.getOrNull(entryIdx)
+                if (visibleEntry != null) {
+                    viewModel.saveCurrentScrollPosition(
+                        entry = visibleEntry,
+                        scrollIndex = entryIdx,
+                        scrollOffset = offset
+                    )
                 }
             }
     }
@@ -249,12 +276,10 @@ fun TopicDetailScreen(
         topicTitle = activeTitle,
         streamState = geminiStreamState,
         onSelectMode = { mode ->
-            val currentLoadedEntries = (0 until entryPagingItems.itemCount.coerceAtMost(40))
-                .mapNotNull { entryPagingItems.peek(it) }
             viewModel.runGeminiAnalysisStream(
                 mode = mode,
                 topicTitle = activeTitle,
-                entries = currentLoadedEntries
+                entries = currentEntries.take(40)
             )
         },
         onDismiss = { viewModel.clearGeminiStream() }
@@ -317,16 +342,19 @@ fun TopicDetailScreen(
                                     overflow = TextOverflow.Ellipsis
                                 )
                                 val subtitle = buildString {
-                                    metadata?.let {
-                                        append("Sayfa ${it.currentPage} / ${it.pageCount}")
-                                        if (activeFilterMode == TopicFilterMode.TODAY_POPULAR && !it.usedTodayFallback) {
+                                    append("Sayfa $safeCurrentPage / $safeTotalPages")
+                                    val meta = metadata
+                                    if (meta != null) {
+                                        if (activeFilterMode == TopicFilterMode.TODAY_POPULAR && !meta.usedTodayFallback) {
                                             append(" • Bugün")
-                                        } else if (it.usedTodayFallback) {
+                                        } else if (meta.usedTodayFallback) {
                                             append(" • Tüm Başlık (Bugün Entry Yok)")
-                                        } else if (it.usedTrackedFallback) {
+                                        } else if (meta.usedTrackedFallback) {
                                             append(" • Takipten")
                                         }
-                                    } ?: append("Yükleniyor...")
+                                    } else if (pageUiState is TopicPageUiState.Loading) {
+                                        append(" • Yükleniyor...")
+                                    }
                                 }
                                 Text(
                                     text = subtitle,
@@ -349,7 +377,7 @@ fun TopicDetailScreen(
                                     modifier = Modifier.size(20.dp)
                                 )
                             }
-                            IconButton(onClick = { entryPagingItems.refresh() }) {
+                            IconButton(onClick = { viewModel.refreshCurrentTopicPage() }) {
                                 Icon(
                                     imageVector = Icons.Default.Refresh,
                                     contentDescription = "Yenile",
@@ -411,12 +439,10 @@ fun TopicDetailScreen(
                     // ✨ AI Özet Çipi
                     AssistChip(
                         onClick = {
-                            val currentLoadedEntries = (0 until entryPagingItems.itemCount.coerceAtMost(40))
-                                .mapNotNull { entryPagingItems.peek(it) }
                             viewModel.runGeminiAnalysisStream(
                                 mode = GeminiAnalysisMode.FIVE_BULLET_SUMMARY,
                                 topicTitle = activeTitle,
-                                entries = currentLoadedEntries
+                                entries = currentEntries.take(40)
                             )
                         },
                         shape = RoundedCornerShape(50),
@@ -527,7 +553,7 @@ fun TopicDetailScreen(
                         keyboardActions = KeyboardActions(
                             onSearch = {
                                 focusManager.clearFocus()
-                                entryPagingItems.refresh()
+                                viewModel.submitInTopicSearch()
                             }
                         ),
                         colors = OutlinedTextFieldDefaults.colors(
@@ -542,7 +568,17 @@ fun TopicDetailScreen(
                     )
                 }
 
-                HorizontalDivider(color = OledHairlineDivider, thickness = 1.dp)
+                if (pageUiState is TopicPageUiState.Loading && currentEntries.isNotEmpty()) {
+                    LinearProgressIndicator(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(2.dp),
+                        color = EksiNeonGreen,
+                        trackColor = Color.Transparent
+                    )
+                } else {
+                    HorizontalDivider(color = OledHairlineDivider, thickness = 1.dp)
+                }
             }
         }
     ) { innerPadding ->
@@ -552,234 +588,227 @@ fun TopicDetailScreen(
                 .padding(innerPadding)
                 .background(MaterialTheme.colorScheme.background)
         ) {
-            val refreshState = entryPagingItems.loadState.refresh
+            when {
+                (pageUiState is TopicPageUiState.Loading || pageUiState is TopicPageUiState.Idle) &&
+                    currentEntries.isEmpty() -> {
+                    EntryListSkeletonShimmer(
+                        cardCount = 5,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
 
-            if (refreshState is LoadState.Loading && entryPagingItems.itemCount == 0) {
-                EntryListSkeletonShimmer(
-                    cardCount = 5,
-                    modifier = Modifier.fillMaxSize()
-                )
-            } else {
-                LazyColumn(
-                    state = listState,
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .testTag("entry_paging_list"),
-                    contentPadding = PaddingValues(
-                        start = 12.dp,
-                        end = 12.dp,
-                        top = 10.dp,
-                        bottom = 96.dp
-                    ),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    // 2. ÖZELLİK: Başlık ekranının hemen üst kısmında (entry listesinin en başında)
-                    // Ekşin tarzı belirgin ve şık "Tümünü Göster (İlk Entry'den İtibaren Tüm Başlığı Yükle)" butonu
-                    if (isSingleEntryOrFiltered) {
-                        item(key = "show_all_entries_header_button") {
-                            Surface(
-                                color = OledPillGreenBg,
-                                shape = RoundedCornerShape(14.dp),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(14.dp))
-                                    .clickable { viewModel.showAllTopicEntriesFromFirstPage() }
-                                    .border(
-                                        width = 1.dp,
-                                        color = EksiNeonGreen.copy(alpha = 0.6f),
-                                        shape = RoundedCornerShape(14.dp)
+                pageUiState is TopicPageUiState.Error && currentEntries.isEmpty() -> {
+                    val errorState = pageUiState as TopicPageUiState.Error
+                    Card(
+                        shape = RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                        modifier = Modifier
+                            .align(Alignment.Center)
+                            .padding(20.dp)
+                            .fillMaxWidth()
+                            .border(1.dp, OledDivider, RoundedCornerShape(16.dp))
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(20.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Security,
+                                contentDescription = null,
+                                tint = EksiNeonGreen,
+                                modifier = Modifier.size(36.dp)
+                            )
+                            Text(
+                                text = "Sayfa ${errorState.targetPage} Yüklenemedi",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = OledTextPrimary
+                            )
+                            Text(
+                                text = errorState.message,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = OledTextSecondary
+                            )
+                            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                AssistChip(
+                                    onClick = {
+                                        viewModel.goToPage(
+                                            targetPage = errorState.targetPage,
+                                            forceRefresh = true
+                                        )
+                                    },
+                                    label = { Text("Tekrar Dene", color = OledTextPrimary) }
+                                )
+                                Button(
+                                    onClick = { viewModel.openCloudflareVerification(topic.url) },
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = EksiNeonGreen,
+                                        contentColor = OledOnAccentColor
                                     )
-                                    .testTag("show_all_entries_button")
-                            ) {
-                                Row(
+                                ) {
+                                    Text("Doğrula", fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                else -> {
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .testTag("entry_paging_list"),
+                        contentPadding = PaddingValues(
+                            start = 12.dp,
+                            end = 12.dp,
+                            top = 10.dp,
+                            bottom = 96.dp
+                        ),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        // 2. ÖZELLİK: Başlık ekranının hemen üst kısmında (entry listesinin en başında)
+                        // Ekşin tarzı belirgin ve şık "Tümünü Göster (İlk Entry'den İtibaren Tüm Başlığı Yükle)" butonu
+                        if (isSingleEntryOrFiltered) {
+                            item(key = "show_all_entries_header_button") {
+                                Surface(
+                                    color = OledPillGreenBg,
+                                    shape = RoundedCornerShape(14.dp),
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .padding(horizontal = 14.dp, vertical = 12.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.SpaceBetween
+                                        .clip(RoundedCornerShape(14.dp))
+                                        .clickable { viewModel.showAllTopicEntriesFromFirstPage() }
+                                        .border(
+                                            width = 1.dp,
+                                            color = EksiNeonGreen.copy(alpha = 0.6f),
+                                            shape = RoundedCornerShape(14.dp)
+                                        )
+                                        .testTag("show_all_entries_button")
                                 ) {
                                     Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 14.dp, vertical = 12.dp),
                                         verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                                        modifier = Modifier.weight(1f)
+                                        horizontalArrangement = Arrangement.SpaceBetween
                                     ) {
-                                        Icon(
-                                            imageVector = Icons.AutoMirrored.Filled.MenuBook,
-                                            contentDescription = null,
-                                            tint = EksiNeonGreen,
-                                            modifier = Modifier.size(20.dp)
-                                        )
-                                        Column {
-                                            Text(
-                                                text = "Tümünü Göster (İlk Entry'den İtibaren Tüm Başlığı Yükle)",
-                                                style = MaterialTheme.typography.labelLarge,
-                                                fontWeight = FontWeight.ExtraBold,
-                                                color = EksiNeonGreen,
-                                                fontSize = 13.sp
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                            modifier = Modifier.weight(1f)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.AutoMirrored.Filled.MenuBook,
+                                                contentDescription = null,
+                                                tint = EksiNeonGreen,
+                                                modifier = Modifier.size(20.dp)
                                             )
-                                            val modeHint = when {
-                                                metadata?.usedTodayFallback == true ->
-                                                    "Bugün yeni entry girilmediği için tüm başlık gösteriliyor • 1. sayfadan açmak için dokunun"
-                                                metadata?.isSingleEntryView == true ->
-                                                    "Tekil DEBE / Entry görünümü • Başlığın 1. sayfasından itibaren tümünü yükle"
-                                                activeFilterMode == TopicFilterMode.TODAY_POPULAR ->
-                                                    "Şu an son 24 saat (Bugün) filtresi aktif • 1. sayfadan (?p=1) itibaren tümünü yükle"
-                                                else ->
-                                                    "${activeFilterMode.displayTitle} filtresini kaldır ve 1. sayfadan itibaren tümünü yükle"
+                                            Column {
+                                                Text(
+                                                    text = "Tümünü Göster (İlk Entry'den İtibaren Tüm Başlığı Yükle)",
+                                                    style = MaterialTheme.typography.labelLarge,
+                                                    fontWeight = FontWeight.ExtraBold,
+                                                    color = EksiNeonGreen,
+                                                    fontSize = 13.sp
+                                                )
+                                                val modeHint = when {
+                                                    metadata?.usedTodayFallback == true ->
+                                                        "Bugün yeni entry girilmediği için tüm başlık gösteriliyor • 1. sayfadan açmak için dokunun"
+                                                    metadata?.isSingleEntryView == true ->
+                                                        "Tekil DEBE / Entry görünümü • Başlığın 1. sayfasından itibaren tümünü yükle"
+                                                    activeFilterMode == TopicFilterMode.TODAY_POPULAR ->
+                                                        "Şu an son 24 saat (Bugün) filtresi aktif • 1. sayfadan (?p=1) itibaren tümünü yükle"
+                                                    else ->
+                                                        "${activeFilterMode.displayTitle} filtresini kaldır ve 1. sayfadan itibaren tümünü yükle"
+                                                }
+                                                Text(
+                                                    text = modeHint,
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = OledTextSecondary,
+                                                    fontSize = 11.sp
+                                                )
                                             }
-                                            Text(
-                                                text = modeHint,
-                                                style = MaterialTheme.typography.labelSmall,
-                                                color = OledTextSecondary,
-                                                fontSize = 11.sp
-                                            )
                                         }
                                     }
                                 }
                             }
                         }
-                    }
 
-                    items(
-                        count = entryPagingItems.itemCount,
-                        key = { index -> "${index}_${entryPagingItems.peek(index)?.id ?: "entry"}" }
-                    ) { index ->
-                        val entry = entryPagingItems[index] ?: return@items
+                        itemsIndexed(
+                            items = currentEntries,
+                            key = { index, entry -> "${safeCurrentPage}_${index}_${entry.id}" }
+                        ) { _, entry ->
+                            val isFavorited = favoritedIds.contains(entry.id) || entry.isFavorited
 
-                        if (!authorFilter.isNullOrBlank() &&
-                            !entry.author.equals(authorFilter, ignoreCase = true)
-                        ) {
-                            return@items
-                        }
-
-                        val isFavorited = favoritedIds.contains(entry.id) || entry.isFavorited
-
-                        SwipeableEntryOledCard(
-                            entry = entry,
-                            isFavorited = isFavorited,
-                            onSwipeRightSukelaFav = {
-                                viewModel.toggleSukelaOrFavorite(entry)
-                                coroutineScope.launch {
-                                    snackbarHostState.showSnackbar(
-                                        message = if (isFavorited) {
-                                            "Entry #${entry.id} favorilerden çıkarıldı"
-                                        } else {
-                                            "Entry #${entry.id} Şükela / Favorilere eklendi ★"
-                                        },
-                                        duration = SnackbarDuration.Short
-                                    )
-                                }
-                            },
-                            onSwipeLeftAuthorOrShare = {
-                                viewModel.filterByAuthorInTopic(entry.author)
-                                coroutineScope.launch {
-                                    val result = snackbarHostState.showSnackbar(
-                                        message = "Sadece @${entry.author} entry'leri filtrelendi",
-                                        actionLabel = "Paylaş",
-                                        duration = SnackbarDuration.Short
-                                    )
-                                    if (result == SnackbarResult.ActionPerformed) {
-                                        shareEntry(entry)
+                            SwipeableEntryOledCard(
+                                entry = entry,
+                                isFavorited = isFavorited,
+                                onSwipeRightSukelaFav = {
+                                    viewModel.toggleSukelaOrFavorite(entry)
+                                    coroutineScope.launch {
+                                        snackbarHostState.showSnackbar(
+                                            message = if (isFavorited) {
+                                                "Entry #${entry.id} favorilerden çıkarıldı"
+                                            } else {
+                                                "Entry #${entry.id} Şükela / Favorilere eklendi ★"
+                                            },
+                                            duration = SnackbarDuration.Short
+                                        )
                                     }
-                                }
-                            },
-                            onAuthorClick = { authorName ->
-                                viewModel.openBkzPreview(authorName)
-                            },
-                            onShareEntry = {
-                                shareEntry(entry)
-                            },
-                            onBkzClick = { bkzQuery ->
-                                viewModel.openBkzPreview(bkzQuery)
-                            },
-                            onExternalUrlClick = { externalUrl ->
-                                try {
-                                    context.startActivity(
-                                        Intent(Intent.ACTION_VIEW, Uri.parse(externalUrl))
+                                },
+                                onSwipeLeftAuthorOrShare = {
+                                    viewModel.filterByAuthorInTopic(entry.author)
+                                    coroutineScope.launch {
+                                        val result = snackbarHostState.showSnackbar(
+                                            message = "Sadece @${entry.author} entry'leri filtrelendi",
+                                            actionLabel = "Paylaş",
+                                            duration = SnackbarDuration.Short
+                                        )
+                                        if (result == SnackbarResult.ActionPerformed) {
+                                            shareEntry(entry)
+                                        }
+                                    }
+                                },
+                                onAuthorClick = { authorName ->
+                                    viewModel.openBkzPreview(authorName)
+                                },
+                                onShareEntry = {
+                                    shareEntry(entry)
+                                },
+                                onBkzClick = { bkzQuery ->
+                                    viewModel.openBkzPreview(bkzQuery)
+                                },
+                                onExternalUrlClick = { externalUrl ->
+                                    try {
+                                        context.startActivity(
+                                            Intent(Intent.ACTION_VIEW, Uri.parse(externalUrl))
+                                        )
+                                    } catch (_: Exception) {
+                                    }
+                                },
+                                onSummarizeSingle = {
+                                    viewModel.runGeminiAnalysisStream(
+                                        mode = GeminiAnalysisMode.FIVE_BULLET_SUMMARY,
+                                        topicTitle = "${entry.topicTitle} (#${entry.id})",
+                                        entries = listOf(entry)
                                     )
-                                } catch (_: Exception) {
                                 }
-                            },
-                            onSummarizeSingle = {
-                                viewModel.runGeminiAnalysisStream(
-                                    mode = GeminiAnalysisMode.FIVE_BULLET_SUMMARY,
-                                    topicTitle = "${entry.topicTitle} (#${entry.id})",
-                                    entries = listOf(entry)
-                                )
-                            }
-                        )
-                    }
-
-                    if (entryPagingItems.loadState.append is LoadState.Loading) {
-                        item {
-                            EntryListSkeletonShimmer(
-                                cardCount = 1,
-                                modifier = Modifier.fillMaxWidth()
                             )
                         }
                     }
                 }
             }
 
-            if (refreshState is LoadState.Error && entryPagingItems.itemCount == 0) {
-                Card(
-                    shape = RoundedCornerShape(16.dp),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-                    modifier = Modifier
-                        .align(Alignment.Center)
-                        .padding(20.dp)
-                        .fillMaxWidth()
-                        .border(1.dp, OledDivider, RoundedCornerShape(16.dp))
-                ) {
-                    Column(
-                        modifier = Modifier.padding(20.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Security,
-                            contentDescription = null,
-                            tint = EksiNeonGreen,
-                            modifier = Modifier.size(36.dp)
-                        )
-                        Text(
-                            text = "Başlık Yüklenemedi",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = OledTextPrimary
-                        )
-                        Text(
-                            text = refreshState.error.localizedMessage ?: "Bağlantı hatası",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = OledTextSecondary
-                        )
-                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            AssistChip(
-                                onClick = { entryPagingItems.retry() },
-                                label = { Text("Tekrar Dene", color = OledTextPrimary) }
-                            )
-                            Button(
-                                onClick = { viewModel.openCloudflareVerification(topic.url) },
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = EksiNeonGreen,
-                                    contentColor = OledOnAccentColor
-                                )
-                            ) {
-                                Text("Doğrula", fontWeight = FontWeight.Bold)
-                            }
-                        }
-                    }
-                }
-            }
-
+            // 1. & 4. KURAL: Direct Page State kapsül barı
+            // Kullanıcı hangi sayfayı seçerse (İlk, Önceki, Sayfa X, Sonraki, Son)
+            // doğrudan `viewModel.goToPage(targetPage)` çağrılır ve veri yüklendiğinde
+            // `LaunchedEffect(latestLoadSequence)` ile liste en üste (`scrollToItem(0)`) sarılır.
             FloatingPagerCapsuleBar(
-                currentPage = currentPage,
-                totalPages = totalPages,
+                currentPage = safeCurrentPage,
+                totalPages = safeTotalPages,
                 onSelectPage = { targetPage ->
-                    viewModel.jumpToTopicPage(targetPage)
-                    coroutineScope.launch {
-                        listState.scrollToItem(0)
-                    }
+                    viewModel.goToPage(targetPage = targetPage, forceRefresh = false)
                 },
                 modifier = Modifier
                     .align(Alignment.BottomCenter)

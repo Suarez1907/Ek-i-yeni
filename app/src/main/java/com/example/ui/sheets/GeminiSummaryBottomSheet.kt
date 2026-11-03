@@ -105,7 +105,7 @@ fun GeminiSummaryBottomSheet(
                     )
                     Column {
                         Text(
-                            text = "✨ Gemini 2.5 Flash Canlı Özet",
+                            text = "✨ Gemini 3.8 Flash Canlı Özet",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.ExtraBold,
                             color = EksiNeonGreen

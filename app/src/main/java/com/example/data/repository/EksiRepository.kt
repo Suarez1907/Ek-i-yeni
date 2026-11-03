@@ -19,7 +19,6 @@ import com.example.data.model.SearchFilter
 import com.example.data.model.TopicFilterMode
 import com.example.data.model.TopicItem
 import com.example.data.model.TopicPageData
-import com.example.data.paging.TopicPagingSource
 import com.example.data.remote.EksiParser
 import com.example.network.WebViewCookieJar
 import com.example.network.WebViewFetchBridge
@@ -34,8 +33,10 @@ import javax.inject.Singleton
  * - Tüm HTML veri çekme işlemlerini [WebViewFetchBridge] üzerinden gerçekleştirir.
  * - Sol Frame (Gündem, Bugün, Debe, Olaylar), Kanallar (`/basliklar/kanal/{kanal_slug}?p={page}`),
  *   DEBE 50 (`/debe`) ve Dönemsel Enler (`/istatistik/...`) rotalarını ayrıştırır.
- * - Başlığa girildiğinde en son okunan `entryId`, `pageNumber`, `scrollIndex` ve `scrollOffset`
- *   değerlerini [ReadStateDao] üzerinden Room veritabanına kaydeder.
+ * - Başlık detay ekranında Paging 3'ün `prevKey` sonsuz geri sarma döngüsünü önlemek için
+ *   doğrudan tekil sayfa çekme ([fetchSingleTopicPage]) ve `X + 1` arka plan önbellekleme mimarisini destekler.
+ * - Başlığa ilk girildiğinde kalınan yeri tek seferlik ([getSavedTopicReadState]) okur ve
+ *   kaydırma sırasında [ReadStateDao] üzerinden Room veritabanına kaydeder.
  */
 @Singleton
 class EksiRepository @Inject constructor(
@@ -49,22 +50,15 @@ class EksiRepository @Inject constructor(
         eksinDao.observeBookmarkedEntries()
 
     /**
-     * Tüm okunan başlıkların son kaldığı yer (`entryId`, `pageNumber`, `scrollOffset`) geçmişini gözlemler.
+     * Profil ekranındaki "Son Okunan Başlıklar" listesi için tüm okuma geçmişini gözlemler.
      */
     fun observeAllReadStates(): Flow<List<TopicReadStateEntity>> =
         readStateDao.observeAllReadStates()
 
     /**
-     * Belirli bir başlık URL'si için Room'da kayıtlı okuma durumunu reaktif olarak gözlemler.
-     */
-    fun observeTopicReadState(rawOrCleanTopicUrl: String): Flow<TopicReadStateEntity?> {
-        val canonicalKey = normalizeTopicKey(rawOrCleanTopicUrl)
-        return readStateDao.observeReadStateByKey(canonicalKey)
-    }
-
-    /**
-     * Başlığa tekrar girildiğinde doğrudan kalınan sayfadan (`pageNumber`) ve entry'den (`entryId`, `scrollOffset`)
-     * devam etmek için kayıtlı [TopicReadStateEntity] nesnesini getirir.
+     * Başlığa İLK girildiğinde tek seferlik (`suspend` / `firstOrNull` mantığıyla)
+     * kalınan sayfa (`pageNumber`) ve entry (`entryId`, `scrollOffset`) bilgisini getirir.
+     * Sürekli bir Flow olarak dinlenmediği için kullanıcının manuel sayfa geçişlerini asla ezmez.
      */
     suspend fun getSavedTopicReadState(
         rawOrCleanTopicUrl: String,
@@ -251,8 +245,6 @@ class EksiRepository @Inject constructor(
                 return@withContext Result.success(parsedStats)
             }
 
-            // Eğer `/istatistik/...` misafir oturumunda boş dönerse, döneme uygun gerçek DEBE / Gündem
-            // popüler rotalarından ayrıştır:
             val fallbackUrl = when {
                 isEntriesMode && period == PeriodicTimeRange.YESTERDAY ->
                     "$baseDomain/debe?_=${System.currentTimeMillis()}"
@@ -302,30 +294,123 @@ class EksiRepository @Inject constructor(
     }
 
     /**
-     * Başlık entry'lerini [TopicPagingSource] ve yüksek `prefetchDistance` ile çeker.
+     * Direct Page State Mimarisi:
+     * Başlığın SADECE istenen `page` (`?p=X`) sayfasını çeker ve ayrıştırır.
+     * - Olaylar (`?a=tracked`) boş dönerse parametresiz ana başlığa fallback yapar.
+     * - Sadece Bugün (`?a=popular`) boş dönerse 1. sayfadan itibaren tüm entry'lere fallback yapar.
      */
-    fun getTopicEntriesPager(
-        rawTopicUrl: String,
-        filterMode: TopicFilterMode = TopicFilterMode.ALL,
+    suspend fun fetchSingleTopicPage(
+        initialTopicUrl: String,
+        resolvedCleanTopicUrl: String? = null,
+        page: Int,
+        filterMode: TopicFilterMode,
         inTopicSearchKeyword: String = "",
-        initialPage: Int = 1,
-        onPageMetadataLoaded: (TopicPageData) -> Unit
-    ): Flow<PagingData<EntryItem>> {
-        return Pager(
-            config = TopicPagingSource.createOptimizedPagingConfig(),
-            initialKey = initialPage.coerceAtLeast(1),
-            pagingSourceFactory = {
-                TopicPagingSource(
-                    initialTopicUrl = rawTopicUrl,
-                    filterMode = filterMode,
-                    inTopicSearchKeyword = inTopicSearchKeyword,
-                    initialPage = initialPage.coerceAtLeast(1),
-                    webViewFetchBridge = webViewFetchBridge,
-                    eksiParser = eksiParser,
-                    onTopicPageLoaded = onPageMetadataLoaded
+        trackedFallbackAlreadyActive: Boolean = false,
+        todayFallbackAlreadyActive: Boolean = false
+    ): Result<TopicPageData> = withContext(Dispatchers.IO) {
+        try {
+            val safePage = page.coerceAtLeast(1)
+            val baseForRequest = resolvedCleanTopicUrl?.takeIf {
+                it.isNotBlank() && !eksiParser.isDirectSingleEntryUrl(it)
+            } ?: initialTopicUrl
+
+            val effectiveFilterMode = if (todayFallbackAlreadyActive && filterMode == TopicFilterMode.TODAY_POPULAR) {
+                TopicFilterMode.ALL
+            } else {
+                filterMode
+            }
+
+            val targetUrl = eksiParser.buildTopicPageUrl(
+                baseOrRawUrl = baseForRequest,
+                page = safePage,
+                filterMode = effectiveFilterMode,
+                searchKeywordInTopic = inTopicSearchKeyword,
+                forceStripTracked = trackedFallbackAlreadyActive || (safePage > 1)
+            )
+
+            val primaryHtml = webViewFetchBridge.fetchHtml(
+                rawUrl = targetUrl,
+                isAjax = false
+            )
+            var resultPageData = withContext(Dispatchers.Default) {
+                eksiParser.parseTopicPage(
+                    html = primaryHtml,
+                    requestedUrl = targetUrl,
+                    fallbackPage = safePage,
+                    usedTrackedFallback = trackedFallbackAlreadyActive,
+                    usedTodayFallback = todayFallbackAlreadyActive
                 )
             }
-        ).flow
+
+            // 1. Olaylar (?a=tracked) sekmesinde okunan başlığa tekrar tıklandığında boş gelme hatası kontrolü
+            if (resultPageData.entries.isEmpty() && eksiParser.containsTrackedParam(targetUrl)) {
+                val cleanFallbackUrl = eksiParser.buildTopicPageUrl(
+                    baseOrRawUrl = eksiParser.stripTrackedParameters(initialTopicUrl),
+                    page = safePage,
+                    filterMode = TopicFilterMode.ALL,
+                    searchKeywordInTopic = inTopicSearchKeyword,
+                    forceStripTracked = true
+                )
+                val fallbackHtml = webViewFetchBridge.fetchHtml(
+                    rawUrl = cleanFallbackUrl,
+                    isAjax = false
+                )
+                resultPageData = withContext(Dispatchers.Default) {
+                    eksiParser.parseTopicPage(
+                        html = fallbackHtml,
+                        requestedUrl = cleanFallbackUrl,
+                        fallbackPage = safePage,
+                        usedTrackedFallback = true,
+                        usedTodayFallback = todayFallbackAlreadyActive
+                    )
+                }
+            }
+
+            // 2. "Sadece Bugün" (?a=popular) modunda bugün hiç entry girilmemişse otomatik tüm entry'lere fallback
+            if (resultPageData.entries.isEmpty() &&
+                (effectiveFilterMode == TopicFilterMode.TODAY_POPULAR || eksiParser.containsTodayPopularParam(targetUrl))
+            ) {
+                val allEntriesFallbackUrl = eksiParser.buildTopicPageUrl(
+                    baseOrRawUrl = eksiParser.stripTrackedParameters(baseForRequest),
+                    page = safePage,
+                    filterMode = TopicFilterMode.ALL,
+                    searchKeywordInTopic = inTopicSearchKeyword,
+                    forceStripTracked = true
+                )
+                val fallbackHtml = webViewFetchBridge.fetchHtml(
+                    rawUrl = allEntriesFallbackUrl,
+                    isAjax = false
+                )
+                resultPageData = withContext(Dispatchers.Default) {
+                    eksiParser.parseTopicPage(
+                        html = fallbackHtml,
+                        requestedUrl = allEntriesFallbackUrl,
+                        fallbackPage = safePage,
+                        usedTrackedFallback = resultPageData.usedTrackedFallback,
+                        usedTodayFallback = true
+                    )
+                }
+            }
+
+            val finalEntries = if (filterMode == TopicFilterMode.LINKS_ONLY) {
+                resultPageData.entries.filter { it.hasExternalLink }
+            } else {
+                resultPageData.entries
+            }.map { entry ->
+                entry.copy(pageNumber = safePage)
+            }
+
+            val finalPageCount = resultPageData.pageCount.coerceAtLeast(safePage)
+            Result.success(
+                resultPageData.copy(
+                    currentPage = safePage,
+                    pageCount = finalPageCount,
+                    entries = finalEntries
+                )
+            )
+        } catch (e: Throwable) {
+            Result.failure(e)
+        }
     }
 
     /**
@@ -458,8 +543,6 @@ class ChannelTopicsPagingSource(
                 eksiParser.parseChannelTopics(primaryHtml)
             }
 
-            // Eğer Türkçe karakterli kanal slug'ı (örn: #müzik, #havacılık, #ilişkiler, #sağlık)
-            // için alternatif URL gerekiyorsa otomatik dene:
             if (items.isEmpty() && channel.rawSlug != channel.slug) {
                 val altChannelUrl = eksiParser.buildChannelTopicsUrl(
                     baseDomain = baseDomain,
@@ -476,7 +559,6 @@ class ChannelTopicsPagingSource(
                 }
             }
 
-            // Kanal sayfası tamamen boş dönerse kanal etiketiyle güncel başlık araması fallback'i
             if (items.isEmpty()) {
                 val searchFallbackUrl = eksiParser.buildSearchUrl(
                     filter = SearchFilter(keywords = channel.displayName.lowercase()),
