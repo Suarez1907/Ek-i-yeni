@@ -1,0 +1,11 @@
+<resources>
+    <string name="app_name">Ekşin OLED</string>
+    <string name="tab_gundem">Gündem</string>
+    <string name="tab_debe">Debe</string>
+    <string name="tab_olaylar">Olaylar</string>
+    <string name="tab_arama">Arama</string>
+    <string name="tab_favoriler">Arşiv</string>
+    <string name="tab_ai_studio">AI Stüdyo</string>
+    <string name="cloudflare_verify_button">Cloudflare Doğrula</string>
+    <string name="eksi_login_button">Giriş Yap</string>
+</resources>

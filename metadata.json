@@ -1,0 +1,6 @@
+{
+  "name": "Ekşin OLED",
+  "description": "Hızlı, gerçek OLED siyah temalı, Cloudflare senkronizasyonlu, Paging 3 ön yüklemeli ve Gemini AI destekli modern Ekşi Sözlük istemcisi.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
