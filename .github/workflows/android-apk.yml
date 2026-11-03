@@ -2,148 +2,45 @@ name: Build Android Debug APK
 
 on:
   push:
-    branches: [ "**" ]
-  pull_request:
-    branches: [ "**" ]
+    branches: [ "main", "master" ]
   workflow_dispatch:
 
-permissions:
-  contents: read
-
 jobs:
-  build-debug-apk:
-    name: Build Android Debug APK
+  build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Set up JDK 17
+      - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: '17'
+          java-version: '21'
 
       - name: Accept Android SDK Licenses
-        run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+        run: |
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
 
-      - name: Setup Gradle 8.7
+      - name: Setup Gradle 9.3.1
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.7'
+          gradle-version: '9.3.1'
 
-      - name: Prepare debug.keystore & .env Configuration
-        env:
-          GEMINI_API_KEY_SECRET: ${{ secrets.GEMINI_API_KEY }}
+      - name: Prepare Environment
         run: |
-          if [ ! -f "local.properties" ]; then
-            echo "sdk.dir=$ANDROID_HOME" > local.properties
-          fi
-
-          if [ ! -f "debug.keystore" ]; then
-            if [ -f "debug.keystore.base64" ]; then
-              base64 -d debug.keystore.base64 > debug.keystore
-            else
-              keytool -genkeypair -v \
-                -keystore debug.keystore \
-                -storepass android \
-                -alias androiddebugkey \
-                -keypass android \
-                -keyalg RSA \
-                -keysize 2048 \
-                -validity 10000 \
-                -dname "CN=Android Debug,O=Android,C=US"
-            fi
-          fi
-
-          if [ ! -f ".env" ]; then
-            if [ -f ".env.example" ]; then
-              cp .env.example .env
-            else
-              echo "GEMINI_API_KEY=DEFAULT_API_KEY" > .env
-            fi
-          fi
-
-          if [ -n "$GEMINI_API_KEY_SECRET" ]; then
-            grep -v '^GEMINI_API_KEY=' .env > .env.tmp || true
-            echo "GEMINI_API_KEY=$GEMINI_API_KEY_SECRET" >> .env.tmp
-            mv .env.tmp .env
-          fi
-
-          # Ensure AGP 8.5.2 & Kotlin 2.0.0 compatibility with Gradle 8.7 & JDK 17
-          python3 - << 'PYEOF'
-          import pathlib, re
-
-          toml_path = pathlib.Path("gradle/libs.versions.toml")
-          if toml_path.exists():
-              t = toml_path.read_text(encoding="utf-8")
-              t = re.sub(r'agp\s*=\s*"[^"]+"', 'agp = "8.5.2"', t)
-              t = re.sub(r'kotlin\s*=\s*"[^"]+"', 'kotlin = "2.0.0"', t)
-              t = re.sub(r'googleDevtoolsKsp\s*=\s*"[^"]+"', 'googleDevtoolsKsp = "2.0.0-1.0.24"', t)
-              t = re.sub(r'coreKtx\s*=\s*"[^"]+"', 'coreKtx = "1.13.1"', t)
-              t = re.sub(r'junitVersion\s*=\s*"[^"]+"', 'junitVersion = "1.2.1"', t)
-              t = re.sub(r'espressoCore\s*=\s*"[^"]+"', 'espressoCore = "3.6.1"', t)
-              t = re.sub(r'lifecycleRuntimeKtx\s*=\s*"[^"]+"', 'lifecycleRuntimeKtx = "2.8.6"', t)
-              t = re.sub(r'lifecycleViewmodelCompose\s*=\s*"[^"]+"', 'lifecycleViewmodelCompose = "2.8.6"', t)
-              t = re.sub(r'lifecycleRuntimeCompose\s*=\s*"[^"]+"', 'lifecycleRuntimeCompose = "2.8.6"', t)
-              t = re.sub(r'activityCompose\s*=\s*"[^"]+"', 'activityCompose = "1.9.3"', t)
-              t = re.sub(r'navigationCompose\s*=\s*"[^"]+"', 'navigationCompose = "2.8.3"', t)
-              t = re.sub(r'roomRuntime\s*=\s*"[^"]+"', 'roomRuntime = "2.6.1"', t)
-              t = re.sub(r'roomKtx\s*=\s*"[^"]+"', 'roomKtx = "2.6.1"', t)
-              t = re.sub(r'roomCompiler\s*=\s*"[^"]+"', 'roomCompiler = "2.6.1"', t)
-              t = re.sub(r'datastorePreferences\s*=\s*"[^"]+"', 'datastorePreferences = "1.1.1"', t)
-              t = re.sub(r'paging\s*=\s*"[^"]+"', 'paging = "3.3.2"', t)
-              t = re.sub(r'hilt\s*=\s*"[^"]+"', 'hilt = "2.51.1"', t)
-              t = re.sub(r'robolectric\s*=\s*"[^"]+"', 'robolectric = "4.13"', t)
-              t = re.sub(r'googleServices\s*=\s*"[^"]+"', 'googleServices = "4.4.2"', t)
-              t = re.sub(r'firebaseBom\s*=\s*"[^"]+"', 'firebaseBom = "33.7.0"', t)
-              if 'kotlin-android =' not in t:
-                  t += '\nkotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }\n'
-              toml_path.write_text(t, encoding="utf-8")
-
-          root_gradle = pathlib.Path("build.gradle.kts")
-          if root_gradle.exists():
-              rg = root_gradle.read_text(encoding="utf-8")
-              if 'libs.plugins.kotlin.android' not in rg:
-                  rg = rg.replace(
-                      'alias(libs.plugins.android.application) apply false',
-                      'alias(libs.plugins.android.application) apply false\n  alias(libs.plugins.kotlin.android) apply false'
-                  )
-              root_gradle.write_text(rg, encoding="utf-8")
-
-          app_gradle = pathlib.Path("app/build.gradle.kts")
-          if app_gradle.exists():
-              ag = app_gradle.read_text(encoding="utf-8")
-              if 'libs.plugins.kotlin.android' not in ag:
-                  ag = ag.replace(
-                      'alias(libs.plugins.android.application)',
-                      'alias(libs.plugins.android.application)\n  alias(libs.plugins.kotlin.android)'
-                  )
-              ag = re.sub(r'compileSdk\s*\{[^}]*\}', 'compileSdk = 34', ag)
-              ag = re.sub(r'targetSdk\s*=\s*\d+', 'targetSdk = 34', ag)
-              if 'kotlinOptions' not in ag:
-                  ag = ag.replace(
-                      'targetCompatibility = JavaVersion.VERSION_11\n  }',
-                      'targetCompatibility = JavaVersion.VERSION_11\n  }\n  kotlinOptions {\n    jvmTarget = "11"\n  }'
-                  )
-              app_gradle.write_text(ag, encoding="utf-8")
-
-          props_path = pathlib.Path("gradle.properties")
-          if props_path.exists():
-              p = props_path.read_text(encoding="utf-8")
-              p = p.replace("org.gradle.configuration-cache=true", "org.gradle.configuration-cache=false")
-              props_path.write_text(p, encoding="utf-8")
-          PYEOF
+          touch .env
+          keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US" || true
+          cp debug.keystore app/debug.keystore || true
 
       - name: Build Debug APK with Gradle
-        run: gradle assembleDebug --no-daemon --stacktrace
+        run: gradle assembleDebug --no-daemon
 
-      - name: Upload APK Artifact
+      - name: Upload app-debug.apk as Artifact
         uses: actions/upload-artifact@v4
         with:
           name: app-debug
-          path: app/build/outputs/apk/debug/app-debug.apk
-          if-no-files-found: error
-          retention-days: 30
+          path: "**/*-debug.apk"
