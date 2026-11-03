@@ -8,13 +8,18 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
+import com.example.data.model.EksiChannel
 import com.example.data.model.EntryItem
+import com.example.data.model.PeriodicTimeRange
+import com.example.data.model.RankedTopicOrEntryItem
 import com.example.data.model.SearchFilter
 import com.example.data.model.SearchPageData
 import com.example.data.model.TopicFilterMode
 import com.example.data.model.TopicItem
 import com.example.data.model.TopicPageData
 import com.example.network.WebViewCookieJar
+import com.example.ui.theme.ActiveThemeState
+import com.example.ui.theme.AppThemeMode
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
@@ -24,16 +29,18 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * Ekşi Sözlük gerçek zamanlı HTML yanıtlarını (hem Masaüstü hem Mobil DOM) Jsoup ile ayrıştıran sınıf.
+ * Ekşi Sözlük gerçek zamanlı HTML yanıtlarını (Masaüstü ve Mobil DOM) Jsoup ile ayrıştıran sınıf.
  *
  * Özellikler:
- * 1. Sol frame (`ul.topic-list.partial li`, `ul.topic-list li`) içerisinden reklamları filtreleyerek
- *    başlık adı, URL, slug ve entry sayısını (`small`) ayrıştırır.
- * 2. "Olaylar" sekmesinde okunan başlığa tekrar tıklandığında `?a=tracked` yüzünden boş dönme hatasını yönetir.
+ * 1. Sol frame (`ul.topic-list.partial li`, `ul.topic-list li`) ve Kanallar (`/basliklar/kanal/{slug}?p={page}`)
+ *    içerisinden reklamları filtreleyerek başlık adı, URL, slug ve entry sayısını (`small`) ayrıştırır.
+ * 2. "Olaylar" sekmesinde okunan başlığa tekrar tıklandığında `?a=tracked` yüzünden boş dönme hatasını
+ *    ve "Sadece Bugün" (`?a=popular`) modunda bugün hiç entry girilmemişse tüm entry'lere fallback yapılmasını yönetir.
  * 3. Başlık sayfasındaki (`#entry-item-list li`) tüm entry'leri, yazar, tarih, düzenleme tarihi (`editDate`),
  *    fav sayısı ve toplam sayfa sayısını (`div.pager` -> `data-pagecount`) ayrıştırır.
- * 4. Entry içindeki `(bkz: ...)`, gizli bkz `*` ve harici URL'leri Compose [AnnotatedString] yapısına dönüştürür.
- * 5. Arama sonuçlarını (`/basliklar/ara?SearchForm.Keywords=...&SearchForm.SortOrder=Count&p=N`) sayfalama hatası
+ * 4. DEBE (`/debe` - dünün en beğenilen 50 entry'si) ve Dönemsel Enler (`/istatistik/...`) listelerini ayrıştırır.
+ * 5. Entry içindeki `(bkz: ...)`, gizli bkz `*` ve harici URL'leri aktif temaya duyarlı Compose [AnnotatedString] yapısına dönüştürür.
+ * 6. Arama sonuçlarını (`/basliklar/ara?SearchForm.Keywords=...&SearchForm.SortOrder=Count&p=N`) sayfalama hatası
  *    olmadan oluşturur ve ayrıştırır.
  */
 @Singleton
@@ -111,12 +118,210 @@ class EksiParser @Inject constructor() {
     }
 
     /**
+     * Kanal başlıkları URL oluşturucu:
+     * `https://eksisozluk.com/basliklar/kanal/{kanal_slug}?p={page}`
+     */
+    fun buildChannelTopicsUrl(
+        baseDomain: String = BASE_URL,
+        channel: EksiChannel,
+        page: Int,
+        useRawTurkishSlug: Boolean = false
+    ): String {
+        val safeDomain = baseDomain.ifBlank { BASE_URL }.trimEnd('/')
+        val safePage = page.coerceAtLeast(1)
+        val slugToUse = if (useRawTurkishSlug) {
+            Uri.encode(channel.rawSlug)
+        } else {
+            Uri.encode(channel.slug)
+        }
+        return "$safeDomain/basliklar/kanal/$slugToUse?p=$safePage"
+    }
+
+    /**
+     * Kanal sayfasındaki başlıkları ve entry sayılarını ayrıştırır.
+     */
+    fun parseChannelTopics(html: String): List<TopicItem> {
+        return parseLeftFrameTopics(html = html, isTrackedSection = false)
+    }
+
+    /**
+     * DEBE (`/debe` veya `/basliklar/debe`) sayfasından dünün en beğenilen 50 entry'sini ayrıştırır.
+     */
+    fun parseDebeEntriesList(html: String): List<RankedTopicOrEntryItem> {
+        if (html.isBlank()) return emptyList()
+        val doc: Document = Jsoup.parse(html, BASE_URL)
+
+        val listItems = doc.select(
+            "ul.topic-list.partial li, ul.topic-list li, #partial-index ul li, #content-body ul.topic-list li, ol.debe-list li, ul#threads li"
+        )
+
+        val result = mutableListOf<RankedTopicOrEntryItem>()
+        var rankCounter = 1
+
+        for (li in listItems) {
+            if (rankCounter > 50) break
+            if (li.hasClass("sponsored") || li.id().contains("sponsored", ignoreCase = true)) {
+                continue
+            }
+
+            val anchor = li.selectFirst("a[href]") ?: continue
+            val rawHref = anchor.attr("href").trim()
+            if (rawHref.isBlank() || rawHref.startsWith("javascript:")) continue
+
+            val caption = anchor.selectFirst("span.caption")?.text()?.trim()
+            val detailAuthor = li.selectFirst("div.detail, span.detail, a.entry-author")?.text()?.trim()
+            val smallText = (anchor.selectFirst("small") ?: li.selectFirst("small"))?.text()?.trim().orEmpty()
+
+            val title = if (!caption.isNullOrBlank()) {
+                caption
+            } else {
+                val clone = anchor.clone()
+                clone.select("small, div.detail, span.detail").remove()
+                clone.text().trim()
+            }
+            if (title.isBlank()) continue
+
+            val normalizedUrl = normalizeUrl(rawHref)
+            val entryId = if (normalizedUrl.contains("/entry/")) {
+                normalizedUrl.substringAfter("/entry/").substringBefore("?").filter { it.isDigit() }
+            } else {
+                null
+            }
+            val isDirectEntry = !entryId.isNullOrBlank() || normalizedUrl.contains("a=debe", ignoreCase = true)
+
+            result.add(
+                RankedTopicOrEntryItem(
+                    rank = rankCounter,
+                    id = entryId ?: extractTopicId(normalizedUrl).ifBlank { "debe_$rankCounter" },
+                    title = title,
+                    url = normalizedUrl,
+                    badgeText = smallText.ifBlank { "#$rankCounter DEBE" },
+                    author = detailAuthor?.takeIf { it.isNotBlank() },
+                    entryId = entryId,
+                    isDirectEntry = isDirectEntry
+                )
+            )
+            rankCounter++
+        }
+
+        return result.distinctBy { it.url }.take(50)
+    }
+
+    /**
+     * Dönemsel Enler (`/istatistik/...` veya popüler/şükela rotaları) HTML yanıtını ayrıştırır.
+     */
+    fun parsePeriodicStatsList(
+        html: String,
+        isEntriesMode: Boolean,
+        period: PeriodicTimeRange
+    ): List<RankedTopicOrEntryItem> {
+        if (html.isBlank()) return emptyList()
+        val doc: Document = Jsoup.parse(html, BASE_URL)
+
+        // 1. Önce `/istatistik/...` veya sol frame tarzı `ul.topic-list li` / `#content-body li` yapısını kontrol et
+        val listItems = doc.select(
+            "#content-body ul.topic-list li, ul.topic-list.partial li, ul.topic-list li, ol.stats-list li, #partial-index ul li"
+        )
+
+        val parsedItems = mutableListOf<RankedTopicOrEntryItem>()
+        var rank = 1
+
+        for (li in listItems) {
+            if (rank > 50) break
+            if (li.hasClass("sponsored") || li.id().contains("sponsored", ignoreCase = true)) continue
+
+            val anchor = li.selectFirst("a[href]") ?: continue
+            val rawHref = anchor.attr("href").trim()
+            if (rawHref.isBlank() || rawHref.startsWith("javascript:")) continue
+
+            val smallText = (anchor.selectFirst("small") ?: li.selectFirst("small"))?.text()?.trim().orEmpty()
+            val detailText = li.selectFirst("div.detail, span.detail, span.author")?.text()?.trim()
+
+            val caption = anchor.selectFirst("span.caption")?.text()?.trim()
+            val title = if (!caption.isNullOrBlank()) {
+                caption
+            } else {
+                val clone = anchor.clone()
+                clone.select("small, div.detail, span.detail").remove()
+                clone.text().trim()
+            }
+            if (title.isBlank()) continue
+
+            val normalizedUrl = normalizeUrl(rawHref)
+            val entryId = if (normalizedUrl.contains("/entry/")) {
+                normalizedUrl.substringAfter("/entry/").substringBefore("?").filter { it.isDigit() }
+            } else {
+                null
+            }
+
+            val finalUrl = if (isEntriesMode && entryId == null && !normalizedUrl.contains("a=")) {
+                val sep = if (normalizedUrl.contains("?")) "&" else "?"
+                val param = if (period == PeriodicTimeRange.YESTERDAY) "a=dailynice" else "a=nice"
+                "$normalizedUrl$sep$param"
+            } else {
+                normalizedUrl
+            }
+
+            val badge = when {
+                smallText.isNotBlank() -> if (isEntriesMode) "★ $smallText" else "$smallText entry"
+                isEntriesMode -> "★ En Beğenilen"
+                else -> "Popüler"
+            }
+
+            parsedItems.add(
+                RankedTopicOrEntryItem(
+                    rank = rank,
+                    id = entryId ?: extractTopicId(normalizedUrl).ifBlank { "stat_${period.name}_$rank" },
+                    title = title,
+                    url = finalUrl,
+                    badgeText = badge,
+                    author = detailText?.takeIf { it.isNotBlank() },
+                    entryId = entryId,
+                    isDirectEntry = isEntriesMode
+                )
+            )
+            rank++
+        }
+
+        if (parsedItems.isNotEmpty()) {
+            return parsedItems.distinctBy { it.url }.take(50)
+        }
+
+        // 2. Eğer sayfa doğrudan `#entry-item-list li` içeriyorsa entry'lerden liste oluştur
+        val topicPage = parseTopicPage(html = html, requestedUrl = BASE_URL, fallbackPage = 1)
+        return topicPage.entries.mapIndexed { idx, entry ->
+            RankedTopicOrEntryItem(
+                rank = idx + 1,
+                id = entry.id,
+                title = entry.topicTitle,
+                url = "$BASE_URL/entry/${entry.id}",
+                badgeText = "★ ${entry.favoriteCount}",
+                author = entry.author,
+                entryId = entry.id,
+                snippet = entry.plainText.take(140),
+                isDirectEntry = true
+            )
+        }
+    }
+
+    /**
      * 2. "Olaylar" sekmesinde (`?a=tracked` veya `snapshot=`) başlık okunduktan sonra tekrar açıldığında
      * boş gelme hatasını önlemek için URL yönetimi.
      */
     fun containsTrackedParam(url: String): Boolean {
         return url.contains("a=tracked", ignoreCase = true) ||
             url.contains("snapshot=", ignoreCase = true)
+    }
+
+    fun containsTodayPopularParam(url: String): Boolean {
+        return url.contains("a=popular", ignoreCase = true) ||
+            url.contains("a=today", ignoreCase = true) ||
+            url.contains("day=", ignoreCase = true)
+    }
+
+    fun isDirectSingleEntryUrl(url: String): Boolean {
+        val clean = url.substringBefore('?')
+        return clean.contains("/entry/")
     }
 
     fun stripTrackedParameters(url: String): String {
@@ -134,8 +339,14 @@ class EksiParser @Inject constructor() {
         val normalized = normalizeUrl(baseOrRawUrl)
         val cleanPathUrl = normalized.substringBefore('?')
 
+        // Eğer DEBE veya doğrudan tekil `/entry/{id}` linkine tıklandıysa ve ilk sayfadaysak:
+        if (page == 1 && isDirectSingleEntryUrl(cleanPathUrl) && !forceStripTracked) {
+            return cleanPathUrl
+        }
+
+        // Olaylar sekmesinden gelen `?a=tracked` URL'si 1. sayfada korunur (boş dönerse fallback yapılır)
         if (page == 1 &&
-            filterMode == TopicFilterMode.ALL &&
+            (filterMode == TopicFilterMode.ALL || filterMode == TopicFilterMode.TODAY_POPULAR) &&
             searchKeywordInTopic.isBlank() &&
             !forceStripTracked &&
             containsTrackedParam(normalized)
@@ -146,9 +357,14 @@ class EksiParser @Inject constructor() {
         val uriBuilder = Uri.parse(cleanPathUrl).buildUpon()
 
         when (filterMode) {
+            TopicFilterMode.TODAY_POPULAR -> {
+                if (!forceStripTracked) {
+                    uriBuilder.appendQueryParameter("a", "popular")
+                }
+            }
             TopicFilterMode.ALL,
             TopicFilterMode.LINKS_ONLY -> {
-                // Ekstra `a=` parametresi yok
+                // Ekstra `a=` parametresi yok (1. sayfadan itibaren tüm entry'ler)
             }
             TopicFilterMode.SUKELA_ALL -> {
                 uriBuilder.appendQueryParameter("a", "nice")
@@ -180,7 +396,8 @@ class EksiParser @Inject constructor() {
         html: String,
         requestedUrl: String,
         fallbackPage: Int = 1,
-        usedTrackedFallback: Boolean = false
+        usedTrackedFallback: Boolean = false,
+        usedTodayFallback: Boolean = false
     ): TopicPageData {
         val doc: Document = Jsoup.parse(html, BASE_URL)
 
@@ -249,6 +466,9 @@ class EksiParser @Inject constructor() {
             else -> rawEntries
         }
 
+        val isSingleEntry = isDirectSingleEntryUrl(requestedUrl) ||
+            lowerReqUrl.contains("a=debe")
+
         return TopicPageData(
             topicId = topicId,
             topicTitle = topicTitle,
@@ -257,7 +477,9 @@ class EksiParser @Inject constructor() {
             currentPage = currentPage,
             pageCount = pageCount,
             entries = entries,
-            usedTrackedFallback = usedTrackedFallback
+            usedTrackedFallback = usedTrackedFallback,
+            usedTodayFallback = usedTodayFallback,
+            isSingleEntryView = isSingleEntry
         )
     }
 
@@ -402,12 +624,16 @@ class EksiParser @Inject constructor() {
             " [✨ bkz]"
         }
 
+        val isLight = ActiveThemeState.currentMode == AppThemeMode.CLASSIC_LIGHT
+        val bkzColor = if (isLight) Color(0xFF2E7D32) else COLOR_BKZ_GREEN
+        val bkzBg = if (isLight) Color(0xFFE8F5E9) else Color(0xFF112415)
+
         val start = builder.length
         builder.pushStringAnnotation(tag = TAG_HIDDEN_BKZ, annotation = targetQuery)
         builder.pushStyle(
             SpanStyle(
-                color = COLOR_BKZ_GREEN,
-                background = Color(0xFF112415),
+                color = bkzColor,
+                background = bkzBg,
                 fontWeight = FontWeight.SemiBold,
                 fontStyle = FontStyle.Normal
             )
@@ -445,12 +671,16 @@ class EksiParser @Inject constructor() {
             href.contains("/?q=", ignoreCase = true) ||
             href.startsWith("/entry/", ignoreCase = true)
 
+        val isLight = ActiveThemeState.currentMode == AppThemeMode.CLASSIC_LIGHT
+        val bkzColor = if (isLight) Color(0xFF2E7D32) else COLOR_BKZ_GREEN
+        val extColor = if (isLight) Color(0xFF1565C0) else COLOR_EXTERNAL_LINK
+
         if (isInternalBkz) {
             val targetQuery = extractBkzQueryFromAnchor(anchor)
             builder.pushStringAnnotation(tag = TAG_BKZ, annotation = targetQuery)
             builder.pushStyle(
                 SpanStyle(
-                    color = COLOR_BKZ_GREEN,
+                    color = bkzColor,
                     fontWeight = FontWeight.SemiBold,
                     textDecoration = TextDecoration.None
                 )
@@ -463,7 +693,7 @@ class EksiParser @Inject constructor() {
             builder.pushStringAnnotation(tag = TAG_EXTERNAL_URL, annotation = fullExternalUrl)
             builder.pushStyle(
                 SpanStyle(
-                    color = COLOR_EXTERNAL_LINK,
+                    color = extColor,
                     textDecoration = TextDecoration.Underline,
                     fontWeight = FontWeight.Medium
                 )

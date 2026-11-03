@@ -28,12 +28,17 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -62,17 +67,19 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import com.example.ui.theme.ActiveThemeState
+import com.example.ui.theme.AppThemeMode
 import com.example.ui.theme.EksiNeonGreen
 import com.example.ui.theme.OledCardSurface
 import com.example.ui.theme.OledHairlineDivider
+import com.example.ui.theme.OledOnAccentColor
 import com.example.ui.theme.OledPillGreenBg
 import com.example.ui.theme.OledPitchBlack
 import com.example.ui.theme.OledTextPrimary
 import com.example.ui.theme.OledTextSecondary
 
 /**
- * Gerçek OLED siyah (#000000) zemin üzerinde parlayan koyu gri / hafif zümrüt yansımalı
- * Skeleton Shimmer fırçası (Kural 6).
+ * Aktif temaya (OLED Siyah, Koyu Gri, Klasik Beyaz) duyarlı Skeleton Shimmer fırçası.
  */
 @Composable
 fun rememberOledShimmerBrush(): Brush {
@@ -87,13 +94,29 @@ fun rememberOledShimmerBrush(): Brush {
         label = "shimmer_translate"
     )
 
-    val shimmerColors = listOf(
-        Color(0xFF0E0E0E),
-        Color(0xFF1A221B),
-        Color(0xFF243026),
-        Color(0xFF1A221B),
-        Color(0xFF0E0E0E)
-    )
+    val shimmerColors = when (ActiveThemeState.currentMode) {
+        AppThemeMode.OLED_BLACK -> listOf(
+            Color(0xFF0E0E0E),
+            Color(0xFF1A221B),
+            Color(0xFF243026),
+            Color(0xFF1A221B),
+            Color(0xFF0E0E0E)
+        )
+        AppThemeMode.DARK_GRAY -> listOf(
+            Color(0xFF1A1A1A),
+            Color(0xFF263027),
+            Color(0xFF324034),
+            Color(0xFF263027),
+            Color(0xFF1A1A1A)
+        )
+        AppThemeMode.CLASSIC_LIGHT -> listOf(
+            Color(0xFFECEFEC),
+            Color(0xFFDCE7DD),
+            Color(0xFFCDE0CF),
+            Color(0xFFDCE7DD),
+            Color(0xFFECEFEC)
+        )
+    }
 
     return Brush.linearGradient(
         colors = shimmerColors,
@@ -103,9 +126,9 @@ fun rememberOledShimmerBrush(): Brush {
 }
 
 /**
- * Sol Frame (Gündem / Bugün / DEBE / Olaylar / Arama) başlık listesi yüklenirken
+ * Sol Frame (Gündem / Bugün / Kanallar / DEBE / Olaylar / Arama) başlık listesi yüklenirken
  * dönen çember (spinner) yerine gerçek başlık ve hap (pill badge) boyutlarında gösterilen
- * Skeleton Shimmer yükleme animasyonu (Kural 6).
+ * Skeleton Shimmer yükleme animasyonu.
  */
 @Composable
 fun TopicListSkeletonShimmer(
@@ -120,7 +143,7 @@ fun TopicListSkeletonShimmer(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .background(OledPitchBlack)
+            .background(MaterialTheme.colorScheme.background)
             .testTag("topic_skeleton_shimmer")
     ) {
         repeat(itemCount) { idx ->
@@ -169,7 +192,7 @@ fun TopicListSkeletonShimmer(
 
 /**
  * Başlık içi entry listesi veya (bkz:) alt penceresi yüklenirken gerçek entry boyutlarında
- * gösterilen Skeleton Shimmer yükleme animasyonu (Kural 6).
+ * gösterilen Skeleton Shimmer yükleme animasyonu.
  */
 @Composable
 fun EntryListSkeletonShimmer(
@@ -181,7 +204,7 @@ fun EntryListSkeletonShimmer(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .background(OledPitchBlack)
+            .background(MaterialTheme.colorScheme.background)
             .padding(horizontal = 12.dp, vertical = 8.dp)
             .testTag("entry_skeleton_shimmer"),
         verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -189,7 +212,7 @@ fun EntryListSkeletonShimmer(
         repeat(cardCount) { idx ->
             Card(
                 shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(containerColor = OledCardSurface),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
                 modifier = Modifier
                     .fillMaxWidth()
                     .border(0.5.dp, OledHairlineDivider, RoundedCornerShape(16.dp))
@@ -198,7 +221,6 @@ fun EntryListSkeletonShimmer(
                     modifier = Modifier.padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    // Entry metin satırları iskeleti
                     Box(
                         modifier = Modifier
                             .fillMaxWidth(0.95f)
@@ -224,7 +246,6 @@ fun EntryListSkeletonShimmer(
                     Spacer(modifier = Modifier.height(6.dp))
                     HorizontalDivider(color = OledHairlineDivider, thickness = 0.5.dp)
 
-                    // Alt bar iskeleti: Sol şükela/fav, sağ mini avatar + yazar + tarih
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -318,15 +339,7 @@ fun AuthorMiniAvatar(
 }
 
 /**
- * Kural 4: Başparmak Hizasında Yüzen Sayfalama Çubuğu (Floating Pager Bar).
- *
- * Yarı saydam buzlu cam (backdrop-blur / frosted dark glass) efektli yüzen kapsül içinde:
- * - "İlk (1)"
- * - "< Önceki"
- * - Ortada tıklanınca doğrudan sayfa seçtiren "Sayfa X / Y"
- * - "Sonraki >"
- * - "Son (Y)"
- * butonları yer alır.
+ * Başparmak Hizasında Yüzen Sayfalama Çubuğu (Floating Pager Bar).
  */
 @Composable
 fun FloatingPagerCapsuleBar(
@@ -351,19 +364,29 @@ fun FloatingPagerCapsuleBar(
         )
     }
 
-    val frostedGlassBrush = Brush.verticalGradient(
-        colors = listOf(
-            Color(0xEB131915),
-            Color(0xF20A0E0B)
+    val isLight = ActiveThemeState.currentMode == AppThemeMode.CLASSIC_LIGHT
+    val frostedGlassBrush = if (isLight) {
+        Brush.verticalGradient(
+            colors = listOf(
+                Color(0xF5FFFFFF),
+                Color(0xF5F2F6F2)
+            )
         )
-    )
+    } else {
+        Brush.verticalGradient(
+            colors = listOf(
+                Color(0xEB131915),
+                Color(0xF20A0E0B)
+            )
+        )
+    }
 
     Box(
         modifier = modifier
             .shadow(
                 elevation = 16.dp,
                 shape = RoundedCornerShape(50),
-                ambientColor = Color.Black,
+                ambientColor = Color.Black.copy(alpha = if (isLight) 0.15f else 0.9f),
                 spotColor = EksiNeonGreen.copy(alpha = 0.25f)
             )
             .clip(RoundedCornerShape(50))
@@ -372,9 +395,9 @@ fun FloatingPagerCapsuleBar(
                 width = 0.8.dp,
                 brush = Brush.horizontalGradient(
                     colors = listOf(
-                        Color(0xFF233827),
+                        OledHairlineDivider,
                         EksiNeonGreen.copy(alpha = 0.45f),
-                        Color(0xFF233827)
+                        OledHairlineDivider
                     )
                 ),
                 shape = RoundedCornerShape(50)
@@ -386,7 +409,6 @@ fun FloatingPagerCapsuleBar(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
-            // 1. "İlk (1)"
             PagerCapsuleButton(
                 label = "İlk (1)",
                 enabled = safeCurrent > 1,
@@ -394,7 +416,6 @@ fun FloatingPagerCapsuleBar(
                 testTag = "pager_first_button"
             )
 
-            // 2. "< Önceki"
             PagerCapsuleButton(
                 label = "< Önceki",
                 enabled = safeCurrent > 1,
@@ -402,7 +423,6 @@ fun FloatingPagerCapsuleBar(
                 testTag = "pager_prev_button"
             )
 
-            // 3. Ortada Tıklanınca Sayfa Seçtiren "Sayfa X / Y"
             Surface(
                 color = OledPillGreenBg,
                 shape = RoundedCornerShape(50),
@@ -421,7 +441,6 @@ fun FloatingPagerCapsuleBar(
                 )
             }
 
-            // 4. "Sonraki >"
             PagerCapsuleButton(
                 label = "Sonraki >",
                 enabled = safeCurrent < safeTotal,
@@ -429,7 +448,6 @@ fun FloatingPagerCapsuleBar(
                 testTag = "pager_next_button"
             )
 
-            // 5. "Son (Y)"
             PagerCapsuleButton(
                 label = "Son ($safeTotal)",
                 enabled = safeCurrent < safeTotal,
@@ -447,7 +465,7 @@ private fun PagerCapsuleButton(
     onClick: () -> Unit,
     testTag: String
 ) {
-    val textColor = if (enabled) OledTextPrimary else Color(0xFF4F4F4F)
+    val textColor = if (enabled) OledTextPrimary else OledTextSecondary.copy(alpha = 0.4f)
     Box(
         modifier = Modifier
             .clip(RoundedCornerShape(50))
@@ -478,15 +496,15 @@ private fun PagePickerDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        containerColor = Color(0xFF101210),
-        titleContentColor = OledTextPrimary,
-        textContentColor = OledTextSecondary,
+        containerColor = MaterialTheme.colorScheme.surfaceVariant,
+        titleContentColor = MaterialTheme.colorScheme.onSurface,
+        textContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
         title = {
             Text(
                 text = "Sayfaya Git (1 - $totalPages)",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold,
-                color = OledTextPrimary
+                color = MaterialTheme.colorScheme.onSurface
             )
         },
         text = {
@@ -515,11 +533,11 @@ private fun PagePickerDialog(
                     ),
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedBorderColor = EksiNeonGreen,
-                        unfocusedBorderColor = Color(0xFF2B2B2B),
-                        focusedContainerColor = OledPitchBlack,
-                        unfocusedContainerColor = OledPitchBlack,
-                        focusedTextColor = OledTextPrimary,
-                        unfocusedTextColor = OledTextPrimary
+                        unfocusedBorderColor = OledHairlineDivider,
+                        focusedContainerColor = MaterialTheme.colorScheme.background,
+                        unfocusedContainerColor = MaterialTheme.colorScheme.background,
+                        focusedTextColor = MaterialTheme.colorScheme.onBackground,
+                        unfocusedTextColor = MaterialTheme.colorScheme.onBackground
                     ),
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -556,7 +574,7 @@ private fun PagePickerDialog(
                         ) {
                             Text(
                                 text = "S. $p",
-                                color = if (isCurrent) Color.Black else EksiNeonGreen,
+                                color = if (isCurrent) OledOnAccentColor else EksiNeonGreen,
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.Bold,
                                 textAlign = TextAlign.Center,
@@ -575,7 +593,7 @@ private fun PagePickerDialog(
                 },
                 colors = ButtonDefaults.buttonColors(
                     containerColor = EksiNeonGreen,
-                    contentColor = Color.Black
+                    contentColor = OledOnAccentColor
                 ),
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
             ) {
@@ -585,6 +603,134 @@ private fun PagePickerDialog(
         dismissButton = {
             TextButton(onClick = onDismiss) {
                 Text("İptal", color = OledTextSecondary)
+            }
+        }
+    )
+}
+
+/**
+ * 4. ARAYÜZ RENK / TEMA SEÇENEĞİ (BEYAZ, KOYU GRİ, OLED SİYAH) Diyalog Penceresi.
+ */
+@Composable
+fun ThemeSelectorDialog(
+    currentTheme: AppThemeMode,
+    onSelectTheme: (AppThemeMode) -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = MaterialTheme.colorScheme.surfaceVariant,
+        titleContentColor = MaterialTheme.colorScheme.onSurface,
+        textContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+        title = {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Palette,
+                    contentDescription = null,
+                    tint = EksiNeonGreen
+                )
+                Text(
+                    text = "Arayüz Teması Seçin",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                AppThemeMode.entries.forEach { mode ->
+                    val isSelected = currentTheme == mode
+                    Card(
+                        shape = RoundedCornerShape(14.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.background
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(14.dp))
+                            .clickable { onSelectTheme(mode) }
+                            .border(
+                                width = if (isSelected) 1.5.dp else 0.6.dp,
+                                color = if (isSelected) EksiNeonGreen else OledHairlineDivider,
+                                shape = RoundedCornerShape(14.dp)
+                            )
+                            .testTag("theme_option_${mode.storageKey}")
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                // Canlı renk paleti önizleme kutusu
+                                Box(
+                                    modifier = Modifier
+                                        .size(36.dp)
+                                        .clip(CircleShape)
+                                        .background(mode.previewBgHex)
+                                        .border(1.dp, mode.previewAccentHex, CircleShape),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(14.dp)
+                                            .clip(CircleShape)
+                                            .background(mode.previewAccentHex)
+                                    )
+                                }
+
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = mode.title,
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onBackground
+                                    )
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    Text(
+                                        text = mode.subtitle,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontSize = 11.sp,
+                                        color = OledTextSecondary
+                                    )
+                                }
+                            }
+
+                            Icon(
+                                imageVector = if (isSelected) {
+                                    Icons.Default.CheckCircle
+                                } else {
+                                    Icons.Default.RadioButtonUnchecked
+                                },
+                                contentDescription = null,
+                                tint = if (isSelected) EksiNeonGreen else OledTextSecondary,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text(
+                    text = "Kapat",
+                    color = EksiNeonGreen,
+                    fontWeight = FontWeight.Bold
+                )
             }
         }
     )

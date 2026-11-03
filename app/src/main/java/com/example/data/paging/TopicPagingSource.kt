@@ -9,11 +9,16 @@ import com.example.data.model.TopicPageData
 import com.example.data.remote.EksiParser
 import com.example.network.WebViewFetchBridge
 
-// Bir başlığın sayfalarını Paging 3 ile çeken, kullanıcı mevcut sayfayı okurken bir sonraki
-// sayfayı (?p=N+1) arka planda önceden indiren (prefetchDistance optimize edilmiş) yapı.
-// Tüm HTML veri çekme işlemleri OkHttp yerine WebViewFetchBridge (görünmez singleton WebView
-// içinde fetch(..., { headers: { 'X-Requested-With': 'XMLHttpRequest', 'Accept': 'text/html, */*; q=0.01' }, credentials: 'include' })
-// ve loadUrl -> document.documentElement.outerHTML fallback) üzerinden gerçekleştirilir.
+/**
+ * Bir başlığın sayfalarını Paging 3 ile çeken, kullanıcı mevcut sayfayı okurken bir sonraki
+ * sayfayı (`?p=N+1`) arka planda önceden indiren (`prefetchDistance` optimize edilmiş) yapı.
+ *
+ * Özellikler:
+ * 1. Başlık varsayılan olarak [TopicFilterMode.TODAY_POPULAR] (`?a=popular` - Sadece Bugün) ile açıldığında,
+ *    eğer bugün hiç entry girilmemişse otomatik olarak tüm entry'lere (`TopicFilterMode.ALL`) fallback yapar.
+ * 2. "Olaylar" (`?a=tracked`) sekmesinde okunan bir başlığa tekrar tıklandığında boş dönerse
+ *    otomatik olarak parametresiz ana başlık URL'sine fallback yapar.
+ */
 class TopicPagingSource(
     private val initialTopicUrl: String,
     private val filterMode: TopicFilterMode = TopicFilterMode.ALL,
@@ -36,6 +41,12 @@ class TopicPagingSource(
     @Volatile
     private var trackedFallbackTriggered: Boolean = false
 
+    /**
+     * Eğer `?a=popular` ("Sadece Bugün") isteği boş döndüğü için tüm entry'lere fallback yapıldıysa `true` olur.
+     */
+    @Volatile
+    private var todayFallbackTriggered: Boolean = false
+
     override fun getRefreshKey(state: PagingState<Int, EntryItem>): Int? {
         return state.anchorPosition?.let { anchorPosition ->
             val anchorPage = state.closestPageToPosition(anchorPosition)
@@ -47,14 +58,15 @@ class TopicPagingSource(
         val page = params.key ?: initialPage.coerceAtLeast(1)
 
         return try {
-            val pageData = fetchPageWithTrackedFallback(page)
+            val pageData = fetchPageWithFallbacks(page)
 
-            // Kanonik URL'yi sonraki sayfaların (?p=N+1) arka plan ön yüklemesi (prefetch) için sakla
-            if (pageData.cleanTopicUrl.isNotBlank()) {
+            // Kanonik URL'yi sonraki sayfaların (?p=N+1) arka plan ön yüklemesi (prefetch) ve
+            // "Tümünü Göster" butonu için sakla
+            if (pageData.cleanTopicUrl.isNotBlank() && !eksiParser.isDirectSingleEntryUrl(pageData.cleanTopicUrl)) {
                 resolvedCleanTopicUrl = pageData.cleanTopicUrl
             }
 
-            if (page == initialPage || pageData.usedTrackedFallback) {
+            if (page == initialPage || pageData.usedTrackedFallback || pageData.usedTodayFallback) {
                 onTopicPageLoaded(pageData)
             }
 
@@ -84,15 +96,21 @@ class TopicPagingSource(
 
     /**
      * İlgili sayfayı [WebViewFetchBridge] üzerinden indirir ve ayrıştırır.
-     * Eğer URL'de `?a=tracked` varsa ve yanıt boş entry listesi döndürdüyse,
-     * otomatik olarak parametresiz ana başlık URL'sine fallback yapar.
+     * - Olaylar (`?a=tracked`) boş dönerse parametresiz ana başlığa fallback yapar.
+     * - Sadece Bugün (`?a=popular`) boş dönerse 1. sayfadan itibaren tüm entry'lere fallback yapar.
      */
-    private suspend fun fetchPageWithTrackedFallback(page: Int): TopicPageData {
+    private suspend fun fetchPageWithFallbacks(page: Int): TopicPageData {
         val baseForRequest = resolvedCleanTopicUrl ?: initialTopicUrl
+        val effectiveFilterMode = if (todayFallbackTriggered && filterMode == TopicFilterMode.TODAY_POPULAR) {
+            TopicFilterMode.ALL
+        } else {
+            filterMode
+        }
+
         val targetUrl = eksiParser.buildTopicPageUrl(
             baseOrRawUrl = baseForRequest,
             page = page,
-            filterMode = filterMode,
+            filterMode = effectiveFilterMode,
             searchKeywordInTopic = inTopicSearchKeyword,
             forceStripTracked = trackedFallbackTriggered || (page > 1)
         )
@@ -105,16 +123,17 @@ class TopicPagingSource(
             html = primaryHtml,
             requestedUrl = targetUrl,
             fallbackPage = page,
-            usedTrackedFallback = trackedFallbackTriggered
+            usedTrackedFallback = trackedFallbackTriggered,
+            usedTodayFallback = todayFallbackTriggered
         )
 
-        // Olaylar (?a=tracked) sekmesinde okunan başlığa tekrar tıklandığında boş gelme hatası kontrolü
+        // 1. Olaylar (?a=tracked) sekmesinde okunan başlığa tekrar tıklandığında boş gelme hatası kontrolü
         if (primaryData.entries.isEmpty() && eksiParser.containsTrackedParam(targetUrl)) {
             trackedFallbackTriggered = true
             val cleanFallbackUrl = eksiParser.buildTopicPageUrl(
                 baseOrRawUrl = eksiParser.stripTrackedParameters(initialTopicUrl),
                 page = page,
-                filterMode = filterMode,
+                filterMode = TopicFilterMode.ALL,
                 searchKeywordInTopic = inTopicSearchKeyword,
                 forceStripTracked = true
             )
@@ -126,7 +145,33 @@ class TopicPagingSource(
                 html = fallbackHtml,
                 requestedUrl = cleanFallbackUrl,
                 fallbackPage = page,
-                usedTrackedFallback = true
+                usedTrackedFallback = true,
+                usedTodayFallback = todayFallbackTriggered
+            )
+        }
+
+        // 2. "Sadece Bugün" (?a=popular) modunda bugün hiç entry girilmemişse otomatik tüm entry'lere fallback
+        if (primaryData.entries.isEmpty() &&
+            (effectiveFilterMode == TopicFilterMode.TODAY_POPULAR || eksiParser.containsTodayPopularParam(targetUrl))
+        ) {
+            todayFallbackTriggered = true
+            val allEntriesFallbackUrl = eksiParser.buildTopicPageUrl(
+                baseOrRawUrl = eksiParser.stripTrackedParameters(baseForRequest),
+                page = page,
+                filterMode = TopicFilterMode.ALL,
+                searchKeywordInTopic = inTopicSearchKeyword,
+                forceStripTracked = true
+            )
+            val fallbackHtml = webViewFetchBridge.fetchHtml(
+                rawUrl = allEntriesFallbackUrl,
+                isAjax = false
+            )
+            return eksiParser.parseTopicPage(
+                html = fallbackHtml,
+                requestedUrl = allEntriesFallbackUrl,
+                fallbackPage = page,
+                usedTrackedFallback = trackedFallbackTriggered,
+                usedTodayFallback = true
             )
         }
 

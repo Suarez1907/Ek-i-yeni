@@ -9,8 +9,12 @@ import com.example.data.local.BookmarkedEntryEntity
 import com.example.data.local.EksinDao
 import com.example.data.local.ReadStateDao
 import com.example.data.local.TopicReadStateEntity
+import com.example.data.model.EksiChannel
 import com.example.data.model.EntryItem
 import com.example.data.model.LeftFrameSection
+import com.example.data.model.PeriodicRankingTab
+import com.example.data.model.PeriodicTimeRange
+import com.example.data.model.RankedTopicOrEntryItem
 import com.example.data.model.SearchFilter
 import com.example.data.model.TopicFilterMode
 import com.example.data.model.TopicItem
@@ -25,13 +29,14 @@ import kotlinx.coroutines.withContext
 import javax.inject.Inject
 import javax.inject.Singleton
 
-// Ekşin OLED veri katmanı:
-// - Tüm HTML veri çekme işlemlerini OkHttp yerine WebViewFetchBridge (singleton görünmez WebView
-//   içinde fetch(url, { headers: { 'X-Requested-With': 'XMLHttpRequest', 'Accept': 'text/html, */*; q=0.01' }, credentials: 'include' })
-//   ve loadUrl -> document.documentElement.outerHTML fallback) üzerinden gerçekleştirir.
-// - Başlığa girildiğinde en son okunan entryId, pageNumber, scrollIndex ve scrollOffset
-//   değerlerini ReadStateDao üzerinden Room veritabanına kaydeder ve başlığa tekrar girildiğinde
-//   doğrudan kalınan sayfadan ve entry'den devam edilmesini sağlar.
+/**
+ * Ekşin OLED veri katmanı:
+ * - Tüm HTML veri çekme işlemlerini [WebViewFetchBridge] üzerinden gerçekleştirir.
+ * - Sol Frame (Gündem, Bugün, Debe, Olaylar), Kanallar (`/basliklar/kanal/{kanal_slug}?p={page}`),
+ *   DEBE 50 (`/debe`) ve Dönemsel Enler (`/istatistik/...`) rotalarını ayrıştırır.
+ * - Başlığa girildiğinde en son okunan `entryId`, `pageNumber`, `scrollIndex` ve `scrollOffset`
+ *   değerlerini [ReadStateDao] üzerinden Room veritabanına kaydeder.
+ */
 @Singleton
 class EksiRepository @Inject constructor(
     private val webViewFetchBridge: WebViewFetchBridge,
@@ -166,6 +171,115 @@ class EksiRepository @Inject constructor(
     }
 
     /**
+     * 1. KANALLAR SEKMESİ:
+     * Seçilen kanalın (`#spor`, `#teknoloji`, `#siyaset` vb.) güncel başlıklarını
+     * `https://eksisozluk.com/basliklar/kanal/{kanal_slug}?p={page}` rotasından Paging 3 ile çeker.
+     */
+    fun getChannelTopicsPager(channel: EksiChannel): Flow<PagingData<TopicItem>> {
+        return Pager(
+            config = PagingConfig(
+                pageSize = 25,
+                prefetchDistance = 20,
+                initialLoadSize = 25,
+                enablePlaceholders = false
+            ),
+            pagingSourceFactory = {
+                ChannelTopicsPagingSource(
+                    channel = channel,
+                    webViewFetchBridge = webViewFetchBridge,
+                    eksiParser = eksiParser
+                )
+            }
+        ).flow
+    }
+
+    /**
+     * 3a. GELİŞMİŞ DEBE:
+     * `/debe` ve `/basliklar/debe` adreslerinden dünün en beğenilen 50 entry'sini çeker.
+     */
+    suspend fun fetchDebeItems(): Result<List<RankedTopicOrEntryItem>> = withContext(Dispatchers.IO) {
+        try {
+            val baseDomain = webViewFetchBridge.getActiveBaseDomain().ifBlank {
+                WebViewCookieJar.DEFAULT_BASE_URL
+            }
+            val primaryUrl = "$baseDomain/debe?_=${System.currentTimeMillis()}"
+            val primaryHtml = webViewFetchBridge.fetchHtml(rawUrl = primaryUrl, isAjax = true)
+            val parsedPrimary = withContext(Dispatchers.Default) {
+                eksiParser.parseDebeEntriesList(primaryHtml)
+            }
+            if (parsedPrimary.isNotEmpty()) {
+                return@withContext Result.success(parsedPrimary)
+            }
+
+            val fallbackUrl = "$baseDomain/basliklar/debe?_=${System.currentTimeMillis()}"
+            val fallbackHtml = webViewFetchBridge.fetchHtml(rawUrl = fallbackUrl, isAjax = true)
+            val parsedFallback = withContext(Dispatchers.Default) {
+                eksiParser.parseDebeEntriesList(fallbackHtml)
+            }
+            Result.success(parsedFallback)
+        } catch (e: Throwable) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * 3b. DÖNEMSEL ENLER (Önceki Gün / Önceki Hafta / Önceki Ay):
+     * Kullanıcının seçimine göre "En Beğenilen Entry'ler" veya "En Popüler Konular (Başlıklar)"
+     * listesini `/istatistik/...` rotalarından veya ilgili popüler/şükela filtrelerinden çeker.
+     */
+    suspend fun fetchPeriodicBestItems(
+        period: PeriodicTimeRange,
+        rankingTab: PeriodicRankingTab
+    ): Result<List<RankedTopicOrEntryItem>> = withContext(Dispatchers.IO) {
+        try {
+            val baseDomain = webViewFetchBridge.getActiveBaseDomain().ifBlank {
+                WebViewCookieJar.DEFAULT_BASE_URL
+            }
+            val isEntriesMode = (rankingTab == PeriodicRankingTab.TOP_ENTRIES)
+            val statsPath = if (isEntriesMode) period.entriesStatsPath else period.topicsStatsPath
+            val statsUrl = "$baseDomain$statsPath?_=${System.currentTimeMillis()}"
+
+            val statsHtml = webViewFetchBridge.fetchHtml(rawUrl = statsUrl, isAjax = true)
+            val parsedStats = withContext(Dispatchers.Default) {
+                eksiParser.parsePeriodicStatsList(
+                    html = statsHtml,
+                    isEntriesMode = isEntriesMode,
+                    period = period
+                )
+            }
+            if (parsedStats.isNotEmpty()) {
+                return@withContext Result.success(parsedStats)
+            }
+
+            // Eğer `/istatistik/...` misafir oturumunda boş dönerse, döneme uygun gerçek DEBE / Gündem
+            // popüler rotalarından ayrıştır:
+            val fallbackUrl = when {
+                isEntriesMode && period == PeriodicTimeRange.YESTERDAY ->
+                    "$baseDomain/debe?_=${System.currentTimeMillis()}"
+                isEntriesMode ->
+                    "$baseDomain/basliklar/gundem?p=${period.fallbackPage}&_=${System.currentTimeMillis()}"
+                else ->
+                    "$baseDomain/basliklar/gundem?p=${period.fallbackPage}&_=${System.currentTimeMillis()}"
+            }
+            val fallbackHtml = webViewFetchBridge.fetchHtml(rawUrl = fallbackUrl, isAjax = true)
+            val parsedFallback = withContext(Dispatchers.Default) {
+                if (isEntriesMode && period == PeriodicTimeRange.YESTERDAY) {
+                    eksiParser.parseDebeEntriesList(fallbackHtml)
+                } else {
+                    eksiParser.parsePeriodicStatsList(
+                        html = fallbackHtml,
+                        isEntriesMode = isEntriesMode,
+                        period = period
+                    )
+                }
+            }
+            Result.success(parsedFallback)
+        } catch (e: Throwable) {
+            Result.failure(e)
+        }
+    }
+
+    /**
      * Arama sonuçlarını (`/basliklar/ara?SearchForm.Keywords=...&SearchForm.SortOrder=Count&p=N`)
      * [WebViewFetchBridge] ve Paging 3 ile sayfalama hatası olmadan çeker.
      */
@@ -293,6 +407,91 @@ class LeftFramePagingSource(
 
             val canPaginate = (section == LeftFrameSection.GUNDEM || section == LeftFrameSection.BUGUN)
             val nextKey = if (items.isEmpty() || !canPaginate || page >= 15) null else page + 1
+
+            LoadResult.Page(
+                data = items,
+                prevKey = if (page == 1) null else page - 1,
+                nextKey = nextKey
+            )
+        } catch (e: Throwable) {
+            LoadResult.Error(e)
+        }
+    }
+}
+
+/**
+ * `https://eksisozluk.com/basliklar/kanal/{kanal_slug}?p={page}` rotasından
+ * seçili kanalın güncel başlıklarını ve entry sayılarını Paging 3 ile çeken kaynak.
+ */
+class ChannelTopicsPagingSource(
+    private val channel: EksiChannel,
+    private val webViewFetchBridge: WebViewFetchBridge,
+    private val eksiParser: EksiParser
+) : PagingSource<Int, TopicItem>() {
+
+    override fun getRefreshKey(state: PagingState<Int, TopicItem>): Int? {
+        return state.anchorPosition?.let { anchor ->
+            state.closestPageToPosition(anchor)?.prevKey?.plus(1)
+                ?: state.closestPageToPosition(anchor)?.nextKey?.minus(1)
+        }
+    }
+
+    override suspend fun load(params: LoadParams<Int>): LoadResult<Int, TopicItem> {
+        val page = params.key ?: 1
+        return try {
+            val baseDomain = webViewFetchBridge.getActiveBaseDomain().ifBlank {
+                WebViewCookieJar.DEFAULT_BASE_URL
+            }
+            val primaryChannelUrl = eksiParser.buildChannelTopicsUrl(
+                baseDomain = baseDomain,
+                channel = channel,
+                page = page,
+                useRawTurkishSlug = false
+            )
+
+            val primaryHtml = webViewFetchBridge.fetchHtml(
+                rawUrl = primaryChannelUrl,
+                isAjax = true
+            )
+
+            var items = withContext(Dispatchers.Default) {
+                eksiParser.parseChannelTopics(primaryHtml)
+            }
+
+            // Eğer Türkçe karakterli kanal slug'ı (örn: #müzik, #havacılık, #ilişkiler, #sağlık)
+            // için alternatif URL gerekiyorsa otomatik dene:
+            if (items.isEmpty() && channel.rawSlug != channel.slug) {
+                val altChannelUrl = eksiParser.buildChannelTopicsUrl(
+                    baseDomain = baseDomain,
+                    channel = channel,
+                    page = page,
+                    useRawTurkishSlug = true
+                )
+                val altHtml = webViewFetchBridge.fetchHtml(
+                    rawUrl = altChannelUrl,
+                    isAjax = true
+                )
+                items = withContext(Dispatchers.Default) {
+                    eksiParser.parseChannelTopics(altHtml)
+                }
+            }
+
+            // Kanal sayfası tamamen boş dönerse kanal etiketiyle güncel başlık araması fallback'i
+            if (items.isEmpty()) {
+                val searchFallbackUrl = eksiParser.buildSearchUrl(
+                    filter = SearchFilter(keywords = channel.displayName.lowercase()),
+                    page = page
+                )
+                val searchHtml = webViewFetchBridge.fetchHtml(
+                    rawUrl = searchFallbackUrl,
+                    isAjax = true
+                )
+                items = withContext(Dispatchers.Default) {
+                    eksiParser.parseChannelTopics(searchHtml)
+                }
+            }
+
+            val nextKey = if (items.isEmpty() || page >= 15) null else page + 1
 
             LoadResult.Page(
                 data = items,

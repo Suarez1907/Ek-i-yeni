@@ -39,7 +39,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -51,10 +50,9 @@ import com.example.data.model.TopicPageData
 import com.example.ui.components.AuthorMiniAvatar
 import com.example.ui.components.EntryListSkeletonShimmer
 import com.example.ui.theme.EksiNeonGreen
-import com.example.ui.theme.OledCardSurface
 import com.example.ui.theme.OledHairlineDivider
+import com.example.ui.theme.OledOnAccentColor
 import com.example.ui.theme.OledPillGreenBg
-import com.example.ui.theme.OledPitchBlack
 import com.example.ui.theme.OledTextMuted
 import com.example.ui.theme.OledTextPrimary
 import com.example.ui.theme.OledTextSecondary
@@ -76,12 +74,7 @@ sealed interface BkzPreviewUiState {
 }
 
 /**
- * Kural 5: Akıllı "(bkz:)" ve Yazar Alt Penceresi (Bottom Sheet).
- *
- * - Bir entry içindeki `(bkz: ...)`, `[✨ bkz: ...]` linkine veya yazar adına tıklandığında
- *   mevcut sayfadan ayrılmak yerine ekranın altından kayarak açılır (`ModalBottomSheet`).
- * - Sağ üstte belirgin "Başlığa Git ↗" butonu yer alır.
- * - Yükleme sırasında dönen çember yerine gerçek entry boyutlarında `EntryListSkeletonShimmer` gösterir.
+ * Akıllı "(bkz:)" ve Yazar Alt Penceresi (Bottom Sheet).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -142,17 +135,16 @@ fun BkzPreviewBottomSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        containerColor = OledPitchBlack,
-        contentColor = OledTextPrimary
+        containerColor = MaterialTheme.colorScheme.background,
+        contentColor = MaterialTheme.colorScheme.onBackground
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .heightIn(min = 280.dp, max = 640.dp)
-                .background(OledPitchBlack)
+                .background(MaterialTheme.colorScheme.background)
                 .padding(horizontal = 16.dp)
         ) {
-            // Üst Başlık + Sağ Üstte "Başlığa Git ↗" Butonu + Kapat
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -188,7 +180,7 @@ fun BkzPreviewBottomSheet(
                         text = queryTitle,
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.ExtraBold,
-                        color = OledTextPrimary,
+                        color = MaterialTheme.colorScheme.onBackground,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
@@ -196,7 +188,6 @@ fun BkzPreviewBottomSheet(
 
                 Spacer(modifier = Modifier.width(8.dp))
 
-                // Sağ Üst "Başlığa Git ↗" Kapsül Butonu (Kural 5)
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(4.dp)
@@ -294,7 +285,7 @@ fun BkzPreviewBottomSheet(
                             onClick = { triggerOpenFullTopic() },
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = EksiNeonGreen,
-                                contentColor = Color.Black
+                                contentColor = OledOnAccentColor
                             ),
                             shape = RoundedCornerShape(50)
                         ) {
@@ -313,7 +304,7 @@ fun BkzPreviewBottomSheet(
 private fun BkzPreviewEntryCard(entry: EntryItem) {
     Card(
         shape = RoundedCornerShape(14.dp),
-        colors = CardDefaults.cardColors(containerColor = OledCardSurface),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
         modifier = Modifier
             .fillMaxWidth()
             .border(0.5.dp, OledHairlineDivider, RoundedCornerShape(14.dp))
@@ -335,7 +326,6 @@ private fun BkzPreviewEntryCard(entry: EntryItem) {
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Sol: Şükela / Fav sayısı
                 Surface(
                     color = OledPillGreenBg,
                     shape = RoundedCornerShape(50)
@@ -360,7 +350,6 @@ private fun BkzPreviewEntryCard(entry: EntryItem) {
                     }
                 }
 
-                // Sağ: Mini Avatar + Yazar Adı + Tarih
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)

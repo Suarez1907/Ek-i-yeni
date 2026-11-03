@@ -39,12 +39,14 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.FilterAlt
 import androidx.compose.material.icons.filled.OpenInNew
+import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.PersonSearch
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
@@ -114,17 +116,20 @@ import com.example.data.remote.EksiParser
 import com.example.ui.components.AuthorMiniAvatar
 import com.example.ui.components.EntryListSkeletonShimmer
 import com.example.ui.components.FloatingPagerCapsuleBar
+import com.example.ui.components.ThemeSelectorDialog
 import com.example.ui.components.rememberOledShimmerBrush
 import com.example.ui.sheets.BkzPreviewBottomSheet
 import com.example.ui.sheets.GeminiSummaryBottomSheet
+import com.example.ui.theme.ActiveThemeState
+import com.example.ui.theme.AppThemeMode
 import com.example.ui.theme.EksiDeepGreen
 import com.example.ui.theme.EksiNeonGreen
 import com.example.ui.theme.OledCardSurface
 import com.example.ui.theme.OledDivider
 import com.example.ui.theme.OledElevatedCard
 import com.example.ui.theme.OledHairlineDivider
+import com.example.ui.theme.OledOnAccentColor
 import com.example.ui.theme.OledPillGreenBg
-import com.example.ui.theme.OledPitchBlack
 import com.example.ui.theme.OledSwipeAuthorBlue
 import com.example.ui.theme.OledTextMuted
 import com.example.ui.theme.OledTextPrimary
@@ -136,23 +141,15 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 
 /**
- * Premium OLED Başlık İçi Entry Okuma Ekranı (`TopicDetailScreen.kt`):
- * 1. Üstte yatay kaydırılabilir modern filtre çipleri:
- *    "Tümü", "🔥 Şükela Bugün", "👑 Şükela Tümü", "🔗 Linkler", "🔍 Ara" ve "✨ AI Özet".
- *    Aşağı kaydırırken üst bar yumuşak animasyonla gizlenir, yukarı kaydırınca geri gelir.
- * 2. Entry metinlerinde ferah satır yüksekliği (1.6 -> 15.sp font / 24.sp lineHeight).
- *    `(bkz: ...)` ifadeleri belirgin yeşil (#81C784) ve tıklanabilir;
- *    gizli yıldızlı bkz'lar (`*`) ise `[✨ bkz: ...]` mikro-etiketi olarak render edilir.
- * 3. Görsel linkleri (jpg, png, webp, gif, imgur, picsum, eksiseyler) entry metninin hemen altında
- *    yuvarlatılmış köşeli önizleme kartı (inline image preview) olarak açılır.
- * 4. Entry alt barında: Sol tarafta Şükela/Fav butonu ve sayısı; sağ tarafta yazarın baş harfini
- *    içeren mini avatar (`AuthorMiniAvatar`), tıklanabilir yazar adı ve tarih yer alır.
- * 5. Başparmak Dostu Yüzen Sayfalama Çubuğu (`FloatingPagerCapsuleBar`):
- *    "İlk (1)", "< Önceki", "Sayfa X / Y" (tıklanınca sayfa seçici açılır), "Sonraki >", "Son (Y)".
- *    Sayfa değiştiğinde ekran otomatik olarak en üste kayar (`scrollToTop`).
- * 6. Sağa kaydırınca (Swipe Right) Favori/Şükela vurgusu; sola kaydırınca (Swipe Left)
- *    "Sadece bu yazarın entry'lerini filtrele" ve "Paylaş" aksiyonu.
- *    Veri yüklenirken dairesel spinner yerine `EntryListSkeletonShimmer` gösterilir.
+ * Başlık İçi Entry Okuma Ekranı (`TopicDetailScreen.kt`):
+ * 1. Varsayılan "Sadece Bugün" (`TODAY_POPULAR` -> `?a=popular`) modu ve bugün hiç entry girilmemişse
+ *    otomatik tüm entry'lere fallback.
+ * 2. Başlık ekranının hemen üst kısmında (entry listesinin en başında) Ekşin tarzı belirgin
+ *    **"Tümünü Göster (İlk Entry'den İtibaren Tüm Başlığı Yükle)"** butonu.
+ * 3. Üstte yatay kaydırılabilir modern filtre çipleri:
+ *    "Bugün", "Tümü", "🔥 Şükela Bugün", "👑 Şükela Tümü", "🔗 Linkler", "🔍 Ara" ve "✨ AI Özet".
+ * 4. Tüm temalarla (OLED Siyah #000000, Koyu Gri #121212, Klasik Beyaz #FFFFFF) tam uyumlu
+ *    `MaterialTheme.colorScheme` kullanımı.
  */
 @OptIn(ExperimentalMaterial3Api::class, FlowPreview::class)
 @Composable
@@ -173,6 +170,8 @@ fun TopicDetailScreen(
     val bkzPreviewState by viewModel.bkzPreviewState.collectAsStateWithLifecycle()
     val geminiStreamState by viewModel.geminiStreamState.collectAsStateWithLifecycle()
     val scrollToTopEvent by viewModel.scrollToTopEvent.collectAsStateWithLifecycle()
+    val themeMode by viewModel.themeMode.collectAsStateWithLifecycle()
+    val showThemeDialog by viewModel.showThemeDialog.collectAsStateWithLifecycle()
 
     val context = LocalContext.current
     val focusManager = LocalFocusManager.current
@@ -184,15 +183,24 @@ fun TopicDetailScreen(
     val activeTitle = metadata?.topicTitle ?: topic.title
     val currentPage = metadata?.currentPage ?: 1
     val totalPages = (metadata?.pageCount ?: 1).coerceAtLeast(1)
+    val isSingleEntryOrFiltered = activeFilterMode != TopicFilterMode.ALL ||
+        metadata?.isSingleEntryView == true ||
+        topic.url.contains("/entry/", ignoreCase = true)
 
-    // Sayfa değiştiğinde ("İlk", "Önceki", "Sayfa X/Y", "Sonraki", "Son") listeyi anında en üste kaydır
+    if (showThemeDialog) {
+        ThemeSelectorDialog(
+            currentTheme = themeMode,
+            onSelectTheme = { viewModel.selectThemeMode(it) },
+            onDismiss = { viewModel.dismissThemeDialog() }
+        )
+    }
+
     LaunchedEffect(scrollToTopEvent) {
         if (scrollToTopEvent > 0) {
             listState.scrollToItem(0)
         }
     }
 
-    // 1. Başlığa tekrar girildiğinde Room'da kayıtlı olan entryId ve scrollOffset konumuna kaydır
     LaunchedEffect(restoredReadState, entryPagingItems.itemCount) {
         val saved = restoredReadState ?: return@LaunchedEffect
         if (entryPagingItems.itemCount == 0) return@LaunchedEffect
@@ -208,7 +216,6 @@ fun TopicDetailScreen(
         viewModel.markScrollPositionRestored()
     }
 
-    // 2. Kullanıcı kaydırdıkça en son okunan entryId, pageNumber ve scrollOffset'i Room'a kaydet
     LaunchedEffect(listState, entryPagingItems.itemCount) {
         snapshotFlow {
             listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset
@@ -229,17 +236,15 @@ fun TopicDetailScreen(
             }
     }
 
-    // 3. Akıllı (bkz:), [✨ bkz: ...] veya Yazar hızlı önizleme BottomSheet
     BkzPreviewBottomSheet(
         state = bkzPreviewState,
         onDismiss = { viewModel.dismissBkzPreview() },
         onOpenFullTopic = { targetTopic ->
             viewModel.dismissBkzPreview()
-            viewModel.openTopic(targetTopic)
+            viewModel.openTopic(targetTopic, preferTodayMode = false)
         }
     )
 
-    // 4. ✨ AI Özet canlı streaming BottomSheet
     GeminiSummaryBottomSheet(
         topicTitle = activeTitle,
         streamState = geminiStreamState,
@@ -270,14 +275,14 @@ fun TopicDetailScreen(
     }
 
     Scaffold(
-        containerColor = OledPitchBlack,
+        containerColor = MaterialTheme.colorScheme.background,
         contentWindowInsets = WindowInsets.safeDrawing,
         snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
         topBar = {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(OledPitchBlack)
+                    .background(MaterialTheme.colorScheme.surface)
             ) {
                 AnimatedVisibility(
                     visible = isHeaderVisible,
@@ -286,8 +291,8 @@ fun TopicDetailScreen(
                 ) {
                     TopAppBar(
                         colors = TopAppBarDefaults.topAppBarColors(
-                            containerColor = OledPitchBlack,
-                            titleContentColor = OledTextPrimary
+                            containerColor = MaterialTheme.colorScheme.surface,
+                            titleContentColor = MaterialTheme.colorScheme.onSurface
                         ),
                         navigationIcon = {
                             IconButton(
@@ -297,7 +302,7 @@ fun TopicDetailScreen(
                                 Icon(
                                     imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                                     contentDescription = "Geri",
-                                    tint = OledTextPrimary
+                                    tint = MaterialTheme.colorScheme.onSurface
                                 )
                             }
                         },
@@ -314,7 +319,11 @@ fun TopicDetailScreen(
                                 val subtitle = buildString {
                                     metadata?.let {
                                         append("Sayfa ${it.currentPage} / ${it.pageCount}")
-                                        if (it.usedTrackedFallback) {
+                                        if (activeFilterMode == TopicFilterMode.TODAY_POPULAR && !it.usedTodayFallback) {
+                                            append(" • Bugün")
+                                        } else if (it.usedTodayFallback) {
+                                            append(" • Tüm Başlık (Bugün Entry Yok)")
+                                        } else if (it.usedTrackedFallback) {
                                             append(" • Takipten")
                                         }
                                     } ?: append("Yükleniyor...")
@@ -329,6 +338,17 @@ fun TopicDetailScreen(
                             }
                         },
                         actions = {
+                            IconButton(
+                                onClick = { viewModel.openThemeDialog() },
+                                modifier = Modifier.testTag("topic_detail_theme_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Palette,
+                                    contentDescription = "Tema Seçici",
+                                    tint = EksiNeonGreen,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
                             IconButton(onClick = { entryPagingItems.refresh() }) {
                                 Icon(
                                     imageVector = Icons.Default.Refresh,
@@ -341,7 +361,7 @@ fun TopicDetailScreen(
                 }
 
                 // Üstte yatay kaydırılabilir modern filtre çipleri:
-                // "Tümü" | "🔥 Şükela Bugün" | "👑 Şükela Tümü" | "🔗 Linkler" | "🔍 Ara" | "✨ AI Özet"
+                // "Bugün" | "Tümü" | "🔥 Şükela Bugün" | "👑 Şükela Tümü" | "🔗 Linkler" | "🔍 Ara" | "✨ AI Özet"
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -351,6 +371,7 @@ fun TopicDetailScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     val chipItems = listOf(
+                        TopicFilterMode.TODAY_POPULAR to "Bugün",
                         TopicFilterMode.ALL to "Tümü",
                         TopicFilterMode.SUKELA_TODAY to "🔥 Şükela Bugün",
                         TopicFilterMode.SUKELA_ALL to "👑 Şükela Tümü",
@@ -373,8 +394,8 @@ fun TopicDetailScreen(
                             },
                             colors = FilterChipDefaults.filterChipColors(
                                 selectedContainerColor = EksiNeonGreen,
-                                selectedLabelColor = Color.Black,
-                                containerColor = OledCardSurface,
+                                selectedLabelColor = OledOnAccentColor,
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant,
                                 labelColor = OledTextPrimary
                             ),
                             border = FilterChipDefaults.filterChipBorder(
@@ -422,7 +443,7 @@ fun TopicDetailScreen(
                 // Sola kaydırma ile aktifleşen Yazar Filtresi bilgi bandı
                 AnimatedVisibility(visible = !authorFilter.isNullOrBlank()) {
                     Surface(
-                        color = OledCardSurface,
+                        color = MaterialTheme.colorScheme.surfaceVariant,
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = 12.dp, vertical = 4.dp)
@@ -512,8 +533,8 @@ fun TopicDetailScreen(
                         colors = OutlinedTextFieldDefaults.colors(
                             focusedBorderColor = EksiNeonGreen,
                             unfocusedBorderColor = OledDivider,
-                            focusedContainerColor = OledCardSurface,
-                            unfocusedContainerColor = OledCardSurface,
+                            focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                            unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
                             focusedTextColor = OledTextPrimary,
                             unfocusedTextColor = OledTextPrimary
                         ),
@@ -529,7 +550,7 @@ fun TopicDetailScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .background(OledPitchBlack)
+                .background(MaterialTheme.colorScheme.background)
         ) {
             val refreshState = entryPagingItems.loadState.refresh
 
@@ -544,7 +565,6 @@ fun TopicDetailScreen(
                     modifier = Modifier
                         .fillMaxSize()
                         .testTag("entry_paging_list"),
-                    // Alt kısımdaki yüzen sayfalama kapsülü için 96.dp alt boşluk bırak
                     contentPadding = PaddingValues(
                         start = 12.dp,
                         end = 12.dp,
@@ -553,6 +573,73 @@ fun TopicDetailScreen(
                     ),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
+                    // 2. ÖZELLİK: Başlık ekranının hemen üst kısmında (entry listesinin en başında)
+                    // Ekşin tarzı belirgin ve şık "Tümünü Göster (İlk Entry'den İtibaren Tüm Başlığı Yükle)" butonu
+                    if (isSingleEntryOrFiltered) {
+                        item(key = "show_all_entries_header_button") {
+                            Surface(
+                                color = OledPillGreenBg,
+                                shape = RoundedCornerShape(14.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .clickable { viewModel.showAllTopicEntriesFromFirstPage() }
+                                    .border(
+                                        width = 1.dp,
+                                        color = EksiNeonGreen.copy(alpha = 0.6f),
+                                        shape = RoundedCornerShape(14.dp)
+                                    )
+                                    .testTag("show_all_entries_button")
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.AutoMirrored.Filled.MenuBook,
+                                            contentDescription = null,
+                                            tint = EksiNeonGreen,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                        Column {
+                                            Text(
+                                                text = "Tümünü Göster (İlk Entry'den İtibaren Tüm Başlığı Yükle)",
+                                                style = MaterialTheme.typography.labelLarge,
+                                                fontWeight = FontWeight.ExtraBold,
+                                                color = EksiNeonGreen,
+                                                fontSize = 13.sp
+                                            )
+                                            val modeHint = when {
+                                                metadata?.usedTodayFallback == true ->
+                                                    "Bugün yeni entry girilmediği için tüm başlık gösteriliyor • 1. sayfadan açmak için dokunun"
+                                                metadata?.isSingleEntryView == true ->
+                                                    "Tekil DEBE / Entry görünümü • Başlığın 1. sayfasından itibaren tümünü yükle"
+                                                activeFilterMode == TopicFilterMode.TODAY_POPULAR ->
+                                                    "Şu an son 24 saat (Bugün) filtresi aktif • 1. sayfadan (?p=1) itibaren tümünü yükle"
+                                                else ->
+                                                    "${activeFilterMode.displayTitle} filtresini kaldır ve 1. sayfadan itibaren tümünü yükle"
+                                            }
+                                            Text(
+                                                text = modeHint,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = OledTextSecondary,
+                                                fontSize = 11.sp
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     items(
                         count = entryPagingItems.itemCount,
                         key = { index -> "${index}_${entryPagingItems.peek(index)?.id ?: "entry"}" }
@@ -597,7 +684,6 @@ fun TopicDetailScreen(
                                 }
                             },
                             onAuthorClick = { authorName ->
-                                // Yazar adına tıklanınca mevcut sayfadan çıkmadan Bottom Sheet ile yazarın başlığını önizle
                                 viewModel.openBkzPreview(authorName)
                             },
                             onShareEntry = {
@@ -638,7 +724,7 @@ fun TopicDetailScreen(
             if (refreshState is LoadState.Error && entryPagingItems.itemCount == 0) {
                 Card(
                     shape = RoundedCornerShape(16.dp),
-                    colors = CardDefaults.cardColors(containerColor = OledCardSurface),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
                     modifier = Modifier
                         .align(Alignment.Center)
                         .padding(20.dp)
@@ -676,7 +762,7 @@ fun TopicDetailScreen(
                                 onClick = { viewModel.openCloudflareVerification(topic.url) },
                                 colors = ButtonDefaults.buttonColors(
                                     containerColor = EksiNeonGreen,
-                                    contentColor = Color.Black
+                                    contentColor = OledOnAccentColor
                                 )
                             ) {
                                 Text("Doğrula", fontWeight = FontWeight.Bold)
@@ -686,7 +772,6 @@ fun TopicDetailScreen(
                 }
             }
 
-            // 4. Başparmak Dostu Yüzen Sayfalama Çubuğu (Floating Pager Bar)
             FloatingPagerCapsuleBar(
                 currentPage = currentPage,
                 totalPages = totalPages,
@@ -704,9 +789,6 @@ fun TopicDetailScreen(
     }
 }
 
-/**
- * Kullanıcı aşağı kaydırdığında başlık üst barını yumuşakça gizleyen, yukarı kaydırdığında geri getiren yardımcı.
- */
 @Composable
 private fun rememberDetailHeaderVisibility(listState: LazyListState): State<Boolean> {
     var previousIndex by remember(listState) { mutableIntStateOf(0) }
@@ -728,15 +810,6 @@ private fun rememberDetailHeaderVisibility(listState: LazyListState): State<Bool
     }
 }
 
-/**
- * Yatay kaydırma jestli (`SwipeToDismissBox`), satır içi Coil görsel önizlemeli ve
- * Premium OLED alt barlı Entry Kartı:
- * - Sağa kaydırınca (`StartToEnd`): Favori/Şükela vurgusu yapar ve yaylanarak yerine döner (`return false`).
- * - Sola kaydırınca (`EndToStart`): "Sadece bu yazarın entry'lerini filtrele" ve "Paylaş" aksiyonu sunar.
- * - Entry metni: `fontSize = 15.sp`, `lineHeight = 24.sp` (`1.6x`).
- * - Entry alt barı: Sol tarafta Şükela/Fav butonu ve sayısı; sağ tarafta yazarın baş harfini içeren
- *   mini avatar (`AuthorMiniAvatar`), tıklanabilir yazar adı ve tarih.
- */
 @OptIn(ExperimentalMaterial3Api::class)
 @Suppress("DEPRECATION")
 @Composable
@@ -771,6 +844,8 @@ fun SwipeableEntryOledCard(
         extractInlineImageUrls(entry)
     }
 
+    val isLight = ActiveThemeState.currentMode == AppThemeMode.CLASSIC_LIGHT
+
     SwipeToDismissBox(
         state = dismissState,
         enableDismissFromStartToEnd = true,
@@ -780,8 +855,8 @@ fun SwipeableEntryOledCard(
             val bgColor by animateColorAsState(
                 targetValue = when (direction) {
                     SwipeToDismissBoxValue.StartToEnd -> EksiDeepGreen
-                    SwipeToDismissBoxValue.EndToStart -> Color(0xFF102436)
-                    SwipeToDismissBoxValue.Settled -> OledCardSurface
+                    SwipeToDismissBoxValue.EndToStart -> if (isLight) Color(0xFFE3F2FD) else Color(0xFF102436)
+                    SwipeToDismissBoxValue.Settled -> MaterialTheme.colorScheme.surfaceVariant
                 },
                 label = "swipe_bg_color"
             )
@@ -841,7 +916,7 @@ fun SwipeableEntryOledCard(
     ) {
         Card(
             shape = RoundedCornerShape(14.dp),
-            colors = CardDefaults.cardColors(containerColor = OledCardSurface),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
             modifier = Modifier
                 .fillMaxWidth()
                 .border(
@@ -851,7 +926,6 @@ fun SwipeableEntryOledCard(
                 )
         ) {
             Column(modifier = Modifier.padding(14.dp)) {
-                // Üst Bilgi Satırı (Sayfa, Entry ID, Yazar Filtrele, AI Özet ve Paylaş İkonları)
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -908,8 +982,6 @@ fun SwipeableEntryOledCard(
 
                 Spacer(modifier = Modifier.height(10.dp))
 
-                // Entry Metni: line-height 1.6 (15.sp font -> 24.sp lineHeight),
-                // (bkz: ...) ve [✨ bkz: ...] tıklandığında BkzPreviewBottomSheet açar
                 ClickableText(
                     text = entry.annotatedContent,
                     style = TextStyle(
@@ -944,8 +1016,6 @@ fun SwipeableEntryOledCard(
                     }
                 )
 
-                // Entry içindeki görsel linklerinin (jpg, png, webp, imgur, picsum, eksiseyler vb.)
-                // entry metninin hemen altında yuvarlatılmış köşeli önizleme kartı olarak açılması
                 if (inlineImageUrls.isNotEmpty()) {
                     Spacer(modifier = Modifier.height(12.dp))
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -962,15 +1032,11 @@ fun SwipeableEntryOledCard(
                 HorizontalDivider(color = OledHairlineDivider, thickness = 1.dp)
                 Spacer(modifier = Modifier.height(10.dp))
 
-                // Entry Alt Barı:
-                // Sol tarafta Şükela/Fav butonu ve sayısı;
-                // Sağ tarafta yazarın baş harfini içeren mini avatar, tıklanabilir yazar adı ve tarih
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // Sol: Şükela / Fav kapsül butonu ve sayısı
                     val displayFavCount = entry.favoriteCount + if (isFavorited && !entry.isFavorited) 1 else 0
                     Surface(
                         color = if (isFavorited) OledPillGreenBg else OledElevatedCard,
@@ -1009,7 +1075,6 @@ fun SwipeableEntryOledCard(
                         }
                     }
 
-                    // Sağ: Mini Avatar + Tıklanabilir Yazar Adı + Tarih
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -1063,10 +1128,6 @@ fun SwipeableEntryOledCard(
     }
 }
 
-/**
- * Entry içindeki görsel bağlantılarını (`imgur`, `picsum.photos`, `eksiseyler`, doğrudan resim URL'leri)
- * entry metninin hemen altında yuvarlatılmış köşeli önizleme kartı (inline image preview) olarak açar.
- */
 @Composable
 private fun InlineEntryImagePreview(
     imageUrl: String,
@@ -1075,7 +1136,7 @@ private fun InlineEntryImagePreview(
     val shimmerBrush = rememberOledShimmerBrush()
     Card(
         shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(containerColor = OledPitchBlack),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.background),
         modifier = Modifier
             .fillMaxWidth()
             .border(0.5.dp, OledHairlineDivider, RoundedCornerShape(12.dp))
@@ -1128,11 +1189,6 @@ private fun InlineEntryImagePreview(
     }
 }
 
-/**
- * Entry içindeki `EXTERNAL_URL` annotation'larından `imgur`, `picsum.photos`, `eksiseyler`,
- * `pbs.twimg.com`, `i.redd.it`, `ibb.co` veya `.jpg`, `.jpeg`, `.png`, `.webp`, `.gif` uzantılı
- * görsel linklerini ayıklar ve doğrudan görüntülenebilir resim URL'sine dönüştürür.
- */
 fun extractInlineImageUrls(entry: EntryItem): List<String> {
     val annotations = entry.annotatedContent.getStringAnnotations(
         tag = EksiParser.TAG_EXTERNAL_URL,

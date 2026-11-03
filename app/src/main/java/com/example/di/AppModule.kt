@@ -63,6 +63,7 @@ object AppModule {
         val geminiHelper = GeminiHelper()
 
         return EksinServiceContainer(
+            appContext = appContext,
             repository = repository,
             cookieJar = cookieJar,
             userAgentProvider = userAgentProvider,
@@ -138,6 +139,7 @@ object AppModule {
 }
 
 data class EksinServiceContainer(
+    val appContext: Context,
     val repository: EksiRepository,
     val cookieJar: WebViewCookieJar,
     val userAgentProvider: UserAgentProvider,

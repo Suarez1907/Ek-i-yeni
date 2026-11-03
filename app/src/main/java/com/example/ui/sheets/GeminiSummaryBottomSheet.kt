@@ -35,7 +35,6 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -45,14 +44,13 @@ import com.example.ai.GeminiAnalysisMode
 import com.example.ai.GeminiStreamState
 import com.example.ui.theme.EksiDeepGreen
 import com.example.ui.theme.EksiNeonGreen
-import com.example.ui.theme.OledCardSurface
 import com.example.ui.theme.OledDivider
-import com.example.ui.theme.OledPitchBlack
+import com.example.ui.theme.OledOnAccentColor
 import com.example.ui.theme.OledTextPrimary
 import com.example.ui.theme.OledTextSecondary
 
 /**
- * `✨ Gemini Özet` çipine basıldığında açılan ve başlığın:
+ * `✨ AI Özet` çipine basıldığında açılan ve başlığın:
  * a) "Başlığı 5 Maddede Özetle"
  * b) "Fikir Ayrılıklarını ve Baskın Görüşü Çıkar"
  * analizlerini canlı akan metin (`generateContentStream` streaming) olarak gösteren alt pencere.
@@ -79,17 +77,16 @@ fun GeminiSummaryBottomSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        containerColor = OledPitchBlack,
-        contentColor = OledTextPrimary
+        containerColor = MaterialTheme.colorScheme.background,
+        contentColor = MaterialTheme.colorScheme.onBackground
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .heightIn(min = 280.dp, max = 640.dp)
-                .background(OledPitchBlack)
+                .background(MaterialTheme.colorScheme.background)
                 .padding(horizontal = 18.dp)
         ) {
-            // Başlık Satırı
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -137,7 +134,6 @@ fun GeminiSummaryBottomSheet(
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            // Analiz Modu Geçiş Çipleri (5 Madde Özet / Fikir Ayrılıkları & Baskın Görüş)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -148,8 +144,8 @@ fun GeminiSummaryBottomSheet(
                     label = { Text("5 Maddede Özetle", fontSize = 12.sp) },
                     colors = FilterChipDefaults.filterChipColors(
                         selectedContainerColor = EksiNeonGreen,
-                        selectedLabelColor = Color.Black,
-                        containerColor = OledCardSurface,
+                        selectedLabelColor = OledOnAccentColor,
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant,
                         labelColor = OledTextPrimary
                     ),
                     modifier = Modifier.testTag("gemini_mode_five_bullets")
@@ -161,8 +157,8 @@ fun GeminiSummaryBottomSheet(
                     label = { Text("Fikir Ayrılıkları & Baskın Görüş", fontSize = 12.sp) },
                     colors = FilterChipDefaults.filterChipColors(
                         selectedContainerColor = EksiNeonGreen,
-                        selectedLabelColor = Color.Black,
-                        containerColor = OledCardSurface,
+                        selectedLabelColor = OledOnAccentColor,
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant,
                         labelColor = OledTextPrimary
                     ),
                     modifier = Modifier.testTag("gemini_mode_debate_consensus")
@@ -175,7 +171,7 @@ fun GeminiSummaryBottomSheet(
 
             Card(
                 shape = RoundedCornerShape(14.dp),
-                colors = CardDefaults.cardColors(containerColor = OledCardSurface),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f, fill = false)

@@ -30,6 +30,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -41,11 +42,14 @@ import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.EmojiEvents
 import androidx.compose.material.icons.filled.NotificationsActive
+import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Security
+import androidx.compose.material.icons.filled.Tag
 import androidx.compose.material.icons.filled.Today
 import androidx.compose.material.icons.filled.Whatshot
 import androidx.compose.material3.AssistChip
@@ -94,7 +98,6 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -103,16 +106,24 @@ import androidx.paging.compose.LazyPagingItems
 import androidx.paging.compose.collectAsLazyPagingItems
 import com.example.data.local.BookmarkedEntryEntity
 import com.example.data.local.TopicReadStateEntity
+import com.example.data.model.DebeAndStatsCategory
+import com.example.data.model.DebeAndStatsUiState
+import com.example.data.model.EksiChannel
 import com.example.data.model.LeftFrameSection
+import com.example.data.model.PeriodicRankingTab
+import com.example.data.model.PeriodicTimeRange
+import com.example.data.model.RankedTopicOrEntryItem
 import com.example.data.model.SearchSortOrder
 import com.example.data.model.TopicItem
 import com.example.ui.auth.AuthWebViewScreen
+import com.example.ui.components.ThemeSelectorDialog
 import com.example.ui.components.TopicListSkeletonShimmer
+import com.example.ui.theme.AppThemeMode
 import com.example.ui.theme.EksiNeonGreen
 import com.example.ui.theme.OledCardSurface
 import com.example.ui.theme.OledHairlineDivider
+import com.example.ui.theme.OledOnAccentColor
 import com.example.ui.theme.OledPillGreenBg
-import com.example.ui.theme.OledPitchBlack
 import com.example.ui.theme.OledTextMuted
 import com.example.ui.theme.OledTextPrimary
 import com.example.ui.theme.OledTextSecondary
@@ -121,7 +132,7 @@ import com.example.ui.theme.OledTopicUnread
 
 /**
  * Tek elle kullanıma uygun Alt Navigasyon Barı sekmeleri:
- * Gündem, Bugün, Olaylar, Arama, Profil
+ * Gündem, Bugün, Kanallar, DEBE & Enler, Arama, Profil
  */
 enum class MainNavDestination(
     val title: String,
@@ -130,20 +141,12 @@ enum class MainNavDestination(
 ) {
     GUNDEM("Gündem", Icons.Default.Whatshot, "nav_gundem"),
     BUGUN("Bugün", Icons.Default.Today, "nav_bugun"),
-    OLAYLAR("Olaylar", Icons.Default.NotificationsActive, "nav_olaylar"),
+    KANALLAR("Kanallar", Icons.Default.Tag, "nav_kanallar"),
+    DEBE_ENLER("DEBE", Icons.Default.EmojiEvents, "nav_debe_enler"),
     ARAMA("Arama", Icons.Default.Search, "nav_arama"),
     PROFIL("Profil", Icons.Default.Person, "nav_profil")
 }
 
-/**
- * Premium OLED Ana İskelet (`MainScaffold.kt`):
- * - Kural 1: Sadeleştirilmiş Üst Bar ("CF OK" metni ve hata bandı bağlantı sağlamken tamamen gizli;
- *   kalkan ikonu üzerinde küçük yeşil durum noktası; modern kapsül "DEBE" çipi; aşağı kaydırırken
- *   yumuşak animasyonla gizlenen ve yukarı kaydırınca geri gelen üst bar).
- * - Kural 2: Gerçek OLED siyah (#000000) zemin, #161616 ince ayırıcılar, 15sp #EDEDED okunmamış /
- *   #888888 okunmuş başlık metinleri ve sağda #112415 dolgulu #81C784 metinli hap (pill) rozetleri.
- * - Kural 6: Veriler yüklenirken dönen çember yerine `TopicListSkeletonShimmer` animasyonu.
- */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainScaffold(
@@ -156,12 +159,22 @@ fun MainScaffold(
     val hasCfClearance by viewModel.hasCfClearance.collectAsStateWithLifecycle()
     val hasUserSession by viewModel.hasUserSession.collectAsStateWithLifecycle()
     val allReadStates by viewModel.allReadStates.collectAsStateWithLifecycle()
+    val themeMode by viewModel.themeMode.collectAsStateWithLifecycle()
+    val showThemeDialog by viewModel.showThemeDialog.collectAsStateWithLifecycle()
 
     val readStateByUrl = remember(allReadStates) {
         allReadStates.associateBy { it.topicKey }
     }
 
     var currentDestination by rememberSaveable { mutableStateOf(MainNavDestination.GUNDEM) }
+
+    if (showThemeDialog) {
+        ThemeSelectorDialog(
+            currentTheme = themeMode,
+            onSelectTheme = { viewModel.selectThemeMode(it) },
+            onDismiss = { viewModel.dismissThemeDialog() }
+        )
+    }
 
     // 1. Kullanıcı Cloudflare Doğrulama veya Giriş WebView Ekranını açtığında göster
     activeAuthSheet?.let { sheet ->
@@ -188,17 +201,24 @@ fun MainScaffold(
     }
 
     val leftFrameListState = rememberLazyListState()
-    val isHeaderVisible = rememberDirectionalHeaderVisibility(leftFrameListState)
-    val isDebeActive = currentDestination == MainNavDestination.GUNDEM &&
-        selectedSection == LeftFrameSection.DEBE
+    val channelsListState = rememberLazyListState()
+    val activeScrollListState = when (currentDestination) {
+        MainNavDestination.KANALLAR -> channelsListState
+        else -> leftFrameListState
+    }
+    val isHeaderVisible = rememberDirectionalHeaderVisibility(activeScrollListState)
+    val isDebeActive = currentDestination == MainNavDestination.DEBE_ENLER
 
     Scaffold(
         modifier = Modifier.fillMaxSize(),
-        containerColor = OledPitchBlack,
+        containerColor = MaterialTheme.colorScheme.background,
         contentWindowInsets = WindowInsets.safeDrawing,
         topBar = {
             AnimatedVisibility(
-                visible = isHeaderVisible || currentDestination == MainNavDestination.ARAMA || currentDestination == MainNavDestination.PROFIL,
+                visible = isHeaderVisible ||
+                    currentDestination == MainNavDestination.ARAMA ||
+                    currentDestination == MainNavDestination.PROFIL ||
+                    currentDestination == MainNavDestination.DEBE_ENLER,
                 enter = slideInVertically(
                     initialOffsetY = { -it },
                     animationSpec = tween(durationMillis = 220)
@@ -211,17 +231,17 @@ fun MainScaffold(
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .background(OledPitchBlack)
+                        .background(MaterialTheme.colorScheme.surface)
                 ) {
                     TopAppBar(
                         colors = TopAppBarDefaults.topAppBarColors(
-                            containerColor = OledPitchBlack,
-                            titleContentColor = OledTextPrimary
+                            containerColor = MaterialTheme.colorScheme.surface,
+                            titleContentColor = MaterialTheme.colorScheme.onSurface
                         ),
                         title = {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
                                 Box(
                                     modifier = Modifier
@@ -232,74 +252,70 @@ fun MainScaffold(
                                 Text(
                                     text = "ekşin oled",
                                     fontWeight = FontWeight.ExtraBold,
-                                    fontSize = 19.sp,
+                                    fontSize = 18.sp,
                                     letterSpacing = (-0.3).sp,
-                                    color = OledTextPrimary
+                                    color = MaterialTheme.colorScheme.onSurface
                                 )
-                                if (isDebeActive) {
-                                    Surface(
-                                        color = OledPillGreenBg,
-                                        shape = RoundedCornerShape(50)
-                                    ) {
-                                        Text(
-                                            text = "dünün en beğenilenleri",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = EksiNeonGreen,
-                                            fontWeight = FontWeight.SemiBold,
-                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-                                        )
-                                    }
-                                }
                             }
                         },
                         actions = {
-                            // Modern Kapsül "DEBE" Butonu (Kural 1)
-                            if (currentDestination == MainNavDestination.GUNDEM ||
-                                currentDestination == MainNavDestination.BUGUN
-                            ) {
-                                Surface(
-                                    color = if (isDebeActive) EksiNeonGreen else OledPillGreenBg,
-                                    shape = RoundedCornerShape(50),
-                                    modifier = Modifier
-                                        .padding(end = 6.dp)
-                                        .clip(RoundedCornerShape(50))
-                                        .clickable {
+                            // Modern Kapsül "DEBE" Butonu -> Gelişmiş DEBE & Dönemsel Enler ekranını açar
+                            Surface(
+                                color = if (isDebeActive) EksiNeonGreen else OledPillGreenBg,
+                                shape = RoundedCornerShape(50),
+                                modifier = Modifier
+                                    .padding(end = 4.dp)
+                                    .clip(RoundedCornerShape(50))
+                                    .clickable {
+                                        if (currentDestination == MainNavDestination.DEBE_ENLER) {
                                             currentDestination = MainNavDestination.GUNDEM
-                                            if (selectedSection == LeftFrameSection.DEBE) {
-                                                viewModel.selectSection(LeftFrameSection.GUNDEM)
-                                            } else {
-                                                viewModel.selectSection(LeftFrameSection.DEBE)
-                                            }
+                                            viewModel.selectSection(LeftFrameSection.GUNDEM)
+                                        } else {
+                                            currentDestination = MainNavDestination.DEBE_ENLER
+                                            viewModel.loadDebeAndStats()
                                         }
-                                        .border(
-                                            width = 0.8.dp,
-                                            color = EksiNeonGreen.copy(alpha = if (isDebeActive) 1f else 0.45f),
-                                            shape = RoundedCornerShape(50)
-                                        )
-                                        .testTag("debe_capsule_chip")
-                                ) {
-                                    Row(
-                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(5.dp)
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.Whatshot,
-                                            contentDescription = null,
-                                            tint = if (isDebeActive) Color.Black else EksiNeonGreen,
-                                            modifier = Modifier.size(14.dp)
-                                        )
-                                        Text(
-                                            text = "DEBE",
-                                            fontSize = 12.sp,
-                                            fontWeight = FontWeight.ExtraBold,
-                                            color = if (isDebeActive) Color.Black else EksiNeonGreen
-                                        )
                                     }
+                                    .border(
+                                        width = 0.8.dp,
+                                        color = EksiNeonGreen.copy(alpha = if (isDebeActive) 1f else 0.45f),
+                                        shape = RoundedCornerShape(50)
+                                    )
+                                    .testTag("debe_capsule_chip")
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 11.dp, vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Whatshot,
+                                        contentDescription = null,
+                                        tint = if (isDebeActive) OledOnAccentColor else EksiNeonGreen,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                    Text(
+                                        text = "DEBE",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = if (isDebeActive) OledOnAccentColor else EksiNeonGreen
+                                    )
                                 }
                             }
 
-                            // Kalkan ikonu + sadece küçük yeşil durum noktası ("CF OK" metni gizlendi - Kural 1)
+                            // 4. Tema / Renk Seçici (🎨) İkonu
+                            IconButton(
+                                onClick = { viewModel.openThemeDialog() },
+                                modifier = Modifier.testTag("top_theme_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Palette,
+                                    contentDescription = "Tema Seçici",
+                                    tint = EksiNeonGreen,
+                                    modifier = Modifier.size(21.dp)
+                                )
+                            }
+
+                            // Kalkan ikonu + sadece küçük yeşil durum noktası
                             IconButton(
                                 onClick = { viewModel.openCloudflareVerification() },
                                 modifier = Modifier.testTag("top_cloudflare_button")
@@ -309,7 +325,7 @@ fun MainScaffold(
                                         imageVector = Icons.Default.Security,
                                         contentDescription = "Cloudflare Durumu",
                                         tint = OledTextSecondary,
-                                        modifier = Modifier.size(21.dp)
+                                        modifier = Modifier.size(20.dp)
                                     )
                                     Box(
                                         modifier = Modifier
@@ -319,7 +335,7 @@ fun MainScaffold(
                                             .background(
                                                 if (hasCfClearance) EksiNeonGreen else Color(0xFFFFB74D)
                                             )
-                                            .border(1.2.dp, OledPitchBlack, CircleShape)
+                                            .border(1.2.dp, MaterialTheme.colorScheme.surface, CircleShape)
                                             .testTag("cf_status_badge")
                                     )
                                 }
@@ -333,24 +349,84 @@ fun MainScaffold(
                                     imageVector = Icons.Default.Refresh,
                                     contentDescription = "Yenile",
                                     tint = OledTextSecondary,
-                                    modifier = Modifier.size(21.dp)
+                                    modifier = Modifier.size(20.dp)
                                 )
                             }
                         }
                     )
+
+                    // Ana ekran üst sekme çubuğu: Gündem | Bugün | Kanallar | DEBE & Enler | Olaylar
+                    if (currentDestination == MainNavDestination.GUNDEM ||
+                        currentDestination == MainNavDestination.BUGUN ||
+                        currentDestination == MainNavDestination.KANALLAR ||
+                        currentDestination == MainNavDestination.DEBE_ENLER
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState())
+                                .padding(horizontal = 12.dp, vertical = 4.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            TopQuickSectionChip(
+                                label = "🔥 Gündem",
+                                selected = currentDestination == MainNavDestination.GUNDEM &&
+                                    selectedSection == LeftFrameSection.GUNDEM,
+                                onClick = {
+                                    currentDestination = MainNavDestination.GUNDEM
+                                    viewModel.selectSection(LeftFrameSection.GUNDEM)
+                                }
+                            )
+                            TopQuickSectionChip(
+                                label = "📅 Bugün",
+                                selected = currentDestination == MainNavDestination.BUGUN ||
+                                    (currentDestination == MainNavDestination.GUNDEM && selectedSection == LeftFrameSection.BUGUN),
+                                onClick = {
+                                    currentDestination = MainNavDestination.BUGUN
+                                    viewModel.selectSection(LeftFrameSection.BUGUN)
+                                }
+                            )
+                            TopQuickSectionChip(
+                                label = "# Kanallar",
+                                selected = currentDestination == MainNavDestination.KANALLAR,
+                                onClick = {
+                                    currentDestination = MainNavDestination.KANALLAR
+                                }
+                            )
+                            TopQuickSectionChip(
+                                label = "🏆 DEBE & Enler",
+                                selected = currentDestination == MainNavDestination.DEBE_ENLER,
+                                onClick = {
+                                    currentDestination = MainNavDestination.DEBE_ENLER
+                                    viewModel.loadDebeAndStats()
+                                }
+                            )
+                            TopQuickSectionChip(
+                                label = "🔔 Olaylar",
+                                selected = currentDestination == MainNavDestination.GUNDEM &&
+                                    selectedSection == LeftFrameSection.OLAYLAR,
+                                onClick = {
+                                    currentDestination = MainNavDestination.GUNDEM
+                                    viewModel.selectSection(LeftFrameSection.OLAYLAR)
+                                }
+                            )
+                        }
+                    }
+
                     HorizontalDivider(color = OledHairlineDivider, thickness = 0.5.dp)
                 }
             }
         },
         bottomBar = {
             NavigationBar(
-                containerColor = OledPitchBlack,
-                contentColor = OledTextPrimary,
+                containerColor = MaterialTheme.colorScheme.surface,
+                contentColor = MaterialTheme.colorScheme.onSurface,
                 tonalElevation = 0.dp,
                 modifier = Modifier.border(0.5.dp, OledHairlineDivider)
             ) {
                 val navColors = NavigationBarItemDefaults.colors(
-                    selectedIconColor = Color.Black,
+                    selectedIconColor = OledOnAccentColor,
                     selectedTextColor = EksiNeonGreen,
                     indicatorColor = EksiNeonGreen,
                     unselectedIconColor = OledTextSecondary,
@@ -368,8 +444,9 @@ fun MainScaffold(
                                     viewModel.selectSection(LeftFrameSection.GUNDEM)
                                 MainNavDestination.BUGUN ->
                                     viewModel.selectSection(LeftFrameSection.BUGUN)
-                                MainNavDestination.OLAYLAR ->
-                                    viewModel.selectSection(LeftFrameSection.OLAYLAR)
+                                MainNavDestination.KANALLAR -> Unit
+                                MainNavDestination.DEBE_ENLER ->
+                                    viewModel.loadDebeAndStats()
                                 MainNavDestination.ARAMA,
                                 MainNavDestination.PROFIL -> Unit
                             }
@@ -383,8 +460,9 @@ fun MainScaffold(
                         label = {
                             Text(
                                 text = destination.title,
-                                fontSize = 11.sp,
-                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                                fontSize = 10.sp,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                maxLines = 1
                             )
                         },
                         colors = navColors,
@@ -398,15 +476,13 @@ fun MainScaffold(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .background(OledPitchBlack)
+                .background(MaterialTheme.colorScheme.background)
         ) {
-            // Kural 1: Bağlantı sorunsuz çalışırken hata bandı tamamen gizlidir;
-            // yalnızca bağlantı koptuğunda ve doğrulama gerektiğinde görünür.
             if (!hasCfClearance && pendingCfChallenge != null) {
                 val challenge = pendingCfChallenge
                 if (challenge != null) {
                     Surface(
-                        color = Color(0xFF14100C),
+                        color = MaterialTheme.colorScheme.surfaceVariant,
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Row(
@@ -443,12 +519,11 @@ fun MainScaffold(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(OledPitchBlack)
+                    .background(MaterialTheme.colorScheme.background)
             ) {
                 when (currentDestination) {
                     MainNavDestination.GUNDEM,
-                    MainNavDestination.BUGUN,
-                    MainNavDestination.OLAYLAR -> {
+                    MainNavDestination.BUGUN -> {
                         val pagingItems = viewModel.leftFramePagingFlow.collectAsLazyPagingItems()
                         LaunchedEffect(pagingItems.itemCount) {
                             if (pagingItems.itemCount > 0) {
@@ -456,66 +531,48 @@ fun MainScaffold(
                             }
                         }
 
-                        Column(modifier = Modifier.fillMaxSize()) {
-                            // DEBE aktifse üstte zarif bir bilgi başlığı göster
-                            AnimatedVisibility(visible = isDebeActive) {
-                                Surface(
-                                    color = Color(0xFF0A140C),
-                                    modifier = Modifier.fillMaxWidth()
-                                ) {
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(horizontal = 16.dp, vertical = 10.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.SpaceBetween
-                                    ) {
-                                        Row(
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                        ) {
-                                            Icon(
-                                                imageVector = Icons.Default.Whatshot,
-                                                contentDescription = null,
-                                                tint = EksiNeonGreen,
-                                                modifier = Modifier.size(16.dp)
-                                            )
-                                            Text(
-                                                text = "DEBE — Dünün En Beğenilen Entry'leri",
-                                                style = MaterialTheme.typography.labelMedium,
-                                                fontWeight = FontWeight.Bold,
-                                                color = EksiNeonGreen
-                                            )
-                                        }
-                                        Text(
-                                            text = "Gündeme Dön ✕",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = OledTextSecondary,
-                                            modifier = Modifier.clickable {
-                                                viewModel.selectSection(LeftFrameSection.GUNDEM)
-                                            }
-                                        )
-                                    }
-                                }
-                            }
+                        TopicPagingList(
+                            pagingItems = pagingItems,
+                            listState = leftFrameListState,
+                            isDebeMode = false,
+                            readStateByUrl = readStateByUrl,
+                            onTopicClick = { topic ->
+                                // Gündem / Bugün'den tıklanan başlıklar varsayılan olarak "Sadece Bugün" modunda açılır
+                                viewModel.openTopic(
+                                    topic = topic,
+                                    preferTodayMode = selectedSection != LeftFrameSection.OLAYLAR
+                                )
+                            },
+                            onOpenCloudflare = { viewModel.openCloudflareVerification() },
+                            emptyMessage = "${selectedSection.title} sekmesinde başlık bulunamadı."
+                        )
+                    }
 
-                            TopicPagingList(
-                                pagingItems = pagingItems,
-                                listState = leftFrameListState,
-                                isDebeMode = isDebeActive,
-                                readStateByUrl = readStateByUrl,
-                                onTopicClick = { viewModel.openTopic(it) },
-                                onOpenCloudflare = { viewModel.openCloudflareVerification() },
-                                emptyMessage = "${selectedSection.title} sekmesinde başlık bulunamadı."
-                            )
-                        }
+                    MainNavDestination.KANALLAR -> {
+                        ChannelsScreenContent(
+                            viewModel = viewModel,
+                            listState = channelsListState,
+                            readStateByUrl = readStateByUrl,
+                            onTopicClick = { topic ->
+                                // Kanallar'dan tıklanan başlıklar varsayılan olarak "Sadece Bugün" modunda açılır
+                                viewModel.openTopic(topic = topic, preferTodayMode = true)
+                            },
+                            onOpenCloudflare = { viewModel.openCloudflareVerification() }
+                        )
+                    }
+
+                    MainNavDestination.DEBE_ENLER -> {
+                        DebeAndPeriodicBestsScreenContent(
+                            viewModel = viewModel,
+                            readStateByUrl = readStateByUrl
+                        )
                     }
 
                     MainNavDestination.ARAMA -> {
                         SearchScreenContent(
                             viewModel = viewModel,
                             readStateByUrl = readStateByUrl,
-                            onTopicClick = { viewModel.openTopic(it) },
+                            onTopicClick = { viewModel.openTopic(it, preferTodayMode = false) },
                             onOpenCloudflare = { viewModel.openCloudflareVerification() }
                         )
                     }
@@ -531,7 +588,8 @@ fun MainScaffold(
                                         title = title,
                                         slug = title.replace(" ", "-"),
                                         url = url
-                                    )
+                                    ),
+                                    preferTodayMode = false
                                 )
                             }
                         )
@@ -542,10 +600,447 @@ fun MainScaffold(
     }
 }
 
+@Composable
+private fun TopQuickSectionChip(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    Surface(
+        color = if (selected) EksiNeonGreen else MaterialTheme.colorScheme.surfaceVariant,
+        shape = RoundedCornerShape(50),
+        modifier = Modifier
+            .clip(RoundedCornerShape(50))
+            .clickable(onClick = onClick)
+            .border(
+                width = 0.6.dp,
+                color = if (selected) EksiNeonGreen else OledHairlineDivider,
+                shape = RoundedCornerShape(50)
+            )
+    ) {
+        Text(
+            text = label,
+            fontSize = 12.sp,
+            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+            color = if (selected) OledOnAccentColor else OledTextPrimary,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+        )
+    }
+}
+
 /**
- * Kullanıcı listeyi aşağı kaydırırken üst barı gizleyen, yukarı kaydırınca veya listenin
- * en üstündeyken geri getiren yön algılayıcı (Kural 1).
+ * 1. ÖZELLİK: KANALLAR SEKMESİ (`https://eksisozluk.com/basliklar/kanal/{kanal_slug}?p={page}`).
+ * Üst kısımda yatay kaydırılabilir 14 kanal çipi (`#spor`, `#teknoloji`, `#siyaset`, `#ekonomi`,
+ * `#sinema`, `#oyun`, `#bilim`, `#müzik`, `#edebiyat`, `#tarih`, `#otomotiv`, `#havacılık`,
+ * `#ilişkiler`, `#sağlık`) ve altında o kanalın güncel başlıkları yer alır.
  */
+@Composable
+private fun ChannelsScreenContent(
+    viewModel: EksinViewModel,
+    listState: LazyListState,
+    readStateByUrl: Map<String, TopicReadStateEntity>,
+    onTopicClick: (TopicItem) -> Unit,
+    onOpenCloudflare: () -> Unit
+) {
+    val selectedChannel by viewModel.selectedChannel.collectAsStateWithLifecycle()
+    val channelPagingItems = viewModel.channelTopicsPagingFlow.collectAsLazyPagingItems()
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+    ) {
+        // Yatay kaydırılabilir Kanal Çipleri (FilterChip)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(MaterialTheme.colorScheme.surface)
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 12.dp, vertical = 8.dp)
+                .testTag("channels_filter_row"),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            EksiChannel.entries.forEach { channel ->
+                val isSelected = selectedChannel == channel
+                FilterChip(
+                    selected = isSelected,
+                    onClick = { viewModel.selectChannel(channel) },
+                    shape = RoundedCornerShape(50),
+                    label = {
+                        Text(
+                            text = channel.hashtag,
+                            fontSize = 13.sp,
+                            fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium
+                        )
+                    },
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = EksiNeonGreen,
+                        selectedLabelColor = OledOnAccentColor,
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                        labelColor = OledTextPrimary
+                    ),
+                    border = FilterChipDefaults.filterChipBorder(
+                        enabled = true,
+                        selected = isSelected,
+                        borderColor = OledHairlineDivider,
+                        selectedBorderColor = EksiNeonGreen
+                    ),
+                    modifier = Modifier.testTag("channel_chip_${channel.slug}")
+                )
+            }
+        }
+
+        // Seçili kanal bilgi bandı
+        Surface(
+            color = OledPillGreenBg,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = "${selectedChannel.hashtag} kanalı güncel başlıkları",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = EksiNeonGreen
+                )
+                Text(
+                    text = "/basliklar/kanal/${selectedChannel.slug}",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = OledTextSecondary
+                )
+            }
+        }
+
+        HorizontalDivider(color = OledHairlineDivider, thickness = 0.5.dp)
+
+        TopicPagingList(
+            pagingItems = channelPagingItems,
+            listState = listState,
+            isDebeMode = false,
+            readStateByUrl = readStateByUrl,
+            onTopicClick = onTopicClick,
+            onOpenCloudflare = onOpenCloudflare,
+            emptyMessage = "${selectedChannel.hashtag} kanalında güncel başlık bulunamadı."
+        )
+    }
+}
+
+/**
+ * 3. ÖZELLİK: GELİŞMİŞ DEBE VE DÖNEMSEL ENLER (GÜN / HAFTA / AY) SEKMESİ.
+ * - Kategori 1: Dünün En Beğenilen Entry'leri (DEBE 50 - `/debe`)
+ * - Kategori 2: Dönemsel Enler (`Önceki Gün`, `Önceki Hafta`, `Önceki Ay`)
+ *   ve alt sekmeler (`En Beğenilen Entry'ler`, `En Popüler Konular`).
+ */
+@Composable
+private fun DebeAndPeriodicBestsScreenContent(
+    viewModel: EksinViewModel,
+    readStateByUrl: Map<String, TopicReadStateEntity>
+) {
+    val activeCategory by viewModel.debeAndStatsCategory.collectAsStateWithLifecycle()
+    val activePeriod by viewModel.periodicTimeRange.collectAsStateWithLifecycle()
+    val activeRankingTab by viewModel.periodicRankingTab.collectAsStateWithLifecycle()
+    val uiState by viewModel.debeAndStatsUiState.collectAsStateWithLifecycle()
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+    ) {
+        // Ana Kategori Seçici: 1) Dünün En Beğenilenleri (DEBE) | 2) Dönemsel Enler (Gün/Hafta/Ay)
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(MaterialTheme.colorScheme.surface)
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                DebeAndStatsCategory.entries.forEach { category ->
+                    val isSelected = activeCategory == category
+                    FilterChip(
+                        selected = isSelected,
+                        onClick = { viewModel.selectDebeAndStatsCategory(category) },
+                        shape = RoundedCornerShape(50),
+                        label = {
+                            Text(
+                                text = category.title,
+                                fontSize = 12.sp,
+                                fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium
+                            )
+                        },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = EksiNeonGreen,
+                            selectedLabelColor = OledOnAccentColor,
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                            labelColor = OledTextPrimary
+                        ),
+                        border = FilterChipDefaults.filterChipBorder(
+                            enabled = true,
+                            selected = isSelected,
+                            borderColor = OledHairlineDivider,
+                            selectedBorderColor = EksiNeonGreen
+                        ),
+                        modifier = Modifier.testTag("debe_cat_${category.name.lowercase()}")
+                    )
+                }
+            }
+
+            // Dönemsel Enler aktifse: Dönem Çipleri (Önceki Gün / Önceki Hafta / Önceki Ay) +
+            // Alt Sekmeler (En Beğenilen Entry'ler / En Popüler Konular)
+            AnimatedVisibility(visible = activeCategory == DebeAndStatsCategory.PERIODIC_BESTS) {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        PeriodicTimeRange.entries.forEach { period ->
+                            val isSelected = activePeriod == period
+                            FilterChip(
+                                selected = isSelected,
+                                onClick = { viewModel.selectPeriodicTimeRange(period) },
+                                shape = RoundedCornerShape(50),
+                                label = {
+                                    Text(
+                                        text = period.label,
+                                        fontSize = 12.sp,
+                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                                    )
+                                },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = OledPillGreenBg,
+                                    selectedLabelColor = EksiNeonGreen,
+                                    containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                                    labelColor = OledTextPrimary
+                                ),
+                                border = FilterChipDefaults.filterChipBorder(
+                                    enabled = true,
+                                    selected = isSelected,
+                                    borderColor = OledHairlineDivider,
+                                    selectedBorderColor = EksiNeonGreen
+                                ),
+                                modifier = Modifier.testTag("period_chip_${period.name.lowercase()}")
+                            )
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        PeriodicRankingTab.entries.forEach { tab ->
+                            val isSelected = activeRankingTab == tab
+                            Surface(
+                                color = if (isSelected) EksiNeonGreen else MaterialTheme.colorScheme.surfaceVariant,
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .clickable { viewModel.selectPeriodicRankingTab(tab) }
+                                    .border(
+                                        width = 0.8.dp,
+                                        color = if (isSelected) EksiNeonGreen else OledHairlineDivider,
+                                        shape = RoundedCornerShape(10.dp)
+                                    )
+                                    .testTag("periodic_tab_${tab.name.lowercase()}")
+                            ) {
+                                Box(
+                                    modifier = Modifier.padding(vertical = 8.dp, horizontal = 10.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = tab.title,
+                                        fontSize = 12.sp,
+                                        fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium,
+                                        color = if (isSelected) OledOnAccentColor else OledTextPrimary
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        HorizontalDivider(color = OledHairlineDivider, thickness = 0.5.dp)
+
+        when (val state = uiState) {
+            is DebeAndStatsUiState.Loading -> {
+                TopicListSkeletonShimmer(itemCount = 10)
+            }
+
+            is DebeAndStatsUiState.Error -> {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(24.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Text(
+                            text = state.message,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = OledTextSecondary
+                        )
+                        Button(
+                            onClick = { viewModel.loadDebeAndStats() },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = EksiNeonGreen,
+                                contentColor = OledOnAccentColor
+                            ),
+                            shape = RoundedCornerShape(50)
+                        ) {
+                            Text("Tekrar Dene", fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+
+            is DebeAndStatsUiState.Success -> {
+                Column(modifier = Modifier.fillMaxSize()) {
+                    Surface(
+                        color = OledPillGreenBg,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = state.subtitle,
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = EksiNeonGreen
+                            )
+                            Text(
+                                text = "Yenile ↻",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = OledTextSecondary,
+                                modifier = Modifier.clickable { viewModel.loadDebeAndStats() }
+                            )
+                        }
+                    }
+
+                    HorizontalDivider(color = OledHairlineDivider, thickness = 0.5.dp)
+
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(MaterialTheme.colorScheme.background)
+                            .testTag("debe_stats_list"),
+                        contentPadding = PaddingValues(vertical = 2.dp)
+                    ) {
+                        itemsIndexed(
+                            items = state.items,
+                            key = { idx, item -> "${idx}_${item.url}" }
+                        ) { index, item ->
+                            val cleanUrl = item.url.substringBefore('?')
+                            val isRead = readStateByUrl.containsKey(cleanUrl)
+
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(MaterialTheme.colorScheme.background)
+                                    .clickable { viewModel.openRankedItem(item) }
+                                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Row(
+                                    modifier = Modifier.weight(1f),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                ) {
+                                    Surface(
+                                        color = OledPillGreenBg,
+                                        shape = CircleShape,
+                                        modifier = Modifier
+                                            .size(30.dp)
+                                            .border(0.6.dp, EksiNeonGreen.copy(alpha = 0.45f), CircleShape)
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            Text(
+                                                text = "${index + 1}",
+                                                color = EksiNeonGreen,
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.ExtraBold
+                                            )
+                                        }
+                                    }
+
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = item.title,
+                                            fontSize = 15.sp,
+                                            lineHeight = 21.sp,
+                                            color = if (isRead) OledTopicRead else OledTopicUnread,
+                                            fontWeight = if (isRead) FontWeight.Normal else FontWeight.Medium
+                                        )
+                                        if (!item.author.isNullOrBlank() || !item.entryId.isNullOrBlank()) {
+                                            Spacer(modifier = Modifier.height(3.dp))
+                                            val metaText = buildString {
+                                                if (!item.author.isNullOrBlank()) {
+                                                    append("@${item.author}")
+                                                }
+                                                if (!item.entryId.isNullOrBlank()) {
+                                                    if (isNotEmpty()) append(" • ")
+                                                    append("Entry #${item.entryId}")
+                                                }
+                                            }
+                                            Text(
+                                                text = metaText,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontSize = 11.sp,
+                                                color = EksiNeonGreen.copy(alpha = 0.8f)
+                                            )
+                                        }
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.width(12.dp))
+
+                                Surface(
+                                    color = OledPillGreenBg,
+                                    shape = RoundedCornerShape(50)
+                                ) {
+                                    Text(
+                                        text = item.badgeText,
+                                        color = EksiNeonGreen,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                                    )
+                                }
+                            }
+
+                            HorizontalDivider(color = OledHairlineDivider, thickness = 0.5.dp)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun rememberDirectionalHeaderVisibility(listState: LazyListState): Boolean {
     var previousIndex by remember(listState) { mutableIntStateOf(listState.firstVisibleItemIndex) }
@@ -589,7 +1084,7 @@ private fun SearchScreenContent(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(OledPitchBlack)
+            .background(MaterialTheme.colorScheme.background)
     ) {
         OutlinedTextField(
             value = query,
@@ -633,8 +1128,8 @@ private fun SearchScreenContent(
             colors = OutlinedTextFieldDefaults.colors(
                 focusedBorderColor = EksiNeonGreen,
                 unfocusedBorderColor = OledHairlineDivider,
-                focusedContainerColor = OledCardSurface,
-                unfocusedContainerColor = OledCardSurface,
+                focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
                 focusedTextColor = OledTextPrimary,
                 unfocusedTextColor = OledTextPrimary
             ),
@@ -656,8 +1151,8 @@ private fun SearchScreenContent(
                     shape = RoundedCornerShape(50),
                     colors = FilterChipDefaults.filterChipColors(
                         selectedContainerColor = EksiNeonGreen,
-                        selectedLabelColor = Color.Black,
-                        containerColor = OledCardSurface,
+                        selectedLabelColor = OledOnAccentColor,
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant,
                         labelColor = OledTextPrimary
                     )
                 )
@@ -693,14 +1188,6 @@ private fun SearchScreenContent(
     }
 }
 
-/**
- * Kural 2 & Kural 6:
- * - Gerçek OLED siyah (#000000) zemin üzerinde çok ince (#161616) ayırıcı çizgiler.
- * - Başlık metinleri 15sp (#EDEDED), daha önce okunmuş başlıklar hafif soluk (#888888).
- * - Sağ taraftaki entry sayıları koyu yeşil (#112415) dolgulu, parlak yeşil (#81C784) metinli
- *   yuvarlak hap (pill badge) içinde hizalı.
- * - Yükleme sırasında dönen çember yerine `TopicListSkeletonShimmer` gösterilir.
- */
 @Composable
 private fun TopicPagingList(
     pagingItems: LazyPagingItems<TopicItem>,
@@ -716,7 +1203,7 @@ private fun TopicPagingList(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(OledPitchBlack)
+            .background(MaterialTheme.colorScheme.background)
     ) {
         if (refreshState is LoadState.Loading && pagingItems.itemCount == 0) {
             TopicListSkeletonShimmer()
@@ -727,7 +1214,7 @@ private fun TopicPagingList(
             state = listState,
             modifier = Modifier
                 .fillMaxSize()
-                .background(OledPitchBlack)
+                .background(MaterialTheme.colorScheme.background)
                 .testTag("topic_paging_list"),
             contentPadding = PaddingValues(vertical = 2.dp)
         ) {
@@ -742,7 +1229,7 @@ private fun TopicPagingList(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .background(OledPitchBlack)
+                        .background(MaterialTheme.colorScheme.background)
                         .clickable { onTopicClick(item) }
                         .padding(horizontal = 16.dp, vertical = 14.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -753,7 +1240,6 @@ private fun TopicPagingList(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        // DEBE modunda sıra numarası rozeti (#1, #2, #3...)
                         if (isDebeMode) {
                             Surface(
                                 color = OledPillGreenBg,
@@ -802,7 +1288,6 @@ private fun TopicPagingList(
 
                     if (badgeText.isNotBlank()) {
                         Spacer(modifier = Modifier.width(12.dp))
-                        // Kural 2: Koyu yeşil (#112415) dolgulu, parlak yeşil (#81C784) metinli yuvarlak hap (pill badge)
                         Surface(
                             color = OledPillGreenBg,
                             shape = RoundedCornerShape(50)
@@ -818,7 +1303,6 @@ private fun TopicPagingList(
                     }
                 }
 
-                // Kural 2: Çok ince (#161616) ayırıcı çizgi
                 HorizontalDivider(color = OledHairlineDivider, thickness = 0.5.dp)
             }
 
@@ -832,7 +1316,7 @@ private fun TopicPagingList(
         if (refreshState is LoadState.Error && pagingItems.itemCount == 0) {
             Card(
                 shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(containerColor = OledCardSurface),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
                 modifier = Modifier
                     .align(Alignment.Center)
                     .padding(20.dp)
@@ -873,7 +1357,7 @@ private fun TopicPagingList(
                             onClick = onOpenCloudflare,
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = EksiNeonGreen,
-                                contentColor = Color.Black
+                                contentColor = OledOnAccentColor
                             )
                         ) {
                             Text("Doğrula", fontWeight = FontWeight.Bold)
@@ -909,6 +1393,7 @@ private fun ProfileAndStudioScreenContent(
     val readStates by viewModel.allReadStates.collectAsStateWithLifecycle()
     val bookmarks by viewModel.bookmarkedEntries.collectAsStateWithLifecycle()
     val hasCfClearance by viewModel.hasCfClearance.collectAsStateWithLifecycle()
+    val currentTheme by viewModel.themeMode.collectAsStateWithLifecycle()
 
     val selectedModel by viewModel.selectedImageModel.collectAsStateWithLifecycle()
     val selectedSize by viewModel.selectedImageSize.collectAsStateWithLifecycle()
@@ -922,15 +1407,76 @@ private fun ProfileAndStudioScreenContent(
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
-            .background(OledPitchBlack),
+            .background(MaterialTheme.colorScheme.background),
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
+        // 0. Tema / Renk Seçici Kartı (OLED Siyah, Koyu Gri, Klasik Beyaz)
+        item {
+            Card(
+                shape = RoundedCornerShape(14.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .border(0.5.dp, OledHairlineDivider, RoundedCornerShape(14.dp))
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Palette,
+                            contentDescription = null,
+                            tint = EksiNeonGreen
+                        )
+                        Text(
+                            text = "Arayüz Teması (OLED / Koyu / Beyaz)",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = EksiNeonGreen
+                        )
+                    }
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        AppThemeMode.entries.forEach { mode ->
+                            val isSelected = currentTheme == mode
+                            FilterChip(
+                                selected = isSelected,
+                                onClick = { viewModel.selectThemeMode(mode) },
+                                label = {
+                                    Text(
+                                        text = mode.title,
+                                        fontSize = 12.sp,
+                                        fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium
+                                    )
+                                },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = EksiNeonGreen,
+                                    selectedLabelColor = OledOnAccentColor,
+                                    containerColor = MaterialTheme.colorScheme.background,
+                                    labelColor = OledTextPrimary
+                                ),
+                                modifier = Modifier.testTag("profile_theme_${mode.storageKey}")
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
         // 1. Oturum & Cloudflare Kartı
         item {
             Card(
                 shape = RoundedCornerShape(14.dp),
-                colors = CardDefaults.cardColors(containerColor = OledCardSurface),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
                 modifier = Modifier
                     .fillMaxWidth()
                     .border(0.5.dp, OledHairlineDivider, RoundedCornerShape(14.dp))
@@ -971,7 +1517,7 @@ private fun ProfileAndStudioScreenContent(
                             onClick = { viewModel.openUserLogin() },
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = EksiNeonGreen,
-                                contentColor = Color.Black
+                                contentColor = OledOnAccentColor
                             ),
                             shape = RoundedCornerShape(50),
                             modifier = Modifier.testTag("profile_login_button")
@@ -1022,7 +1568,7 @@ private fun ProfileAndStudioScreenContent(
             items(readStates, key = { it.topicKey }) { state: TopicReadStateEntity ->
                 Card(
                     shape = RoundedCornerShape(12.dp),
-                    colors = CardDefaults.cardColors(containerColor = OledCardSurface),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
                     modifier = Modifier
                         .fillMaxWidth()
                         .border(0.5.dp, OledHairlineDivider, RoundedCornerShape(12.dp))
@@ -1077,7 +1623,7 @@ private fun ProfileAndStudioScreenContent(
         items(bookmarks, key = { it.entryId }) { item: BookmarkedEntryEntity ->
             Card(
                 shape = RoundedCornerShape(12.dp),
-                colors = CardDefaults.cardColors(containerColor = OledCardSurface),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
                 modifier = Modifier
                     .fillMaxWidth()
                     .border(0.5.dp, OledHairlineDivider, RoundedCornerShape(12.dp))
@@ -1127,7 +1673,7 @@ private fun ProfileAndStudioScreenContent(
         item {
             Card(
                 shape = RoundedCornerShape(14.dp),
-                colors = CardDefaults.cardColors(containerColor = OledCardSurface),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
                 modifier = Modifier
                     .fillMaxWidth()
                     .border(0.5.dp, OledHairlineDivider, RoundedCornerShape(14.dp))
@@ -1156,8 +1702,8 @@ private fun ProfileAndStudioScreenContent(
                                 label = { Text(model.displayName, fontSize = 11.sp) },
                                 colors = FilterChipDefaults.filterChipColors(
                                     selectedContainerColor = EksiNeonGreen,
-                                    selectedLabelColor = Color.Black,
-                                    containerColor = OledPitchBlack,
+                                    selectedLabelColor = OledOnAccentColor,
+                                    containerColor = MaterialTheme.colorScheme.background,
                                     labelColor = OledTextPrimary
                                 )
                             )
@@ -1172,8 +1718,8 @@ private fun ProfileAndStudioScreenContent(
                                 label = { Text(size.label, fontWeight = FontWeight.Bold) },
                                 colors = FilterChipDefaults.filterChipColors(
                                     selectedContainerColor = EksiNeonGreen,
-                                    selectedLabelColor = Color.Black,
-                                    containerColor = OledPitchBlack,
+                                    selectedLabelColor = OledOnAccentColor,
+                                    containerColor = MaterialTheme.colorScheme.background,
                                     labelColor = OledTextPrimary
                                 )
                             )
@@ -1191,8 +1737,8 @@ private fun ProfileAndStudioScreenContent(
                                 label = { Text(ratio.label, fontSize = 11.sp) },
                                 colors = FilterChipDefaults.filterChipColors(
                                     selectedContainerColor = EksiNeonGreen,
-                                    selectedLabelColor = Color.Black,
-                                    containerColor = OledPitchBlack,
+                                    selectedLabelColor = OledOnAccentColor,
+                                    containerColor = MaterialTheme.colorScheme.background,
                                     labelColor = OledTextPrimary
                                 )
                             )
@@ -1208,8 +1754,8 @@ private fun ProfileAndStudioScreenContent(
                         colors = OutlinedTextFieldDefaults.colors(
                             focusedBorderColor = EksiNeonGreen,
                             unfocusedBorderColor = OledHairlineDivider,
-                            focusedContainerColor = OledPitchBlack,
-                            unfocusedContainerColor = OledPitchBlack,
+                            focusedContainerColor = MaterialTheme.colorScheme.background,
+                            unfocusedContainerColor = MaterialTheme.colorScheme.background,
                             focusedTextColor = OledTextPrimary,
                             unfocusedTextColor = OledTextPrimary
                         )
@@ -1220,7 +1766,7 @@ private fun ProfileAndStudioScreenContent(
                         enabled = aiImageState !is AiImageState.Loading && promptInput.isNotBlank(),
                         colors = ButtonDefaults.buttonColors(
                             containerColor = EksiNeonGreen,
-                            contentColor = Color.Black
+                            contentColor = OledOnAccentColor
                         ),
                         shape = RoundedCornerShape(50),
                         modifier = Modifier.fillMaxWidth()

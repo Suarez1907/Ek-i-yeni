@@ -1,5 +1,6 @@
 package com.example.ui
 
+import android.content.Context
 import android.graphics.Bitmap
 import android.net.Uri
 import android.util.Log
@@ -12,8 +13,14 @@ import com.example.ai.GeminiHelper
 import com.example.ai.GeminiStreamState
 import com.example.data.local.BookmarkedEntryEntity
 import com.example.data.local.TopicReadStateEntity
+import com.example.data.model.DebeAndStatsCategory
+import com.example.data.model.DebeAndStatsUiState
+import com.example.data.model.EksiChannel
 import com.example.data.model.EntryItem
 import com.example.data.model.LeftFrameSection
+import com.example.data.model.PeriodicRankingTab
+import com.example.data.model.PeriodicTimeRange
+import com.example.data.model.RankedTopicOrEntryItem
 import com.example.data.model.SearchFilter
 import com.example.data.model.SearchSortOrder
 import com.example.data.model.TopicFilterMode
@@ -27,11 +34,13 @@ import com.example.network.WebViewCookieJar
 import com.example.network.WebViewFetchBridge
 import com.example.ui.auth.AuthWebViewMode
 import com.example.ui.sheets.BkzPreviewUiState
+import com.example.ui.theme.AppThemeMode
+import com.example.ui.theme.ThemePreferencesManager
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -42,7 +51,6 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeout
 import javax.inject.Inject
 
 sealed interface AiImageState {
@@ -96,6 +104,7 @@ private data class TopicQueryParams(
 @OptIn(ExperimentalCoroutinesApi::class)
 @HiltViewModel
 class EksinViewModel @Inject constructor(
+    @ApplicationContext private val appContext: Context,
     private val repository: EksiRepository,
     val cookieJar: WebViewCookieJar,
     val userAgentProvider: UserAgentProvider,
@@ -104,8 +113,34 @@ class EksinViewModel @Inject constructor(
     private val geminiHelper: GeminiHelper
 ) : ViewModel() {
 
+    // 4. ARAYÜZ RENK / TEMA SEÇENEĞİ (OLED Siyah, Koyu Gri, Klasik Beyaz)
+    private val _themeMode = MutableStateFlow(ThemePreferencesManager.loadSavedTheme(appContext))
+    val themeMode: StateFlow<AppThemeMode> = _themeMode.asStateFlow()
+
+    private val _showThemeDialog = MutableStateFlow(false)
+    val showThemeDialog: StateFlow<Boolean> = _showThemeDialog.asStateFlow()
+
+    // Sol Frame Sekmesi
     private val _selectedSection = MutableStateFlow(LeftFrameSection.GUNDEM)
     val selectedSection: StateFlow<LeftFrameSection> = _selectedSection.asStateFlow()
+
+    // 1. KANALLAR SEKMESİ (#spor, #teknoloji, #siyaset, #ekonomi, ...)
+    private val _selectedChannel = MutableStateFlow(EksiChannel.SPOR)
+    val selectedChannel: StateFlow<EksiChannel> = _selectedChannel.asStateFlow()
+
+    // 3. GELİŞMİŞ DEBE & DÖNEMSEL ENLER (Gün / Hafta / Ay)
+    private val _debeAndStatsCategory = MutableStateFlow(DebeAndStatsCategory.DEBE)
+    val debeAndStatsCategory: StateFlow<DebeAndStatsCategory> = _debeAndStatsCategory.asStateFlow()
+
+    private val _periodicTimeRange = MutableStateFlow(PeriodicTimeRange.YESTERDAY)
+    val periodicTimeRange: StateFlow<PeriodicTimeRange> = _periodicTimeRange.asStateFlow()
+
+    private val _periodicRankingTab = MutableStateFlow(PeriodicRankingTab.TOP_ENTRIES)
+    val periodicRankingTab: StateFlow<PeriodicRankingTab> = _periodicRankingTab.asStateFlow()
+
+    private val _debeAndStatsUiState = MutableStateFlow<DebeAndStatsUiState>(DebeAndStatsUiState.Loading)
+    val debeAndStatsUiState: StateFlow<DebeAndStatsUiState> = _debeAndStatsUiState.asStateFlow()
+    private var activeDebeStatsJob: Job? = null
 
     private val _refreshTrigger = MutableStateFlow(0)
 
@@ -130,7 +165,8 @@ class EksinViewModel @Inject constructor(
     private val _restoredReadState = MutableStateFlow<TopicReadStateEntity?>(null)
     val restoredReadState: StateFlow<TopicReadStateEntity?> = _restoredReadState.asStateFlow()
 
-    private val _topicFilterMode = MutableStateFlow(TopicFilterMode.ALL)
+    // 2. BAŞLIK İÇİ VARSAYILAN "SADECE BUGÜN" MODU (TODAY_POPULAR)
+    private val _topicFilterMode = MutableStateFlow(TopicFilterMode.TODAY_POPULAR)
     val topicFilterMode: StateFlow<TopicFilterMode> = _topicFilterMode.asStateFlow()
 
     private val _inTopicSearchQuery = MutableStateFlow("")
@@ -205,6 +241,16 @@ class EksinViewModel @Inject constructor(
             }
             .cachedIn(viewModelScope)
 
+    /**
+     * 1. KANALLAR Paging 3 Akışı (`https://eksisozluk.com/basliklar/kanal/{kanal_slug}?p={page}`).
+     */
+    val channelTopicsPagingFlow: Flow<PagingData<TopicItem>> =
+        combine(_selectedChannel, _refreshTrigger) { channel, _ -> channel }
+            .flatMapLatest { channel ->
+                repository.getChannelTopicsPager(channel)
+            }
+            .cachedIn(viewModelScope)
+
     val searchTopicsPagingFlow: Flow<PagingData<TopicItem>> =
         combine(_submittedSearchFilter, _refreshTrigger) { filter, _ -> filter }
             .flatMapLatest { filter ->
@@ -243,12 +289,104 @@ class EksinViewModel @Inject constructor(
     init {
         viewModelScope.launch {
             cloudflareManager.challengeEvents.collect { event: CloudflareChallengeEvent ->
-                // Arka plan isteklerinde 403/503 alındığında uygulama açılışında WebView'ı
-                // zorla tam ekran açıp Chromium rendernode hatası üretmek yerine,
-                // UI katmanına sinyal göndererek kullanıcının tek dokunuşla açmasını sağla.
                 _pendingCloudflareChallenge.value = event
             }
         }
+        loadDebeAndStats()
+    }
+
+    // 4. TEMA YÖNETİMİ
+    fun openThemeDialog() {
+        _showThemeDialog.value = true
+    }
+
+    fun dismissThemeDialog() {
+        _showThemeDialog.value = false
+    }
+
+    fun selectThemeMode(mode: AppThemeMode) {
+        ThemePreferencesManager.saveTheme(appContext, mode)
+        _themeMode.value = mode
+        _showThemeDialog.value = false
+    }
+
+    // 1. KANALLAR YÖNETİMİ
+    fun selectChannel(channel: EksiChannel) {
+        _selectedChannel.value = channel
+    }
+
+    // 3. GELİŞMİŞ DEBE & DÖNEMSEL ENLER YÖNETİMİ
+    fun selectDebeAndStatsCategory(category: DebeAndStatsCategory) {
+        if (_debeAndStatsCategory.value != category) {
+            _debeAndStatsCategory.value = category
+            loadDebeAndStats()
+        } else if (_debeAndStatsUiState.value !is DebeAndStatsUiState.Success) {
+            loadDebeAndStats()
+        }
+    }
+
+    fun selectPeriodicTimeRange(period: PeriodicTimeRange) {
+        if (_periodicTimeRange.value != period) {
+            _periodicTimeRange.value = period
+            loadDebeAndStats()
+        }
+    }
+
+    fun selectPeriodicRankingTab(tab: PeriodicRankingTab) {
+        if (_periodicRankingTab.value != tab) {
+            _periodicRankingTab.value = tab
+            loadDebeAndStats()
+        }
+    }
+
+    fun loadDebeAndStats() {
+        activeDebeStatsJob?.cancel()
+        val category = _debeAndStatsCategory.value
+        val period = _periodicTimeRange.value
+        val tab = _periodicRankingTab.value
+
+        activeDebeStatsJob = viewModelScope.launch {
+            _debeAndStatsUiState.value = DebeAndStatsUiState.Loading
+            if (category == DebeAndStatsCategory.DEBE) {
+                val res = repository.fetchDebeItems()
+                res.fold(
+                    onSuccess = { list ->
+                        _debeAndStatsUiState.value = DebeAndStatsUiState.Success(
+                            items = list,
+                            subtitle = "Dünün En Beğenilen ${list.size} Entry'si (DEBE)"
+                        )
+                    },
+                    onFailure = { err ->
+                        _debeAndStatsUiState.value = DebeAndStatsUiState.Error(
+                            err.localizedMessage ?: "DEBE listesi yüklenemedi."
+                        )
+                    }
+                )
+            } else {
+                val res = repository.fetchPeriodicBestItems(period = period, rankingTab = tab)
+                res.fold(
+                    onSuccess = { list ->
+                        _debeAndStatsUiState.value = DebeAndStatsUiState.Success(
+                            items = list,
+                            subtitle = "${period.label} • ${tab.title} (${list.size})"
+                        )
+                    },
+                    onFailure = { err ->
+                        _debeAndStatsUiState.value = DebeAndStatsUiState.Error(
+                            err.localizedMessage ?: "Dönemsel enler yüklenemedi."
+                        )
+                    }
+                )
+            }
+        }
+    }
+
+    fun openRankedItem(item: RankedTopicOrEntryItem) {
+        val topic = item.toTopicItem()
+        openTopic(
+            topic = topic,
+            preferTodayMode = !item.isDirectEntry
+        )
     }
 
     fun selectSection(section: LeftFrameSection) {
@@ -273,22 +411,67 @@ class EksinViewModel @Inject constructor(
         )
     }
 
-    fun openTopic(topic: TopicItem) {
+    /**
+     * 2. BAŞLIK İÇİ VARSAYILAN "SADECE BUGÜN" MODU:
+     * Kullanıcı Gündem, Bugün veya Kanallar listesinden bir başlığa tıkladığında,
+     * başlığı varsayılan olarak SADECE O GÜN (son 24 saatte) yazılan entry'leri gösterecek şekilde
+     * (`TopicFilterMode.TODAY_POPULAR` -> `?a=popular`) açar.
+     * Eğer bugün hiç entry girilmemişse `TopicPagingSource` otomatik olarak tüm entry'lere fallback yapar.
+     */
+    fun openTopic(
+        topic: TopicItem,
+        preferTodayMode: Boolean = true
+    ) {
         viewModelScope.launch {
             _bkzPreviewState.value = BkzPreviewUiState.Hidden
             _activeTopicMetadata.value = null
-            _topicFilterMode.value = TopicFilterMode.ALL
             _inTopicSearchQuery.value = ""
             _authorFilterInTopic.value = null
 
-            val savedState = repository.getSavedTopicReadState(
-                rawOrCleanTopicUrl = topic.cleanUrl,
-                topicId = topic.id
-            )
-            _restoredReadState.value = savedState
-            _initialTopicPage.value = savedState?.pageNumber ?: 1
+            val isDirectEntry = topic.url.contains("/entry/", ignoreCase = true) ||
+                topic.url.contains("a=debe", ignoreCase = true)
+
+            if (preferTodayMode && !isDirectEntry) {
+                _topicFilterMode.value = TopicFilterMode.TODAY_POPULAR
+                _restoredReadState.value = null
+                _initialTopicPage.value = 1
+            } else {
+                _topicFilterMode.value = TopicFilterMode.ALL
+                val savedState = repository.getSavedTopicReadState(
+                    rawOrCleanTopicUrl = topic.cleanUrl,
+                    topicId = topic.id
+                )
+                _restoredReadState.value = savedState
+                _initialTopicPage.value = if (isDirectEntry) 1 else (savedState?.pageNumber ?: 1)
+            }
+
             _selectedTopic.value = topic
         }
+    }
+
+    /**
+     * 2. "TÜMÜNÜ GÖSTER (İlk Entry'den İtibaren Tüm Başlığı Yükle)" Butonu Aksiyonu:
+     * URL'deki `?a=popular` / gün filtresini veya tekil entry yolunu kaldırıp
+     * başlığın 1. sayfasından (`?p=1`) itibaren tüm entry'leri sayfalama (Pager) desteğiyle yükler.
+     */
+    fun showAllTopicEntriesFromFirstPage() {
+        val current = _selectedTopic.value ?: return
+        val metadata = _activeTopicMetadata.value
+        val resolvedCleanUrl = metadata?.cleanTopicUrl?.takeIf {
+            it.isNotBlank() && !it.contains("/entry/", ignoreCase = true)
+        } ?: current.cleanUrl
+
+        _authorFilterInTopic.value = null
+        _inTopicSearchQuery.value = ""
+        _restoredReadState.value = null
+        _initialTopicPage.value = 1
+        _topicFilterMode.value = TopicFilterMode.ALL
+        _selectedTopic.value = current.copy(
+            title = metadata?.topicTitle?.takeIf { it.isNotBlank() } ?: current.title,
+            url = resolvedCleanUrl
+        )
+        _refreshTrigger.value += 1
+        _scrollToTopEvent.value += 1
     }
 
     /**
@@ -337,7 +520,8 @@ class EksinViewModel @Inject constructor(
                 title = cleaned,
                 slug = cleaned.replace(" ", "-"),
                 url = url
-            )
+            ),
+            preferTodayMode = false
         )
     }
 
@@ -407,6 +591,10 @@ class EksinViewModel @Inject constructor(
     }
 
     fun selectTopicFilterMode(mode: TopicFilterMode) {
+        if (mode == TopicFilterMode.ALL) {
+            showAllTopicEntriesFromFirstPage()
+            return
+        }
         if (mode != TopicFilterMode.SEARCH_IN_TOPIC) {
             _authorFilterInTopic.value = null
             _inTopicSearchQuery.value = ""
@@ -482,6 +670,7 @@ class EksinViewModel @Inject constructor(
     fun triggerRefresh() {
         refreshCookieState()
         _refreshTrigger.value += 1
+        loadDebeAndStats()
     }
 
     fun bookmarkEntry(entry: EntryItem) {
@@ -586,12 +775,13 @@ class EksinViewModel @Inject constructor(
     companion object {
         private const val TAG = "EksinViewModel"
 
-        fun provideFactory(context: android.content.Context): androidx.lifecycle.ViewModelProvider.Factory =
+        fun provideFactory(context: Context): androidx.lifecycle.ViewModelProvider.Factory =
             object : androidx.lifecycle.ViewModelProvider.Factory {
                 @Suppress("UNCHECKED_CAST")
                 override fun <T : ViewModel> create(modelClass: Class<T>): T {
                     val container = com.example.di.AppModule.getContainer(context)
                     return EksinViewModel(
+                        appContext = container.appContext,
                         repository = container.repository,
                         cookieJar = container.cookieJar,
                         userAgentProvider = container.userAgentProvider,
