@@ -190,12 +190,23 @@ data class RankedTopicOrEntryItem(
 ) {
     fun toTopicItem(): TopicItem {
         val cleanSlug = title.lowercase().replace(" ", "-")
-        val formattedBadge = if (favoriteCount > 0) "♥ $favoriteCount" else badgeText
+        val formattedBadge = if (favoriteCount > 0) {
+            if (isDirectEntry || !entryId.isNullOrBlank()) "♥ $favoriteCount" else "$favoriteCount entry"
+        } else {
+            badgeText
+        }
+        val validEntryId = entryId?.trim()?.filter { it.isDigit() }?.takeIf { it.isNotBlank() }
+        val resolvedUrl = when {
+            validEntryId != null -> "https://eksisozluk.com/entry/$validEntryId"
+            isDirectEntry -> url
+            else -> url.substringBefore('?')
+        }
         return TopicItem(
-            id = entryId ?: id,
+            id = validEntryId ?: id,
             title = title,
             slug = cleanSlug,
-            url = url,
+            url = resolvedUrl,
+            entryCount = favoriteCount,
             entryCountText = formattedBadge,
             favoriteCount = favoriteCount
         )

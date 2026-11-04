@@ -35,7 +35,8 @@ data class EntryDetailMetadata(
     val entryId: String,
     val favoriteCount: Int,
     val author: String?,
-    val topicTitle: String?
+    val topicTitle: String?,
+    val entryDate: String = ""
 )
 
 /**
@@ -236,8 +237,22 @@ class EksiParser @Inject constructor() {
     }
 
     /**
+     * Entry tarihinin (`.entry-date`) içinde bulunduğumuz güncel yıla (2026) ait olup olmadığını kontrol eder.
+     * 2010-2025 gibi eski yıllara ait entry'leri kesin olarak reddeder.
+     */
+    fun isRecent2026EntryDate(dateText: String): Boolean {
+        val createdPart = dateText.substringBefore("~").trim()
+        if (createdPart.isBlank()) return false
+        if (OLD_YEARS_REGEX.containsMatchIn(createdPart)) {
+            return false
+        }
+        return createdPart.contains("2026")
+    }
+
+    /**
      * Bir DEBE veya tekil entry detay sayfasının HTML'inden `data-favorite-count` (veya `.favorite-count`)
-     * değerini ve yazar bilgisini ayrıştırır.
+     * değerini, yazar bilgisini, oluşturma tarihini ve o entry'nin ait olduğu gerçek başlık adını
+     * (`#topic h1#title` / `data-title`) ayrıştırır.
      */
     fun parseEntryDetailMetadata(
         html: String,
@@ -245,9 +260,10 @@ class EksiParser @Inject constructor() {
     ): EntryDetailMetadata? {
         if (html.isBlank()) return null
         val doc: Document = Jsoup.parse(html, BASE_URL)
+        val cleanTargetId = targetEntryId?.trim()?.filter { it.isDigit() }.orEmpty()
 
-        val entrySelector = if (!targetEntryId.isNullOrBlank()) {
-            "#entry-item-list li[data-id=$targetEntryId], li#entry-item-$targetEntryId, #entry-item-list li[data-id], ul#entry-item-list > li"
+        val entrySelector = if (cleanTargetId.isNotBlank()) {
+            "#entry-item-list li[data-id=$cleanTargetId], li#entry-item-$cleanTargetId, #entry-item-list li[data-id], ul#entry-item-list > li"
         } else {
             "#entry-item-list li[data-id], ul#entry-item-list > li, li[id^=entry-item][data-id]"
         }
@@ -256,8 +272,9 @@ class EksiParser @Inject constructor() {
         if (li != null) {
             val resolvedEntryId = li.attr("data-id")
                 .ifBlank { li.id().removePrefix("entry-item-") }
-                .ifBlank { targetEntryId.orEmpty() }
+                .ifBlank { cleanTargetId }
                 .trim()
+                .filter { it.isDigit() }
 
             val favCount = li.attr("data-favorite-count").toIntOrNull()
                 ?: li.selectFirst("span.favorite-count, .favorite-count")
@@ -271,20 +288,29 @@ class EksiParser @Inject constructor() {
                 .trim()
                 .takeIf { it.isNotBlank() }
 
-            val topicTitle = doc.selectFirst("#title, h1#title")?.attr("data-title")?.trim()
-                ?.takeIf { it.isNotBlank() }
-                ?: doc.selectFirst("#title a span[itemprop=name], #title a, h1#title")?.text()?.trim()
-                    ?.takeIf { it.isNotBlank() }
+            val rawDateText = li.selectFirst("a.entry-date, footer div.info a.entry-date, a.permalink")
+                ?.text()
+                ?.trim()
+                .orEmpty()
+            val createdDate = splitEntryDates(rawDateText).first
+
+            val itemScope = li.parents().firstOrNull { it.hasClass("topic-item") || it.id() == "topic" } ?: doc
+            val titleEl = itemScope.selectFirst("#title, h1#title")
+                ?: doc.selectFirst("#topic h1#title, #title, h1#title")
+
+            val topicTitle = titleEl?.attr("data-title")?.trim()?.takeIf { it.isNotBlank() }
+                ?: titleEl?.selectFirst("a span[itemprop=name], a")?.text()?.trim()?.takeIf { it.isNotBlank() }
+                ?: titleEl?.text()?.trim()?.takeIf { it.isNotBlank() }
 
             return EntryDetailMetadata(
                 entryId = resolvedEntryId,
                 favoriteCount = favCount,
                 author = author,
-                topicTitle = topicTitle
+                topicTitle = topicTitle,
+                entryDate = createdDate
             )
         }
 
-        // Eğer doğrudan li[data-id] bulunamadıysa sayfadaki herhangi bir data-favorite-count veya .favorite-count elemanına bak
         val fallbackFavElement = doc.selectFirst("[data-favorite-count], .favorite-count, span.favorite-count")
         if (fallbackFavElement != null) {
             val favCount = fallbackFavElement.attr("data-favorite-count").toIntOrNull()
@@ -292,12 +318,16 @@ class EksiParser @Inject constructor() {
             val author = doc.selectFirst("[data-author], a.entry-author")?.let {
                 it.attr("data-author").ifBlank { it.text() }.trim()
             }?.takeIf { it.isNotBlank() }
-            val topicTitle = doc.selectFirst("#title, h1#title")?.text()?.trim()?.takeIf { it.isNotBlank() }
+            val titleEl = doc.selectFirst("#topic h1#title, #title, h1#title")
+            val topicTitle = titleEl?.attr("data-title")?.trim()?.takeIf { it.isNotBlank() }
+                ?: titleEl?.selectFirst("a span[itemprop=name], a")?.text()?.trim()?.takeIf { it.isNotBlank() }
+                ?: titleEl?.text()?.trim()?.takeIf { it.isNotBlank() }
             return EntryDetailMetadata(
-                entryId = targetEntryId.orEmpty(),
+                entryId = cleanTargetId,
                 favoriteCount = favCount,
                 author = author,
-                topicTitle = topicTitle
+                topicTitle = topicTitle,
+                entryDate = ""
             )
         }
 
@@ -307,14 +337,17 @@ class EksiParser @Inject constructor() {
     /**
      * Dönemsel Enler (`/istatistik/gecen-haftanin-en-begenilen-entryleri`,
      * `/istatistik/gecen-ayin-en-begenilen-entryleri`, vb.) tam sayfa (`isAjax = false`)
-     * veya parça HTML yanıtını ayrıştırır.
+     * istatistik HTML yanıtını ayrıştırır.
      *
-     * Güncel istatistik DOM yapısındaki:
-     * - `#entry-item-list li[data-id]`
-     * - `ul.topic-list li`, `ol.stats-list li`, `#content-body ul li`, `#content-body ol li`
-     * - `table tr`
-     * - `a[href*='/entry/']`
-     * elemanlarını eksiksiz destekler.
+     * ÖNEMLİ KORUMALAR:
+     * 1. Eğer Ekşi Sözlük `/istatistik/...` isteğini ana sayfaya (`/`) veya giriş sayfasına (`/giris`)
+     *    yönlendirmişse (sayfada `#entry-item-list` veya `div.topic-item` rastgele 10 yıllık entry akışı varsa),
+     *    ana sayfadaki rastgele eski entry'leri istatistik sanmamak için derhal `emptyList()` döner.
+     * 2. Asla sentetik entry ID üretmez veya `?a=nice` (tüm zamanlar) parametresi eklemez.
+     * 3. `isEntriesMode == true` iken sadece gerçek `<a href="/entry/{gerçek_id}">` bağlantılarını ve
+     *    karşısındaki başlık adlarını birebir eşleştirir.
+     * 4. `isEntriesMode == false` ("En Popüler Konular") iken sadece gerçek başlık URL'lerini (`topic.url`)
+     *    `isDirectEntry = false`, `entryId = null` olarak bağlar.
      */
     fun parsePeriodicStatsList(
         html: String,
@@ -324,197 +357,152 @@ class EksiParser @Inject constructor() {
         if (html.isBlank()) return emptyList()
         val fullDoc: Document = Jsoup.parse(html, BASE_URL)
 
-        // Eğer tam sayfa HTML (`isAjax = false`) çekildiyse, sol frame'deki (#partial-index) gündem listesini
-        // istatistik içeriğiyle karıştırmamak için önce ana içerik gövdesini (#content-body / #content / main) hedefle.
-        val hasContentBody = fullDoc.selectFirst("#content-body, #content, main, article") != null
-        val scopeDoc: Element = if (hasContentBody) {
-            val clone = fullDoc.clone()
-            clone.select("#partial-index, nav#partial-index, #top-navigation, #sub-navigation, aside").remove()
-            clone.selectFirst("#content-body, #content, main, article") ?: clone.body()
-        } else {
-            fullDoc.body()
-        }
-
-        // Eğer sayfa giriş sayfasına (/giris) yönlendirilmişse boş dön ki Repository otomatik Şükela/DEBE fallback yapsın
-        if (scopeDoc.selectFirst("form#login-form-container, input#Password, #login-form") != null &&
-            scopeDoc.select("a[href*='/entry/'], ul.topic-list li, table tr").isEmpty()
-        ) {
+        // Giriş sayfasına (/giris) yönlendirilmişse boş dön
+        if (fullDoc.selectFirst("form#login-form-container, input#Password, #login-form") != null) {
             return emptyList()
         }
 
-        // 1. Durum: Sayfa doğrudan `#entry-item-list li` (tam entry kartları) içeriyorsa
-        val directEntryNodes = scopeDoc.select(
-            "#entry-item-list li[data-id], ul#entry-item-list > li, li[id^=entry-item][data-id]"
-        )
-        if (directEntryNodes.isNotEmpty()) {
-            val topicPage = parseTopicPage(html = html, requestedUrl = BASE_URL, fallbackPage = 1)
-            val mapped = topicPage.entries.mapIndexed { idx, entry ->
-                val fav = entry.favoriteCount
-                RankedTopicOrEntryItem(
-                    rank = idx + 1,
-                    id = entry.id,
-                    title = entry.topicTitle,
-                    url = "$BASE_URL/entry/${entry.id}",
-                    badgeText = if (fav > 0) "♥ $fav" else "♥ En Beğenilen",
-                    favoriteCount = fav,
-                    author = entry.author,
-                    entryId = entry.id,
-                    snippet = entry.plainText.take(140),
-                    isDirectEntry = true
-                )
-            }
-            if (mapped.isNotEmpty()) {
-                return if (isEntriesMode) {
-                    mapped.sortedByDescending { it.favoriteCount }
-                        .mapIndexed { i, item -> item.copy(rank = i + 1) }
-                } else {
-                    mapped
-                }
-            }
+        // Ana sayfaya (/) veya normal bir başlık sayfasına (#entry-item-list / div.topic-item) yönlendirilmişse
+        // 10 yıllık rastgele ana sayfa entry'lerini Dönemsel Enler listesine karıştırmamak için boş dön!
+        if (fullDoc.select("#entry-item-list li[data-id], div.topic-item").isNotEmpty()) {
+            return emptyList()
         }
+
+        val clone = fullDoc.clone()
+        clone.select(
+            "#partial-index, nav#partial-index, #top-navigation, #sub-navigation, aside, header, footer, #entry-item-list, div.topic-item"
+        ).remove()
+        val scopeDoc: Element = clone.selectFirst("#content-body, #content, main, article") ?: return emptyList()
+
+        val candidateRows = scopeDoc.select(
+            "ul.topic-list li, ol.stats-list li, div.stats-container li, table tr"
+        )
+        if (candidateRows.isEmpty()) return emptyList()
 
         val parsedItems = mutableListOf<RankedTopicOrEntryItem>()
         var rank = 1
-
-        // 2. Durum: `ul.topic-list li`, `ol.stats-list li`, `#content-body ul li`, `table tr` satırları
-        val candidateRows = scopeDoc.select(
-            "ul.topic-list li, ol.stats-list li, #content-body ul li, #content-body ol li, table tr, div.stats-container li"
-        )
 
         for (row in candidateRows) {
             if (rank > 50) break
             if (row.hasClass("sponsored") || row.id().contains("sponsored", ignoreCase = true)) continue
             if (row.tagName().equals("tr", ignoreCase = true) && row.select("th").isNotEmpty()) continue
 
-            val entryAnchor = row.selectFirst("a[href*='/entry/']")
-            val primaryAnchor = entryAnchor ?: row.selectFirst("a[href]") ?: continue
+            if (isEntriesMode) {
+                // "En Beğenilen Entry'ler": Sadece gerçek `/entry/{digits}` linki olan satırları kabul et
+                val entryAnchor = row.selectFirst("a[href*='/entry/']") ?: continue
+                val rawEntryHref = entryAnchor.attr("href").trim()
+                val normalizedEntryUrl = normalizeUrl(rawEntryHref).substringBefore('?')
+                val realEntryId = normalizedEntryUrl
+                    .substringAfter("/entry/", "")
+                    .filter { it.isDigit() }
+                if (realEntryId.isBlank()) continue
 
-            val rawHref = primaryAnchor.attr("href").trim()
-            if (rawHref.isBlank() ||
-                rawHref.startsWith("javascript:") ||
-                rawHref.startsWith("#") ||
-                rawHref.contains("/giris", ignoreCase = true) ||
-                rawHref.contains("/kayit", ignoreCase = true) ||
-                rawHref.contains("/iletisim", ignoreCase = true)
-            ) {
-                continue
-            }
+                // Satırda ayrıca başlık linki varsa veya caption varsa başlık adını al
+                val topicAnchor = row.select("a[href]").firstOrNull { a ->
+                    val h = a.attr("href").trim()
+                    h.isNotBlank() &&
+                        !h.contains("/entry/", ignoreCase = true) &&
+                        !h.contains("/biri/", ignoreCase = true) &&
+                        !h.startsWith("javascript:") &&
+                        !h.startsWith("#")
+                } ?: entryAnchor
 
-            // Eğer bir satırda hem başlık linki hem `/entry/` linki varsa başlık adını başlık linkinden veya caption'dan al
-            val topicAnchor = row.select("a[href]").firstOrNull { a ->
-                val h = a.attr("href")
-                h.isNotBlank() && !h.contains("/entry/") && !h.contains("/biri/")
-            } ?: primaryAnchor
+                val smallElement = entryAnchor.selectFirst("small")
+                    ?: topicAnchor.selectFirst("small")
+                    ?: row.selectFirst("small, span.favorite-count, .favorite-count, td.count, td:last-child")
 
-            val smallElement = primaryAnchor.selectFirst("small")
-                ?: topicAnchor.selectFirst("small")
-                ?: row.selectFirst("small, span.favorite-count, .favorite-count, td.count, td:last-child")
-
-            val smallText = smallElement?.takeIf { it != primaryAnchor && it != topicAnchor }
-                ?.text()?.trim().orEmpty()
-
-            val favOrEntryCount = row.attr("data-favorite-count").toIntOrNull()
-                ?: primaryAnchor.attr("data-favorite-count").toIntOrNull()
-                ?: parseEntryCount(smallText)
-
-            val authorElement = row.selectFirst("a[href*='/biri/'], a.entry-author, span.author, div.detail, span.detail")
-            val detailAuthor = authorElement?.text()?.trim()?.removePrefix("@")?.takeIf {
-                it.isNotBlank() && !it.equals(smallText, ignoreCase = true)
-            }
-
-            val caption = topicAnchor.selectFirst("span.caption")?.text()?.trim()
-                ?: primaryAnchor.selectFirst("span.caption")?.text()?.trim()
-
-            val title = if (!caption.isNullOrBlank()) {
-                caption
-            } else {
-                val clone = topicAnchor.clone()
-                clone.select("small, div.detail, span.detail, span.author").remove()
-                clone.text().trim()
-            }.removePrefix("#").trim()
-
-            if (title.isBlank() || title.length < 2) continue
-
-            val targetHref = (entryAnchor ?: topicAnchor).attr("href").trim()
-            val normalizedUrl = normalizeUrl(targetHref)
-            val entryId = if (normalizedUrl.contains("/entry/")) {
-                normalizedUrl.substringAfter("/entry/").substringBefore("?").filter { it.isDigit() }
-            } else {
-                null
-            }
-
-            val finalUrl = if (isEntriesMode && entryId == null && !normalizedUrl.contains("a=")) {
-                val sep = if (normalizedUrl.contains("?")) "&" else "?"
-                val param = if (period == PeriodicTimeRange.YESTERDAY) "a=dailynice" else "a=nice"
-                "$normalizedUrl$sep$param"
-            } else {
-                normalizedUrl
-            }
-
-            val badge = when {
-                isEntriesMode && favOrEntryCount > 0 -> "♥ $favOrEntryCount"
-                isEntriesMode && smallText.isNotBlank() -> "♥ $smallText"
-                !isEntriesMode && favOrEntryCount > 0 -> "${ smallText.ifBlank { favOrEntryCount.toString() } } entry"
-                !isEntriesMode && smallText.isNotBlank() -> "$smallText entry"
-                isEntriesMode -> "♥ ..."
-                else -> "Popüler"
-            }
-
-            parsedItems.add(
-                RankedTopicOrEntryItem(
-                    rank = rank,
-                    id = entryId ?: extractTopicId(normalizedUrl).ifBlank { "stat_${period.name}_$rank" },
-                    title = title,
-                    url = finalUrl,
-                    badgeText = badge,
-                    favoriteCount = favOrEntryCount,
-                    author = detailAuthor,
-                    entryId = entryId,
-                    isDirectEntry = isEntriesMode || !entryId.isNullOrBlank()
-                )
-            )
-            rank++
-        }
-
-        // 3. Durum: Sayfada doğrudan `a[href*='/entry/']` elemanları varsa ve üstteki liste boş döndüyse
-        if (parsedItems.isEmpty()) {
-            val entryLinks = scopeDoc.select("a[href*='/entry/']")
-            for (anchor in entryLinks) {
-                if (rank > 50) break
-                val rawHref = anchor.attr("href").trim()
-                val normalizedUrl = normalizeUrl(rawHref)
-                val entryId = normalizedUrl.substringAfter("/entry/").substringBefore("?").filter { it.isDigit() }
-                if (entryId.isBlank()) continue
-
-                val parentContainer = anchor.parent()
-                val smallText = (anchor.selectFirst("small") ?: parentContainer?.selectFirst("small, .favorite-count"))
+                val smallText = smallElement?.takeIf { it != entryAnchor && it != topicAnchor }
                     ?.text()?.trim().orEmpty()
-                val favCount = anchor.attr("data-favorite-count").toIntOrNull()
-                    ?: parentContainer?.attr("data-favorite-count")?.toIntOrNull()
+
+                val favCount = row.attr("data-favorite-count").toIntOrNull()
+                    ?: entryAnchor.attr("data-favorite-count").toIntOrNull()
                     ?: parseEntryCount(smallText)
 
-                val clone = anchor.clone()
-                clone.select("small").remove()
-                val rawTitle = clone.text().trim().removePrefix("#")
-                val title = if (rawTitle.isNotBlank() && !rawTitle.all { it.isDigit() }) {
-                    rawTitle
+                val authorElement = row.selectFirst("a[href*='/biri/'], a.entry-author, span.author, div.detail, span.detail")
+                val detailAuthor = authorElement?.text()?.trim()?.removePrefix("@")?.takeIf {
+                    it.isNotBlank() && !it.equals(smallText, ignoreCase = true)
+                }
+
+                val caption = topicAnchor.selectFirst("span.caption")?.text()?.trim()
+                    ?: entryAnchor.selectFirst("span.caption")?.text()?.trim()
+
+                val extractedTitle = if (!caption.isNullOrBlank()) {
+                    caption
                 } else {
-                    parentContainer?.text()?.replace(anchor.text(), "")?.trim()
-                        ?.takeIf { it.isNotBlank() }
-                        ?: "Entry #$entryId"
+                    val anchorClone = topicAnchor.clone()
+                    anchorClone.select("small, div.detail, span.detail, span.author").remove()
+                    anchorClone.text().trim()
+                }.removePrefix("#").trim()
+
+                if (extractedTitle.isBlank() || extractedTitle.all { it.isDigit() }) continue
+
+                parsedItems.add(
+                    RankedTopicOrEntryItem(
+                        rank = rank,
+                        id = realEntryId,
+                        title = extractedTitle,
+                        url = "$BASE_URL/entry/$realEntryId",
+                        badgeText = if (favCount > 0) "♥ $favCount" else "♥ ...",
+                        favoriteCount = favCount,
+                        author = detailAuthor,
+                        entryId = realEntryId,
+                        isDirectEntry = true
+                    )
+                )
+                rank++
+            } else {
+                // "En Popüler Konular": Sadece gerçek başlık URL'si olan satırları kabul et (`entryId = null`, `isDirectEntry = false`)
+                val topicAnchor = row.select("a[href]").firstOrNull { a ->
+                    val h = a.attr("href").trim()
+                    h.isNotBlank() &&
+                        !h.startsWith("javascript:") &&
+                        !h.startsWith("#") &&
+                        !h.contains("/entry/", ignoreCase = true) &&
+                        !h.contains("/biri/", ignoreCase = true) &&
+                        !h.contains("/giris", ignoreCase = true) &&
+                        !h.contains("/kayit", ignoreCase = true) &&
+                        !h.contains("/iletisim", ignoreCase = true)
+                } ?: continue
+
+                val rawTopicHref = topicAnchor.attr("href").trim()
+                val cleanTopicUrl = stripTrackedParameters(rawTopicHref)
+                val topicId = extractTopicId(cleanTopicUrl)
+                val slug = extractSlug(cleanTopicUrl)
+                if (slug.isBlank()) continue
+
+                val smallElement = topicAnchor.selectFirst("small")
+                    ?: row.selectFirst("small, td.count, td:last-child")
+                val smallText = smallElement?.takeIf { it != topicAnchor }?.text()?.trim().orEmpty()
+                val entryCount = parseEntryCount(smallText)
+
+                val caption = topicAnchor.selectFirst("span.caption")?.text()?.trim()
+                val extractedTitle = if (!caption.isNullOrBlank()) {
+                    caption
+                } else {
+                    val anchorClone = topicAnchor.clone()
+                    anchorClone.select("small, div.detail, span.detail, span.author").remove()
+                    anchorClone.text().trim()
+                }.trim()
+
+                if (extractedTitle.isBlank() || extractedTitle.length < 2) continue
+
+                val badge = when {
+                    entryCount > 0 -> "${smallText.ifBlank { entryCount.toString() }} entry"
+                    smallText.isNotBlank() -> "$smallText entry"
+                    else -> "Popüler"
                 }
 
                 parsedItems.add(
                     RankedTopicOrEntryItem(
                         rank = rank,
-                        id = entryId,
-                        title = title,
-                        url = normalizedUrl,
-                        badgeText = if (favCount > 0) "♥ $favCount" else "♥ ...",
-                        favoriteCount = favCount,
+                        id = topicId.ifBlank { slug },
+                        title = extractedTitle,
+                        url = cleanTopicUrl,
+                        badgeText = badge,
+                        favoriteCount = entryCount,
                         author = null,
-                        entryId = entryId,
-                        isDirectEntry = true
+                        entryId = null,
+                        isDirectEntry = false
                     )
                 )
                 rank++
@@ -522,13 +510,23 @@ class EksiParser @Inject constructor() {
         }
 
         if (parsedItems.isNotEmpty()) {
-            val distinctList = parsedItems.distinctBy { it.url }.take(50)
+            val distinctList = if (isEntriesMode) {
+                parsedItems
+                    .distinctBy { it.entryId ?: it.url }
+                    .distinctBy { it.title.trim().lowercase() }
+                    .take(50)
+            } else {
+                parsedItems
+                    .distinctBy { it.url }
+                    .distinctBy { it.title.trim().lowercase() }
+                    .take(50)
+            }
             return if (isEntriesMode && distinctList.any { it.favoriteCount > 0 }) {
                 distinctList
                     .sortedByDescending { it.favoriteCount }
                     .mapIndexed { idx, item -> item.copy(rank = idx + 1) }
             } else {
-                distinctList
+                distinctList.mapIndexed { idx, item -> item.copy(rank = idx + 1) }
             }
         }
 
@@ -632,10 +630,10 @@ class EksiParser @Inject constructor() {
     ): TopicPageData {
         val doc: Document = Jsoup.parse(html, BASE_URL)
 
-        val titleContainer = doc.selectFirst("#title, h1#title")
-        val titleAnchor = doc.selectFirst("#title a[href], h1#title a[href]")
+        val titleContainer = doc.selectFirst("#topic #title, #topic h1#title, #title, h1#title")
+        val titleAnchor = doc.selectFirst("#topic #title a[href], #topic h1#title a[href], #title a[href], h1#title a[href]")
         val topicTitle = titleContainer?.attr("data-title")?.trim()?.takeIf { it.isNotBlank() }
-            ?: doc.selectFirst("#title a span[itemprop=name], #title a, h1#title")
+            ?: doc.selectFirst("#topic #title a span[itemprop=name], #title a span[itemprop=name], #title a, h1#title")
                 ?.text()
                 ?.trim()
                 ?.takeIf { it.isNotBlank() }
@@ -653,6 +651,29 @@ class EksiParser @Inject constructor() {
         val topicSlug = titleContainer?.attr("data-slug")
             ?.takeIf { it.isNotBlank() }
             ?: extractSlug(canonicalUrl)
+
+        // Eğer `?a=popular` veya `?a=tracked` isteği o başlıkta bugün entry olmadığı için Ekşi Sözlük tarafından
+        // ana sayfaya (çoklu `div.topic-item` veya farklı bir `topicId`) yönlendirildiyse boş liste döndür ki
+        // Repository otomatik olarak başlığın kendi parametresiz URL'sine (`TopicFilterMode.ALL`) fallback yapsın!
+        val requestedTopicId = if (!isDirectSingleEntryUrl(requestedUrl)) extractTopicId(requestedUrl) else ""
+        val isRedirectedToDifferentTopic = (containsTodayPopularParam(requestedUrl) || containsTrackedParam(requestedUrl)) &&
+            (doc.select("div.topic-item").size > 1 ||
+                (requestedTopicId.isNotBlank() && topicId.isNotBlank() && requestedTopicId != topicId))
+
+        if (isRedirectedToDifferentTopic) {
+            return TopicPageData(
+                topicId = requestedTopicId.ifBlank { topicId },
+                topicTitle = extractReadableTitleFromUrl(requestedUrl),
+                topicSlug = extractSlug(requestedUrl),
+                cleanTopicUrl = stripTrackedParameters(requestedUrl),
+                currentPage = fallbackPage,
+                pageCount = 1,
+                entries = emptyList(),
+                usedTrackedFallback = usedTrackedFallback,
+                usedTodayFallback = usedTodayFallback,
+                isSingleEntryView = false
+            )
+        }
 
         // Sayfalama bilgisi: div.pager -> data-currentpage & data-pagecount
         val pagerElement = doc.selectFirst("div.pager")
@@ -674,7 +695,22 @@ class EksiParser @Inject constructor() {
         }
 
         val lowerReqUrl = requestedUrl.lowercase()
+        val isSingleEntry = isDirectSingleEntryUrl(requestedUrl) ||
+            lowerReqUrl.contains("a=debe")
+        val requestedSingleEntryId = if (isDirectSingleEntryUrl(requestedUrl)) {
+            requestedUrl.substringBefore('?').substringAfter("/entry/", "").filter { it.isDigit() }
+        } else {
+            ""
+        }
+
         val entries = when {
+            requestedSingleEntryId.isNotBlank() -> {
+                rawEntries.filter { it.id == requestedSingleEntryId }
+                    .ifEmpty { rawEntries.take(1) }
+            }
+            isSingleEntry -> {
+                rawEntries.take(1)
+            }
             lowerReqUrl.contains("a=nice") || lowerReqUrl.contains("a=dailynice") -> {
                 rawEntries.sortedByDescending { it.favoriteCount }
             }
@@ -697,16 +733,18 @@ class EksiParser @Inject constructor() {
             else -> rawEntries
         }
 
-        val isSingleEntry = isDirectSingleEntryUrl(requestedUrl) ||
-            lowerReqUrl.contains("a=debe")
+        val resolvedTopicTitle = entries.firstOrNull()?.topicTitle?.takeIf { it.isNotBlank() } ?: topicTitle
+        val resolvedCanonicalUrl = entries.firstOrNull()?.topicUrl?.takeIf {
+            it.isNotBlank() && !isDirectSingleEntryUrl(it)
+        } ?: canonicalUrl
 
         return TopicPageData(
             topicId = topicId,
-            topicTitle = topicTitle,
+            topicTitle = resolvedTopicTitle,
             topicSlug = topicSlug,
-            cleanTopicUrl = canonicalUrl,
-            currentPage = currentPage,
-            pageCount = pageCount,
+            cleanTopicUrl = resolvedCanonicalUrl,
+            currentPage = if (isSingleEntry) 1 else currentPage,
+            pageCount = if (isSingleEntry) 1 else pageCount,
             entries = entries,
             usedTrackedFallback = usedTrackedFallback,
             usedTodayFallback = usedTodayFallback,
@@ -723,11 +761,24 @@ class EksiParser @Inject constructor() {
         val entryId = li.attr("data-id")
             .ifBlank { li.id().removePrefix("entry-item-") }
             .trim()
+            .filter { it.isDigit() }
         if (entryId.isBlank()) return null
 
         val contentElement = li.selectFirst("div.content") ?: return null
         val contentHtml = contentElement.html().trim()
         val annotatedContent = buildEntryAnnotatedString(contentElement)
+
+        val itemTopicScope = li.parents().firstOrNull { it.hasClass("topic-item") || it.id() == "topic" }
+        val itemTitleEl = itemTopicScope?.selectFirst("#title, h1#title")
+        val itemTitleAnchor = itemTopicScope?.selectFirst("#title a[href], h1#title a[href]")
+
+        val resolvedTopicTitle = itemTitleEl?.attr("data-title")?.trim()?.takeIf { it.isNotBlank() }
+            ?: itemTitleEl?.selectFirst("a span[itemprop=name], a")?.text()?.trim()?.takeIf { it.isNotBlank() }
+            ?: topicTitle
+
+        val resolvedTopicUrl = itemTitleAnchor?.attr("href")?.takeIf { it.isNotBlank() }
+            ?.let { stripTrackedParameters(it) }
+            ?: topicUrl
 
         val author = li.attr("data-author")
             .ifBlank { li.selectFirst("a.entry-author, footer a.entry-author")?.text().orEmpty() }
@@ -780,8 +831,8 @@ class EksiParser @Inject constructor() {
             editDate = editedDate,
             favoriteCount = favoriteCount,
             isFavorited = isFavorited,
-            topicTitle = topicTitle,
-            topicUrl = topicUrl,
+            topicTitle = resolvedTopicTitle,
+            topicUrl = resolvedTopicUrl,
             authorProfileUrl = authorProfileUrl,
             avatarUrl = avatarUrl,
             pageNumber = pageNumber,
@@ -1066,6 +1117,8 @@ class EksiParser @Inject constructor() {
         const val TAG_BKZ = "BKZ_TOPIC"
         const val TAG_HIDDEN_BKZ = "HIDDEN_BKZ_TOPIC"
         const val TAG_EXTERNAL_URL = "EXTERNAL_URL"
+
+        private val OLD_YEARS_REGEX = Regex("\\b(199\\d|200\\d|201\\d|202[0-5])\\b")
 
         private val COLOR_BKZ_GREEN = Color(0xFF81C784)
         private val COLOR_HIDDEN_BKZ = Color(0xFFFFB74D)

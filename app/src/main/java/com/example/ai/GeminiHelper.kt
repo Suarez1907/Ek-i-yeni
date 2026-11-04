@@ -80,8 +80,14 @@ sealed interface GeminiStreamState {
 
 /**
  * Google Services / Firebase gerektirmeden doğrudan Google AI Studio (Free Tier) API anahtarı ve
- * OkHttp istemcisi üzerinden `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=$apiKey`
+ * OkHttp istemcisi üzerinden `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key=$apiKey`
  * REST endpoint'ine JSON POST isteği atarak çalışan Gemini yardımcı sınıfı.
+ *
+ * HTTP 404, 429 veya 503 (yoğunluk) durumunda sırasıyla şu modellere otomatik yedek (fallback) istek yapar:
+ * 1) `gemini-3.5-flash-lite`
+ * 2) `gemini-flash-lite-latest`
+ * 3) `gemini-2.5-flash-lite`
+ * 4) `gemini-3.8-flash`
  *
  * Kullanıcının Ayarlar/Profil ekranından veya özetleme alt penceresinden girdiği API anahtarını
  * `SharedPreferences` içinde saklar.
@@ -176,8 +182,9 @@ class GeminiHelper @Inject constructor(
 
     /**
      * Seçilen [GeminiAnalysisMode] için prompt oluşturur ve doğrudan `OkHttp` üzerinden
-     * `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=$apiKey`
-     * REST endpoint'ine JSON POST isteği atarak yanıtı canlı akış ([GeminiStreamState]) halinde sunar.
+     * `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key=$apiKey`
+     * REST endpoint'ine (404/429/503 durumunda otomatik fallback zinciriyle) JSON POST isteği atarak
+     * yanıtı canlı akış ([GeminiStreamState]) halinde sunar.
      */
     fun executeStreamingAnalysis(
         mode: GeminiAnalysisMode,
@@ -209,7 +216,7 @@ class GeminiHelper @Inject constructor(
         )
 
         try {
-            val generatedText = withTimeout(60_000L) {
+            val generatedText = withTimeout(75_000L) {
                 executeGenerateContentPost(apiKey = apiKey, promptText = promptText)
             }
 
@@ -250,7 +257,7 @@ class GeminiHelper @Inject constructor(
             emit(
                 GeminiStreamState.Error(
                     mode = mode,
-                    message = "Yanıt süresi 60 saniyeyi aştı. Lütfen tekrar deneyin."
+                    message = "Yanıt süresi zaman aşımına uğradı. Lütfen tekrar deneyin."
                 )
             )
         } catch (e: CancellationException) {
@@ -267,16 +274,18 @@ class GeminiHelper @Inject constructor(
     }.flowOn(Dispatchers.IO)
 
     /**
-     * Doğrudan `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=$apiKey`
-     * adresine standart `{"contents": [{"parts": [{"text": promptText}]}]}` JSON gövdesiyle POST isteği gönderir
-     * ve `candidates[0].content.parts[0].text` alanını ayrıştırır.
+     * Birincil olarak `gemini-3.5-flash-lite` modeline JSON POST isteği gönderir.
+     * Eğer sunucu HTTP 404, 429 veya 503 (yoğunluk) hatası dönerse kullanıcıya hata göstermeden önce
+     * sırasıyla şu modellere otomatik fallback (yedek istek) yapar:
+     * 1) `gemini-3.5-flash-lite`
+     * 2) `gemini-flash-lite-latest`
+     * 3) `gemini-2.5-flash-lite`
+     * 4) `gemini-3.8-flash`
      */
     private suspend fun executeGenerateContentPost(
         apiKey: String,
         promptText: String
     ): String = withContext(Dispatchers.IO) {
-        val url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=$apiKey"
-
         val payload = JSONObject().apply {
             put(
                 "contents",
@@ -292,65 +301,94 @@ class GeminiHelper @Inject constructor(
                 )
             )
         }
+        val payloadString = payload.toString()
 
-        val requestBody = payload.toString().toRequestBody(JSON_MEDIA_TYPE)
-        val request = Request.Builder()
-            .url(url)
-            .post(requestBody)
-            .header("Content-Type", "application/json; charset=utf-8")
-            .build()
+        var lastErrorMessage = "Gemini API çağrısı başarısız oldu."
 
-        geminiHttpClient.newCall(request).execute().use { response ->
-            val rawBody = response.body?.string().orEmpty()
-            if (!response.isSuccessful) {
-                val apiErrorMessage = extractApiErrorMessage(rawBody, response.code)
-                throw IllegalStateException(apiErrorMessage)
-            }
+        for ((index, modelName) in FALLBACK_MODELS.withIndex()) {
+            val url = "https://generativelanguage.googleapis.com/v1beta/models/$modelName:generateContent?key=$apiKey"
+            val requestBody = payloadString.toRequestBody(JSON_MEDIA_TYPE)
+            val request = Request.Builder()
+                .url(url)
+                .post(requestBody)
+                .header("Content-Type", "application/json; charset=utf-8")
+                .build()
 
-            val rootJson = JSONObject(rawBody)
-            val candidates = rootJson.optJSONArray("candidates")
-                ?: throw IllegalStateException("Gemini yanıtında 'candidates' alanı bulunamadı.")
+            val resultText: String? = geminiHttpClient.newCall(request).execute().use { response ->
+                val rawBody = response.body?.string().orEmpty()
+                if (!response.isSuccessful) {
+                    val code = response.code
+                    val apiErrorMessage = extractApiErrorMessage(rawBody, code, modelName)
+                    lastErrorMessage = apiErrorMessage
 
-            if (candidates.length() == 0) {
-                throw IllegalStateException("Gemini yanıtı aday metin üretmedi.")
-            }
-
-            val firstCandidate = candidates.getJSONObject(0)
-            val contentObj = firstCandidate.getJSONObject("content")
-            val partsArray = contentObj.getJSONArray("parts")
-            if (partsArray.length() == 0) {
-                throw IllegalStateException("Gemini yanıtında 'parts' alanı boş döndü.")
-            }
-
-            val firstPartText = partsArray.getJSONObject(0).optString("text", "")
-            if (firstPartText.isNotEmpty() && partsArray.length() == 1) {
-                return@use firstPartText
-            }
-
-            val builder = StringBuilder()
-            for (i in 0 until partsArray.length()) {
-                val partObj = partsArray.optJSONObject(i)
-                val partText = partObj?.optString("text", "").orEmpty()
-                if (partText.isNotEmpty()) {
-                    builder.append(partText)
+                    val shouldFallback = (code == 404 || code == 429 || code == 503) &&
+                        index < FALLBACK_MODELS.lastIndex
+                    if (shouldFallback) {
+                        Log.w(
+                            TAG,
+                            "Model '$modelName' HTTP $code döndürdü; yedek modele (${FALLBACK_MODELS[index + 1]}) geçiliyor."
+                        )
+                        return@use null
+                    } else {
+                        throw IllegalStateException(apiErrorMessage)
+                    }
                 }
+
+                parseCandidateTextFromResponse(rawBody)
             }
-            builder.toString()
+
+            if (resultText != null) {
+                return@withContext resultText
+            }
         }
+
+        throw IllegalStateException(lastErrorMessage)
     }
 
-    private fun extractApiErrorMessage(rawBody: String, httpCode: Int): String {
+    private fun parseCandidateTextFromResponse(rawBody: String): String {
+        val rootJson = JSONObject(rawBody)
+        val candidates = rootJson.optJSONArray("candidates")
+            ?: throw IllegalStateException("Gemini yanıtında 'candidates' alanı bulunamadı.")
+
+        if (candidates.length() == 0) {
+            throw IllegalStateException("Gemini yanıtı aday metin üretmedi.")
+        }
+
+        val firstCandidate = candidates.getJSONObject(0)
+        val contentObj = firstCandidate.getJSONObject("content")
+        val partsArray = contentObj.getJSONArray("parts")
+        if (partsArray.length() == 0) {
+            throw IllegalStateException("Gemini yanıtında 'parts' alanı boş döndü.")
+        }
+
+        val firstPartText = partsArray.getJSONObject(0).optString("text", "")
+        if (firstPartText.isNotEmpty() && partsArray.length() == 1) {
+            return firstPartText
+        }
+
+        val builder = StringBuilder()
+        for (i in 0 until partsArray.length()) {
+            val partObj = partsArray.optJSONObject(i)
+            val partText = partObj?.optString("text", "").orEmpty()
+            if (partText.isNotEmpty()) {
+                builder.append(partText)
+            }
+        }
+        return builder.toString()
+    }
+
+    private fun extractApiErrorMessage(rawBody: String, httpCode: Int, modelName: String): String {
         return try {
             val json = JSONObject(rawBody)
             val errObj = json.optJSONObject("error")
             val msg = errObj?.optString("message").orEmpty()
             if (msg.isNotBlank()) {
-                "Gemini API Hatası ($httpCode): $msg"
+                "Gemini API Hatası ($httpCode - $modelName): $msg"
             } else {
-                "Gemini API Hatası (HTTP $httpCode)"
+                "Gemini API Hatası (HTTP $httpCode - $modelName)"
             }
         } catch (_: Exception) {
-            "Gemini API Hatası (HTTP $httpCode)"
+            "Gemini API Hatası (HTTP $httpCode - $modelName)"
         }
     }
 
@@ -632,9 +670,15 @@ class GeminiHelper @Inject constructor(
         private const val TAG = "GeminiHelper"
         const val PREFS_NAME = "eksin_gemini_prefs"
         const val KEY_GEMINI_API_KEY = "gemini_api_key"
-        const val MODEL_NAME = "gemini-3.8-flash"
-        const val IMAGE_MODEL_DEFAULT = "gemini-3.8-flash"
-        const val IMAGE_MODEL_PRO = "gemini-3.8-flash"
+        const val MODEL_NAME = "gemini-3.5-flash-lite"
+        val FALLBACK_MODELS = listOf(
+            "gemini-3.5-flash-lite",
+            "gemini-flash-lite-latest",
+            "gemini-2.5-flash-lite",
+            "gemini-3.8-flash"
+        )
+        const val IMAGE_MODEL_DEFAULT = "gemini-3.5-flash-lite"
+        const val IMAGE_MODEL_PRO = "gemini-3.5-flash-lite"
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
         private const val MAX_ENTRIES_FOR_CONTEXT = 40
         private const val MAX_CHARS_PER_ENTRY = 1200

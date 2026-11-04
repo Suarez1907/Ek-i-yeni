@@ -808,6 +808,41 @@ fun TopicDetailScreen(
                                 }
                             )
                         }
+
+                        // Tekil entry (`/entry/{gerçek_entry_id}` veya DEBE) görünümünde entry'nin hemen altında
+                        // "Başlığın Tüm Entry'lerini Gör" butonu
+                        if (metadata?.isSingleEntryView == true ||
+                            topic.url.contains("/entry/", ignoreCase = true) ||
+                            topic.url.contains("a=debe", ignoreCase = true)
+                        ) {
+                            item(key = "see_all_topic_entries_bottom_button") {
+                                Button(
+                                    onClick = { viewModel.showAllTopicEntriesFromFirstPage() },
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = EksiNeonGreen,
+                                        contentColor = OledOnAccentColor
+                                    ),
+                                    shape = RoundedCornerShape(14.dp),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(top = 6.dp, bottom = 12.dp)
+                                        .heightIn(min = 50.dp)
+                                        .testTag("see_all_topic_entries_bottom_button")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.AutoMirrored.Filled.MenuBook,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(10.dp))
+                                    Text(
+                                        text = "Başlığın Tüm Entry'lerini Gör",
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.ExtraBold
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -816,16 +851,18 @@ fun TopicDetailScreen(
             // Kullanıcı hangi sayfayı seçerse (İlk, Önceki, Sayfa X, Sonraki, Son)
             // doğrudan `viewModel.goToPage(targetPage)` çağrılır ve veri yüklendiğinde
             // `LaunchedEffect(latestLoadSequence)` ile liste en üste (`scrollToItem(0)`) sarılır.
-            FloatingPagerCapsuleBar(
-                currentPage = safeCurrentPage,
-                totalPages = safeTotalPages,
-                onSelectPage = { targetPage ->
-                    viewModel.goToPage(targetPage = targetPage, forceRefresh = false)
-                },
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(bottom = 12.dp)
-            )
+            if (metadata?.isSingleEntryView != true && !topic.url.contains("/entry/", ignoreCase = true)) {
+                FloatingPagerCapsuleBar(
+                    currentPage = safeCurrentPage,
+                    totalPages = safeTotalPages,
+                    onSelectPage = { targetPage ->
+                        viewModel.goToPage(targetPage = targetPage, forceRefresh = false)
+                    },
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 12.dp)
+                )
+            }
         }
     }
 }

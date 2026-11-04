@@ -1628,7 +1628,7 @@ private fun ProfileAndStudioScreenContent(
                     }
 
                     Text(
-                        text = "Başlık içi '✨ AI Özet' (gemini-3.8-flash) özelliği için ücretsiz Google AI Studio API anahtarınızı buraya girin. Anahtarınız yalnızca cihazınızda (SharedPreferences) saklanır.",
+                        text = "Başlık içi '✨ AI Özet' (gemini-3.5-flash-lite) özelliği için ücretsiz Google AI Studio API anahtarınızı buraya girin. Anahtarınız yalnızca cihazınızda (SharedPreferences) saklanır.",
                         style = MaterialTheme.typography.bodySmall,
                         color = OledTextSecondary
                     )

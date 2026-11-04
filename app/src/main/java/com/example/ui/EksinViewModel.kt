@@ -412,7 +412,7 @@ class EksinViewModel @Inject constructor(
         subtitle: String,
         sortDescendingAfterUpdate: Boolean
     ) {
-        if (initialItems.none { it.favoriteCount <= 0 }) return
+        if (initialItems.none { it.favoriteCount <= 0 || it.entryId.isNullOrBlank() }) return
 
         val workingArray = initialItems.toMutableList()
         val stateMutex = kotlinx.coroutines.sync.Mutex()
@@ -421,13 +421,15 @@ class EksinViewModel @Inject constructor(
         withContext(Dispatchers.IO) {
             coroutineScope {
                 initialItems.forEachIndexed { index, item ->
-                    if (item.favoriteCount <= 0) {
+                    if (item.favoriteCount <= 0 || item.entryId.isNullOrBlank()) {
                         launch {
                             semaphore.withPermit {
                                 val enriched = repository.fetchAndCacheEntryFavoriteCount(item)
                                 if (enriched.favoriteCount != item.favoriteCount ||
                                     enriched.badgeText != item.badgeText ||
-                                    enriched.author != item.author
+                                    enriched.author != item.author ||
+                                    enriched.title != item.title ||
+                                    enriched.entryId != item.entryId
                                 ) {
                                     stateMutex.lock()
                                     try {
@@ -435,6 +437,8 @@ class EksinViewModel @Inject constructor(
                                         val snapshot = if (sortDescendingAfterUpdate) {
                                             workingArray
                                                 .sortedByDescending { it.favoriteCount }
+                                                .distinctBy { it.entryId ?: it.url }
+                                                .distinctBy { it.title.trim().lowercase() }
                                                 .mapIndexed { idx, it -> it.copy(rank = idx + 1) }
                                         } else {
                                             workingArray.toList()
@@ -455,11 +459,37 @@ class EksinViewModel @Inject constructor(
         }
     }
 
+    /**
+     * DEBE / Dönemsel Enler Öğesi Tıklama Aksiyonu:
+     * 1. "En Beğenilen Entry'ler" veya "DEBE" modunda (`isDirectEntry == true` / `entryId != null`):
+     *    Doğrudan `/entry/{gerçek_entry_id}` adresine gider; ekranda sadece o entry ve altında
+     *    "Başlığın Tüm Entry'lerini Gör" butonu gösterilir.
+     * 2. "En Popüler Konular" modunda (`isDirectEntry == false`, `entryId == null`):
+     *    Öğenin kendi gerçek başlık URL'si (`topic.cleanUrl`) doğrudan bağlanır ve ekranda yazan
+     *    başlığın kendi sayfası %100 açılır.
+     */
     fun openRankedItem(item: RankedTopicOrEntryItem) {
-        val topic = item.toTopicItem()
+        val baseDomain = webViewFetchBridge.getActiveBaseDomain().ifBlank {
+            WebViewCookieJar.DEFAULT_BASE_URL
+        }.trimEnd('/')
+
+        val validEntryId = item.entryId?.trim()?.filter { it.isDigit() }?.takeIf { it.isNotBlank() }
+        val baseTopic = item.toTopicItem()
+
+        val targetTopic = when {
+            validEntryId != null -> baseTopic.copy(
+                id = validEntryId,
+                url = "$baseDomain/entry/$validEntryId"
+            )
+            item.isDirectEntry -> baseTopic
+            else -> baseTopic.copy(
+                url = item.url.substringBefore('?')
+            )
+        }
+
         openTopic(
-            topic = topic,
-            preferTodayMode = !item.isDirectEntry
+            topic = targetTopic,
+            preferTodayMode = false
         )
     }
 

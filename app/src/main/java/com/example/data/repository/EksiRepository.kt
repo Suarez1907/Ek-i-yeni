@@ -61,6 +61,7 @@ class EksiRepository @Inject constructor(
     private val entryFavoriteCountCache = ConcurrentHashMap<String, Int>()
     private val entryAuthorCache = ConcurrentHashMap<String, String>()
     private val entryResolvedIdCache = ConcurrentHashMap<String, String>()
+    private val entryTopicTitleCache = ConcurrentHashMap<String, String>()
 
     fun observeBookmarks(): Flow<List<BookmarkedEntryEntity>> =
         eksinDao.observeBookmarkedEntries()
@@ -204,7 +205,7 @@ class EksiRepository @Inject constructor(
     }
 
     private fun buildFavoriteCacheKey(item: RankedTopicOrEntryItem): String {
-        val entryId = item.entryId?.trim().orEmpty()
+        val entryId = item.entryId?.trim()?.filter { it.isDigit() }.orEmpty()
         if (entryId.isNotBlank()) return "entry:$entryId"
         return "url:${item.url.trim()}"
     }
@@ -214,55 +215,85 @@ class EksiRepository @Inject constructor(
         val cachedFav = entryFavoriteCountCache[key]
         val cachedAuthor = entryAuthorCache[key]
         val cachedEntryId = entryResolvedIdCache[key]
+        val cachedTitle = entryTopicTitleCache[key]
+
+        val resolvedEntryId = (item.entryId ?: cachedEntryId)
+            ?.trim()
+            ?.filter { it.isDigit() }
+            ?.takeIf { it.isNotBlank() }
+
+        val resolvedTitle = cachedTitle?.takeIf { it.isNotBlank() } ?: item.title
+        val resolvedUrl = if (resolvedEntryId != null) {
+            "https://eksisozluk.com/entry/$resolvedEntryId"
+        } else {
+            item.url
+        }
 
         if (item.favoriteCount > 0) {
             entryFavoriteCountCache[key] = item.favoriteCount
             if (!item.author.isNullOrBlank()) {
                 entryAuthorCache[key] = item.author
             }
-            if (!item.entryId.isNullOrBlank()) {
-                entryResolvedIdCache[key] = item.entryId
+            if (resolvedEntryId != null) {
+                entryResolvedIdCache[key] = resolvedEntryId
+                entryFavoriteCountCache["entry:$resolvedEntryId"] = item.favoriteCount
+            }
+            if (resolvedTitle.isNotBlank()) {
+                entryTopicTitleCache[key] = resolvedTitle
             }
             return item.copy(
-                badgeText = "♥ ${item.favoriteCount}"
+                id = resolvedEntryId ?: item.id,
+                title = resolvedTitle,
+                url = resolvedUrl,
+                badgeText = "♥ ${item.favoriteCount}",
+                entryId = resolvedEntryId ?: item.entryId,
+                isDirectEntry = item.isDirectEntry || resolvedEntryId != null
             )
         }
 
         if (cachedFav != null) {
             return item.copy(
+                id = resolvedEntryId ?: item.id,
+                title = resolvedTitle,
+                url = resolvedUrl,
                 favoriteCount = cachedFav,
                 badgeText = "♥ $cachedFav",
                 author = item.author ?: cachedAuthor,
-                entryId = item.entryId ?: cachedEntryId
+                entryId = resolvedEntryId ?: item.entryId,
+                isDirectEntry = item.isDirectEntry || resolvedEntryId != null
             )
         }
         return item
     }
 
     /**
-     * Tekil bir DEBE veya Dönemsel Enler öğesinin detay sayfasından `data-favorite-count` (veya `.favorite-count`)
-     * değerini çeker, hafızaya (`entryFavoriteCountCache`) alır ve güncellenmiş öğeyi döndürür.
+     * Tekil bir DEBE veya Dönemsel Enler öğesinin detay sayfasından:
+     * - `data-favorite-count` (veya `.favorite-count`) beğeni sayısını,
+     * - `entryId` gerçek kimliğini,
+     * - `#topic h1#title` / `data-title` gerçek başlık adını
+     * çeker, hafızaya (`entryFavoriteCountCache`, `entryTopicTitleCache`) alır ve güncellenmiş öğeyi döndürür.
      */
     suspend fun fetchAndCacheEntryFavoriteCount(
         item: RankedTopicOrEntryItem
     ): RankedTopicOrEntryItem = withContext(Dispatchers.IO) {
         val alreadyCached = applyCachedFavoriteMetadata(item)
-        if (alreadyCached.favoriteCount > 0) {
+        if (alreadyCached.favoriteCount > 0 && !alreadyCached.entryId.isNullOrBlank()) {
             return@withContext alreadyCached
         }
 
         val key = buildFavoriteCacheKey(item)
-        if (entryFavoriteCountCache.containsKey(key)) {
-            val cachedVal = entryFavoriteCountCache[key] ?: 0
-            return@withContext alreadyCached.copy(
-                favoriteCount = cachedVal,
-                badgeText = "♥ $cachedVal"
-            )
-        }
+        val baseDomain = webViewFetchBridge.getActiveBaseDomain().ifBlank {
+            WebViewCookieJar.DEFAULT_BASE_URL
+        }.trimEnd('/')
 
         try {
+            val targetFetchUrl = if (!item.entryId.isNullOrBlank()) {
+                "$baseDomain/entry/${item.entryId.trim().filter { it.isDigit() }}"
+            } else {
+                item.url
+            }
             val html = webViewFetchBridge.fetchHtml(
-                rawUrl = item.url,
+                rawUrl = targetFetchUrl,
                 isAjax = false
             )
             val metadata = withContext(Dispatchers.Default) {
@@ -273,19 +304,46 @@ class EksiRepository @Inject constructor(
             }
             if (metadata != null) {
                 val favCount = metadata.favoriteCount.coerceAtLeast(0)
+                val resolvedEntryId = metadata.entryId
+                    .trim()
+                    .filter { it.isDigit() }
+                    .ifBlank { item.entryId?.trim()?.filter { it.isDigit() }.orEmpty() }
+
+                val resolvedTitle = metadata.topicTitle?.trim()?.takeIf { it.isNotBlank() } ?: item.title
+                val resolvedUrl = if (resolvedEntryId.isNotBlank()) {
+                    "$baseDomain/entry/$resolvedEntryId"
+                } else {
+                    item.url
+                }
+
                 entryFavoriteCountCache[key] = favCount
                 if (!metadata.author.isNullOrBlank()) {
                     entryAuthorCache[key] = metadata.author
                 }
-                if (metadata.entryId.isNotBlank()) {
-                    entryResolvedIdCache[key] = metadata.entryId
-                    entryFavoriteCountCache["entry:${metadata.entryId}"] = favCount
+                if (resolvedTitle.isNotBlank()) {
+                    entryTopicTitleCache[key] = resolvedTitle
+                }
+                if (resolvedEntryId.isNotBlank()) {
+                    val entryKey = "entry:$resolvedEntryId"
+                    entryResolvedIdCache[key] = resolvedEntryId
+                    entryResolvedIdCache[entryKey] = resolvedEntryId
+                    entryFavoriteCountCache[entryKey] = favCount
+                    if (!metadata.author.isNullOrBlank()) {
+                        entryAuthorCache[entryKey] = metadata.author
+                    }
+                    if (resolvedTitle.isNotBlank()) {
+                        entryTopicTitleCache[entryKey] = resolvedTitle
+                    }
                 }
                 return@withContext item.copy(
+                    id = resolvedEntryId.ifBlank { item.id },
+                    title = resolvedTitle,
+                    url = resolvedUrl,
                     favoriteCount = favCount,
                     badgeText = "♥ $favCount",
                     author = item.author ?: metadata.author,
-                    entryId = item.entryId ?: metadata.entryId.takeIf { it.isNotBlank() }
+                    entryId = resolvedEntryId.takeIf { it.isNotBlank() },
+                    isDirectEntry = true
                 )
             }
         } catch (_: Throwable) {
@@ -296,14 +354,15 @@ class EksiRepository @Inject constructor(
 
     /**
      * 3a. GELİŞMİŞ DEBE:
-     * `/debe` ve `/basliklar/debe` adreslerinden dünün en beğenilen 50 entry'sini çeker.
-     * Varsa hafızadaki (`entryFavoriteCountCache`) beğeni sayılarını anında uygular.
+     * Sadece `https://eksisozluk.com/debe` (ve `/basliklar/debe`) gerçek listesini çeker.
+     * Varsa hafızadaki (`entryFavoriteCountCache`) beğeni sayılarını ve gerçek başlık adlarını anında uygular.
      */
     suspend fun fetchDebeItems(): Result<List<RankedTopicOrEntryItem>> = withContext(Dispatchers.IO) {
         try {
             val baseDomain = webViewFetchBridge.getActiveBaseDomain().ifBlank {
                 WebViewCookieJar.DEFAULT_BASE_URL
-            }
+            }.trimEnd('/')
+
             val primaryUrl = "$baseDomain/debe?_=${System.currentTimeMillis()}"
             val primaryHtml = webViewFetchBridge.fetchHtml(rawUrl = primaryUrl, isAjax = true)
             val parsedPrimary = withContext(Dispatchers.Default) {
@@ -326,7 +385,6 @@ class EksiRepository @Inject constructor(
                 )
             }
 
-            // Tam sayfa fallback
             val fullPageHtml = webViewFetchBridge.fetchHtml(rawUrl = "$baseDomain/debe", isAjax = false)
             val parsedFull = withContext(Dispatchers.Default) {
                 eksiParser.parseDebeEntriesList(fullPageHtml)
@@ -339,14 +397,18 @@ class EksiRepository @Inject constructor(
 
     /**
      * 3b. DÖNEMSEL ENLER (Önceki Gün / Önceki Hafta / Önceki Ay):
-     * a) Öncelikle `/istatistik/gecen-haftanin-en-begenilen-entryleri` ve
-     *    `/istatistik/gecen-ayin-en-begenilen-entryleri` rotalarını `isAjax = false` (tam sayfa HTML)
-     *    olarak çeker ve Jsoup ile ayrıştırır.
-     * b) Eğer Ekşi Sözlük istatistik sayfasını üyelere kapattığı veya yönlendirdiği için boş dönerse,
-     *    otomatik olarak `/debe` ve gündemdeki en yüksek entry sayılı başlıkların `?a=nice` (Şükela)
-     *    sayfalarından en yüksek favori (`data-favorite-count`) alan entry'leri `Semaphore(4)` ile
-     *    paralel olarak derler, favori sayısına göre çoktan aza (`sortedByDescending { it.favoriteCount }`)
-     *    sıralar ve yanlarında `♥ Beğeni Sayısı` ile listeler.
+     * - **Önceki Gün -> En Beğenilen Entry'ler**: `/debe` listesini ve gündem başlıklarının son 24 saatlik
+     *   şükela (`?a=dailynice`) filtresini kullanır.
+     * - **Önceki Hafta / Ay -> En Beğenilen Entry'ler**: Önce `/istatistik/gecen-haftanin-en-begenilen-entryleri`
+     *   ve `/istatistik/gecen-ayin-en-begenilen-entryleri` sayfalarındaki gerçek `<a href="/entry/...">`
+     *   linklerini ve karşısındaki başlık adlarını birebir eşleştirerek çeker.
+     *   Eğer istatistik sayfası boş döner ve gündem/kanal başlıklarından derleme yapılırsa:
+     *   1) ASLA `?a=nice` (tüm zamanlar şükelası) kullanmaz (`?a=dailynice` / `?a=popular` kullanır).
+     *   2) Her başlıktan SADECE EN ÇOK FAVORİ ALAN 1 TEK ENTRY alır (aynı başlık asla tekrar etmez).
+     *   3) Sadece `.entry-date` tarihi 2026 yılına ait güncel entry'leri kabul eder; 2010-2025 arası eski
+     *      entry'leri kesinlikle listeye almaz.
+     * - **En Popüler Konular**: Her bir öğenin kendi gerçek başlık URL'si (`topic.cleanUrl`) doğrudan
+     *   bağlanır (`isDirectEntry = false`, `entryId = null`).
      */
     suspend fun fetchPeriodicBestItems(
         period: PeriodicTimeRange,
@@ -355,8 +417,19 @@ class EksiRepository @Inject constructor(
         try {
             val baseDomain = webViewFetchBridge.getActiveBaseDomain().ifBlank {
                 WebViewCookieJar.DEFAULT_BASE_URL
-            }
+            }.trimEnd('/')
+
             val isEntriesMode = (rankingTab == PeriodicRankingTab.TOP_ENTRIES)
+
+            // Önceki Gün -> En Beğenilen Entry'ler için doğrudan DEBE + son 24 saat (?a=dailynice) derlemesini kullan
+            if (isEntriesMode && period == PeriodicTimeRange.YESTERDAY) {
+                val yesterdayEntries = compileTopLikedEntriesFallback(
+                    baseDomain = baseDomain,
+                    period = period
+                )
+                return@withContext Result.success(yesterdayEntries)
+            }
+
             val statsPath = if (isEntriesMode) period.entriesStatsPath else period.topicsStatsPath
             val statsUrl = "$baseDomain$statsPath"
 
@@ -371,9 +444,14 @@ class EksiRepository @Inject constructor(
             }
             if (parsedStats.isNotEmpty()) {
                 val enriched = if (isEntriesMode) {
-                    parsedStats.map { applyCachedFavoriteMetadata(it) }
+                    parsedStats
+                        .map { applyCachedFavoriteMetadata(it) }
+                        .distinctBy { it.entryId ?: it.url }
+                        .distinctBy { it.title.trim().lowercase() }
                 } else {
                     parsedStats
+                        .distinctBy { it.url }
+                        .distinctBy { it.title.trim().lowercase() }
                 }
                 return@withContext Result.success(enriched)
             }
@@ -398,18 +476,23 @@ class EksiRepository @Inject constructor(
     }
 
     /**
-     * İstatistik sayfası boş döndüğünde `/debe` ve gündemdeki en yüksek entry sayılı başlıkların
-     * `?a=nice` (Şükela) sayfalarından en yüksek `data-favorite-count` alan entry'leri
-     * `Semaphore(4)` ile paralel olarak derler ve `sortedByDescending { it.favoriteCount }` ile sıralar.
+     * İstatistik sayfası boş döndüğünde veya "Önceki Gün -> En Beğenilen Entry'ler" seçildiğinde:
+     * 1. ASLA `?a=nice` (Tüm zamanların şükelası) KULLANMAZ (`?a=dailynice` veya `?a=popular` kullanır).
+     * 2. Her başlıktan SADECE EN ÇOK FAVORİ ALAN 1 TEK ENTRY (`maxByOrNull { it.favoriteCount }`) alır;
+     *    böylece aynı başlık alt alta tekrar etmez.
+     * 3. Sadece `.entry-date` tarihi içinde bulunduğumuz yıla (`2026`) ait olan güncel entry'leri kabul eder;
+     *    eski yıllara (`2010-2025`) ait entry'leri kesinlikle listeye almaz.
+     * 4. Her kartın `title` alanı doğrudan o `entryId`'nin ait olduğu gerçek başlık (`#topic h1#title`) olur
+     *    ve `url` doğrudan `/entry/{gerçek_entry_id}` olarak bağlanır.
      */
     private suspend fun compileTopLikedEntriesFallback(
         baseDomain: String,
         period: PeriodicTimeRange
     ): List<RankedTopicOrEntryItem> = coroutineScope {
         val semaphore = Semaphore(4)
-        val collectedItems = ConcurrentHashMap<String, RankedTopicOrEntryItem>()
+        val collectedByEntryId = ConcurrentHashMap<String, RankedTopicOrEntryItem>()
 
-        // 1. Önceki Gün (YESTERDAY) veya genel havuz için DEBE listesini çek
+        // 1. DEBE (`/debe`) gerçek listesini çek
         val debeDeferred = async(Dispatchers.IO) {
             runCatching {
                 val debeHtml = webViewFetchBridge.fetchHtml(
@@ -420,14 +503,32 @@ class EksiRepository @Inject constructor(
             }.getOrDefault(emptyList())
         }
 
-        // 2. Gündemdeki en yüksek entry sayılı başlıkları çek
+        // 2. Döneme göre gündem ve kanal başlıklarını çek
         val gundemPagesToFetch = when (period) {
             PeriodicTimeRange.YESTERDAY -> listOf(1)
             PeriodicTimeRange.LAST_WEEK -> listOf(1, 2)
             PeriodicTimeRange.LAST_MONTH -> listOf(1, 2, 3)
         }
 
-        val gundemTopics = gundemPagesToFetch.map { pageNum ->
+        val channelsToFetch = when (period) {
+            PeriodicTimeRange.YESTERDAY -> emptyList()
+            PeriodicTimeRange.LAST_WEEK -> listOf(
+                EksiChannel.SIYASET,
+                EksiChannel.EKONOMI,
+                EksiChannel.SPOR,
+                EksiChannel.TEKNOLOJI
+            )
+            PeriodicTimeRange.LAST_MONTH -> listOf(
+                EksiChannel.SINEMA,
+                EksiChannel.ILISKILER,
+                EksiChannel.BILIM,
+                EksiChannel.SAGLIK,
+                EksiChannel.TARIH,
+                EksiChannel.EDEBIYAT
+            )
+        }
+
+        val gundemTopicsDeferred = gundemPagesToFetch.map { pageNum ->
             async(Dispatchers.IO) {
                 semaphore.withPermit {
                     runCatching {
@@ -437,38 +538,89 @@ class EksiRepository @Inject constructor(
                     }.getOrDefault(emptyList())
                 }
             }
-        }.awaitAll().flatten().distinctBy { it.cleanUrl }
+        }
 
-        // En yüksek entry sayısına sahip başlıkları seç
-        val candidateTopics = gundemTopics
+        val channelTopicsDeferred = channelsToFetch.map { channel ->
+            async(Dispatchers.IO) {
+                semaphore.withPermit {
+                    runCatching {
+                        val url = eksiParser.buildChannelTopicsUrl(
+                            baseDomain = baseDomain,
+                            channel = channel,
+                            page = 1
+                        )
+                        val html = webViewFetchBridge.fetchHtml(rawUrl = url, isAjax = true)
+                        eksiParser.parseChannelTopics(html)
+                    }.getOrDefault(emptyList())
+                }
+            }
+        }
+
+        val allCandidateTopics = (gundemTopicsDeferred.awaitAll().flatten() + channelTopicsDeferred.awaitAll().flatten())
+            .filter { it.cleanUrl.isNotBlank() && !eksiParser.isDirectSingleEntryUrl(it.cleanUrl) }
+            .distinctBy { it.cleanUrl }
+            .distinctBy { it.title.trim().lowercase() }
             .sortedByDescending { it.entryCount }
-            .take(if (period == PeriodicTimeRange.YESTERDAY) 6 else 10)
+            .take(if (period == PeriodicTimeRange.YESTERDAY) 8 else 14)
 
-        val sukelaParam = if (period == PeriodicTimeRange.YESTERDAY) "a=dailynice" else "a=nice"
-
-        // Seçilen başlıkların `?a=nice` (veya `?a=dailynice`) sayfalarını Semaphore(4) ile paralel çek
-        val niceEntriesLists = candidateTopics.map { topic ->
+        // 3. Seçilen her başlık için ASLA `?a=nice` kullanmadan, sadece `?a=dailynice` (veya `?a=popular`)
+        // ile 2026 yılına ait EN ÇOK FAVORİ ALAN 1 TEK ENTRY'yi al!
+        val singleBestEntryPerTopic = allCandidateTopics.map { topic ->
             async(Dispatchers.IO) {
                 semaphore.withPermit {
                     runCatching {
                         val cleanUrl = topic.cleanUrl
-                        val niceUrl = "$cleanUrl?$sukelaParam"
-                        val html = webViewFetchBridge.fetchHtml(rawUrl = niceUrl, isAjax = false)
-                        val parsedPage = eksiParser.parseTopicPage(
-                            html = html,
-                            requestedUrl = niceUrl,
+                        val dailyNiceUrl = "$cleanUrl?a=dailynice"
+                        val dailyHtml = webViewFetchBridge.fetchHtml(rawUrl = dailyNiceUrl, isAjax = false)
+                        val parsedDailyPage = eksiParser.parseTopicPage(
+                            html = dailyHtml,
+                            requestedUrl = dailyNiceUrl,
                             fallbackPage = 1
                         )
-                        parsedPage.entries
-                            .filter { it.favoriteCount > 0 }
-                            .sortedByDescending { it.favoriteCount }
-                            .take(4)
-                    }.getOrDefault(emptyList())
+
+                        var recent2026Entries = parsedDailyPage.entries.filter { entry ->
+                            entry.id.isNotBlank() &&
+                                entry.id.all { it.isDigit() } &&
+                                entry.favoriteCount > 0 &&
+                                eksiParser.isRecent2026EntryDate(entry.date)
+                        }
+                        var resolvedPageTitle = parsedDailyPage.topicTitle
+
+                        // Eğer `?a=dailynice` boş döndüyse sadece güncel `?a=popular` sayfasına bak (ASLA `?a=nice` kullanma!)
+                        if (recent2026Entries.isEmpty()) {
+                            val popularUrl = "$cleanUrl?a=popular"
+                            val popularHtml = webViewFetchBridge.fetchHtml(rawUrl = popularUrl, isAjax = false)
+                            val parsedPopularPage = eksiParser.parseTopicPage(
+                                html = popularHtml,
+                                requestedUrl = popularUrl,
+                                fallbackPage = 1
+                            )
+                            resolvedPageTitle = parsedPopularPage.topicTitle
+                            recent2026Entries = parsedPopularPage.entries.filter { entry ->
+                                entry.id.isNotBlank() &&
+                                    entry.id.all { it.isDigit() } &&
+                                    entry.favoriteCount > 0 &&
+                                    eksiParser.isRecent2026EntryDate(entry.date)
+                            }
+                        }
+
+                        // Her başlıktan SADECE EN ÇOK FAVORİ ALAN 1 TEK ENTRY seç!
+                        val bestEntry = recent2026Entries.maxByOrNull { it.favoriteCount }
+                        if (bestEntry != null) {
+                            val actualTitle = bestEntry.topicTitle
+                                .takeIf { it.isNotBlank() }
+                                ?: resolvedPageTitle.takeIf { it.isNotBlank() }
+                                ?: topic.title
+                            bestEntry.copy(topicTitle = actualTitle)
+                        } else {
+                            null
+                        }
+                    }.getOrNull()
                 }
             }
-        }.awaitAll().flatten()
+        }.awaitAll().filterNotNull()
 
-        for (entry in niceEntriesLists) {
+        for (entry in singleBestEntryPerTopic) {
             val fav = entry.favoriteCount
             val entryUrl = "$baseDomain/entry/${entry.id}"
             val item = RankedTopicOrEntryItem(
@@ -483,25 +635,26 @@ class EksiRepository @Inject constructor(
                 snippet = entry.plainText.take(140),
                 isDirectEntry = true
             )
-            val cacheKey = buildFavoriteCacheKey(item)
+            val cacheKey = "entry:${entry.id}"
             entryFavoriteCountCache[cacheKey] = fav
             entryAuthorCache[cacheKey] = entry.author
             entryResolvedIdCache[cacheKey] = entry.id
-            collectedItems[entry.id] = item
+            entryTopicTitleCache[cacheKey] = entry.topicTitle
+            collectedByEntryId[entry.id] = item
         }
 
-        // DEBE öğelerini de havuza dahil et; favori sayısı henüz çekilmemiş ilk DEBE öğelerinin detayını paralel çek
+        // 4. DEBE öğelerini de gerçek entryId ve gerçek başlık adlarıyla (`fetchAndCacheEntryFavoriteCount`) zenginleştirerek ekle
         val debeList = debeDeferred.await()
         val debeSubset = when (period) {
-            PeriodicTimeRange.YESTERDAY -> debeList.take(25)
-            PeriodicTimeRange.LAST_WEEK -> debeList.take(14)
-            PeriodicTimeRange.LAST_MONTH -> debeList.drop(5).take(12)
+            PeriodicTimeRange.YESTERDAY -> debeList.take(35)
+            PeriodicTimeRange.LAST_WEEK -> debeList.take(20)
+            PeriodicTimeRange.LAST_MONTH -> debeList.drop(5).take(20)
         }
 
         val enrichedDebeItems = debeSubset.map { debeItem ->
             async(Dispatchers.IO) {
                 val withCache = applyCachedFavoriteMetadata(debeItem)
-                if (withCache.favoriteCount > 0) {
+                if (withCache.favoriteCount > 0 && !withCache.entryId.isNullOrBlank()) {
                     withCache
                 } else {
                     semaphore.withPermit {
@@ -512,21 +665,29 @@ class EksiRepository @Inject constructor(
         }.awaitAll()
 
         for (debeItem in enrichedDebeItems) {
-            val uniqueKey = debeItem.entryId?.takeIf { it.isNotBlank() } ?: debeItem.url
-            val existing = collectedItems[uniqueKey]
+            val validEntryId = debeItem.entryId?.trim()?.filter { it.isDigit() }?.takeIf { it.isNotBlank() }
+            val uniqueKey = validEntryId ?: debeItem.url
+            val existing = collectedByEntryId[uniqueKey]
             if (existing == null || debeItem.favoriteCount > existing.favoriteCount) {
-                collectedItems[uniqueKey] = debeItem.copy(
-                    badgeText = if (debeItem.favoriteCount > 0) "♥ ${debeItem.favoriteCount}" else debeItem.badgeText
+                collectedByEntryId[uniqueKey] = debeItem.copy(
+                    id = validEntryId ?: debeItem.id,
+                    url = if (validEntryId != null) "$baseDomain/entry/$validEntryId" else debeItem.url,
+                    entryId = validEntryId,
+                    badgeText = if (debeItem.favoriteCount > 0) "♥ ${debeItem.favoriteCount}" else debeItem.badgeText,
+                    isDirectEntry = true
                 )
             }
         }
 
-        // Tüm derlenen entry'leri beğeni (favori) sayısına göre çoktan aza sırala
-        collectedItems.values
+        // 5. Tüm derlenen entry'leri beğeni (favori) sayısına göre çoktan aza sırala ve
+        // aynı başlığın birden fazla kez tekrar etmesini (`distinctBy { it.title.trim().lowercase() }`) kesin olarak engelle!
+        collectedByEntryId.values
             .sortedWith(
                 compareByDescending<RankedTopicOrEntryItem> { it.favoriteCount }
                     .thenBy { it.rank }
             )
+            .distinctBy { it.entryId ?: it.url }
+            .distinctBy { it.title.trim().lowercase() }
             .take(50)
             .mapIndexed { index, item ->
                 val fav = item.favoriteCount
@@ -537,14 +698,19 @@ class EksiRepository @Inject constructor(
             }
     }
 
+    /**
+     * "En Popüler Konular" (`PeriodicRankingTab.TOP_TOPICS`) için:
+     * Her bir öğenin kendi gerçek başlık URL'si (`topic.cleanUrl`) doğrudan bağlanır (`isDirectEntry = false`, `entryId = null`).
+     * Tıklandığında ekranda hangi başlık yazıyorsa %100 o başlığın sayfası açılır.
+     */
     private suspend fun compileTopPopularTopicsFallback(
         baseDomain: String,
         period: PeriodicTimeRange
     ): List<RankedTopicOrEntryItem> = coroutineScope {
         val pages = when (period) {
-            PeriodicTimeRange.YESTERDAY -> listOf(1)
-            PeriodicTimeRange.LAST_WEEK -> listOf(1, 2)
-            PeriodicTimeRange.LAST_MONTH -> listOf(1, 2, 3)
+            PeriodicTimeRange.YESTERDAY -> listOf(1, 2)
+            PeriodicTimeRange.LAST_WEEK -> listOf(1, 2, 3)
+            PeriodicTimeRange.LAST_MONTH -> listOf(1, 2, 3, 4)
         }
         val semaphore = Semaphore(4)
         val topics = pages.map { p ->
@@ -557,7 +723,11 @@ class EksiRepository @Inject constructor(
                     }.getOrDefault(emptyList())
                 }
             }
-        }.awaitAll().flatten().distinctBy { it.cleanUrl }
+        }.awaitAll()
+            .flatten()
+            .filter { it.cleanUrl.isNotBlank() && !eksiParser.isDirectSingleEntryUrl(it.cleanUrl) }
+            .distinctBy { it.cleanUrl }
+            .distinctBy { it.title.trim().lowercase() }
 
         topics
             .sortedByDescending { it.entryCount }
@@ -573,6 +743,8 @@ class EksiRepository @Inject constructor(
                     url = topic.cleanUrl,
                     badgeText = "$countLabel entry",
                     favoriteCount = topic.entryCount,
+                    author = null,
+                    entryId = null,
                     isDirectEntry = false
                 )
             }
