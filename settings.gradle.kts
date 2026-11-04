@@ -22,6 +22,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "Ekşin OLED"
+rootProject.name = "Ekşi+"
 
 include(":app")

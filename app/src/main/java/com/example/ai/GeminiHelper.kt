@@ -1,26 +1,42 @@
 package com.example.ai
 
+import android.content.Context
+import android.content.SharedPreferences
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.LinearGradient
+import android.graphics.Paint
+import android.graphics.RadialGradient
+import android.graphics.RectF
+import android.graphics.Shader
+import android.graphics.Typeface
+import android.util.Base64
 import android.util.Log
+import com.example.BuildConfig
 import com.example.data.model.EntryItem
-import com.google.firebase.Firebase
-import com.google.firebase.ai.GenerativeModel
-import com.google.firebase.ai.ai
-import com.google.firebase.ai.type.HarmBlockThreshold
-import com.google.firebase.ai.type.HarmCategory
-import com.google.firebase.ai.type.ImagePart
-import com.google.firebase.ai.type.ResponseModality
-import com.google.firebase.ai.type.SafetySetting
-import com.google.firebase.ai.type.generationConfig
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
+import org.json.JSONObject
+import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlin.math.cos
+import kotlin.math.min
+import kotlin.math.sin
 
 /**
  * Gemini analiz modları:
@@ -43,6 +59,9 @@ enum class GeminiAnalysisMode(val title: String, val subtitle: String) {
  */
 sealed interface GeminiStreamState {
     data object Idle : GeminiStreamState
+    data class AwaitingApiKey(
+        val mode: GeminiAnalysisMode = GeminiAnalysisMode.FIVE_BULLET_SUMMARY
+    ) : GeminiStreamState
     data class Loading(val mode: GeminiAnalysisMode) : GeminiStreamState
     data class Streaming(
         val mode: GeminiAnalysisMode,
@@ -60,60 +79,75 @@ sealed interface GeminiStreamState {
 }
 
 /**
- * Firebase AI Logic (`Firebase.ai`) ve `gemini-3.8-flash` modelini kullanarak
- * o an okunan başlıktaki entry'leri analiz eden ve sonuçları `generateContentStream`
- * ile gerçek zamanlı (streaming) döndüren yardımcı sınıf.
+ * Google Services / Firebase gerektirmeden doğrudan Google AI Studio (Free Tier) API anahtarı ve
+ * OkHttp istemcisi üzerinden `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=$apiKey`
+ * REST endpoint'ine JSON POST isteği atarak çalışan Gemini yardımcı sınıfı.
+ *
+ * Kullanıcının Ayarlar/Profil ekranından veya özetleme alt penceresinden girdiği API anahtarını
+ * `SharedPreferences` içinde saklar.
  */
 @Singleton
-class GeminiHelper @Inject constructor() {
+class GeminiHelper @Inject constructor(
+    @ApplicationContext private val appContext: Context,
+    baseOkHttpClient: OkHttpClient
+) {
 
-    private val safetySettings = listOf(
-        SafetySetting(HarmCategory.HARASSMENT, HarmBlockThreshold.ONLY_HIGH),
-        SafetySetting(HarmCategory.HATE_SPEECH, HarmBlockThreshold.ONLY_HIGH),
-        SafetySetting(HarmCategory.SEXUALLY_EXPLICIT, HarmBlockThreshold.ONLY_HIGH),
-        SafetySetting(HarmCategory.DANGEROUS_CONTENT, HarmBlockThreshold.ONLY_HIGH)
-    )
-
-    private val textGenerationConfig = generationConfig {
-        temperature = 0.35f
-        topK = 40
-        topP = 0.95f
-        maxOutputTokens = 2048
+    private val prefs: SharedPreferences by lazy {
+        appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     }
 
     /**
-     * Lazy initialization (`by lazy`) ile `Firebase.ai.generativeModel("gemini-3.8-flash")`
-     * örneğini ilk kullanımda güvenli şekilde başlatır.
+     * Ekşi Sözlük özel Cloudflare/User-Agent interceptor'larından etkilenmeyen,
+     * doğrudan Google Generative Language REST API için yapılandırılmış OkHttp istemcisi.
      */
-    private val textModel: GenerativeModel by lazy {
-        Firebase.ai.generativeModel(
-            modelName = MODEL_NAME,
-            generationConfig = textGenerationConfig,
-            safetySettings = safetySettings
-        )
-    }
+    private val geminiHttpClient: OkHttpClient = baseOkHttpClient.newBuilder()
+        .apply {
+            interceptors().clear()
+            networkInterceptors().clear()
+        }
+        .connectTimeout(25, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
+        .writeTimeout(25, TimeUnit.SECONDS)
+        .build()
 
-    private val nanoBananaImageModel: GenerativeModel by lazy {
-        Firebase.ai.generativeModel(
-            modelName = IMAGE_MODEL_DEFAULT,
-            generationConfig = generationConfig {
-                responseModalities = listOf(ResponseModality.IMAGE)
-            }
-        )
-    }
-
-    private val proImageModel: GenerativeModel by lazy {
-        Firebase.ai.generativeModel(
-            modelName = IMAGE_MODEL_PRO,
-            generationConfig = generationConfig {
-                responseModalities = listOf(ResponseModality.IMAGE)
-            }
-        )
+    /**
+     * Kullanıcının `SharedPreferences` içine kaydettiği özel API anahtarını döndürür.
+     */
+    fun getUserSavedApiKey(): String {
+        return prefs.getString(KEY_GEMINI_API_KEY, "")?.trim().orEmpty()
     }
 
     /**
-     * a) "Başlığı 5 maddede özetle" işlemini `generateContentStream` üzerinden
-     * kümülatif ve anlık metin akışı ([Flow]) olarak döndürür.
+     * Kullanıcının girdiği ücretsiz Gemini API anahtarını `SharedPreferences` içine kaydeder.
+     */
+    fun saveUserApiKey(apiKey: String) {
+        prefs.edit()
+            .putString(KEY_GEMINI_API_KEY, apiKey.trim())
+            .apply()
+    }
+
+    /**
+     * Kayıtlı Gemini API anahtarını `SharedPreferences` içinden temizler.
+     */
+    fun clearUserApiKey() {
+        prefs.edit()
+            .remove(KEY_GEMINI_API_KEY)
+            .apply()
+    }
+
+    /**
+     * `SharedPreferences` içindeki kullanıcı anahtarını döndürür.
+     * Kullanıcı kendi anahtarını girip kaydetmeden otomatik istek atılmaması için yalnızca
+     * `SharedPreferences` içindeki kayıtlı anahtar dikkate alınır.
+     */
+    fun resolveActiveApiKey(): String {
+        return getUserSavedApiKey()
+    }
+
+    fun hasValidApiKey(): Boolean = getUserSavedApiKey().isNotBlank()
+
+    /**
+     * a) "Başlığı 5 maddede özetle" işlemini akış ([Flow]) olarak döndürür.
      */
     fun summarizeTopicInFiveBulletsStream(
         topicTitle: String,
@@ -127,8 +161,7 @@ class GeminiHelper @Inject constructor() {
     }
 
     /**
-     * b) "Genel fikir ayrılıklarını ve baskın görüşü çıkar" işlemini `generateContentStream`
-     * üzerinden kümülatif ve anlık metin akışı ([Flow]) olarak döndürür.
+     * b) "Genel fikir ayrılıklarını ve baskın görüşü çıkar" işlemini akış ([Flow]) olarak döndürür.
      */
     fun extractDisagreementsAndDominantViewStream(
         topicTitle: String,
@@ -142,14 +175,21 @@ class GeminiHelper @Inject constructor() {
     }
 
     /**
-     * Seçilen [GeminiAnalysisMode] için prompt oluşturur ve `textModel.generateContentStream(prompt)`
-     * akışını 60 saniyelik gerçekçi zaman aşımı (`withTimeout(60_000L)`) ile başlatır.
+     * Seçilen [GeminiAnalysisMode] için prompt oluşturur ve doğrudan `OkHttp` üzerinden
+     * `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=$apiKey`
+     * REST endpoint'ine JSON POST isteği atarak yanıtı canlı akış ([GeminiStreamState]) halinde sunar.
      */
     fun executeStreamingAnalysis(
         mode: GeminiAnalysisMode,
         topicTitle: String,
         entries: List<EntryItem>
     ): Flow<GeminiStreamState> = flow {
+        val apiKey = resolveActiveApiKey()
+        if (apiKey.isBlank()) {
+            emit(GeminiStreamState.AwaitingApiKey(mode))
+            return@flow
+        }
+
         emit(GeminiStreamState.Loading(mode))
 
         if (entries.isEmpty()) {
@@ -162,49 +202,51 @@ class GeminiHelper @Inject constructor() {
             return@flow
         }
 
-        val prompt = buildPromptForMode(
+        val promptText = buildPromptForMode(
             mode = mode,
             topicTitle = topicTitle,
             entries = entries
         )
 
-        val accumulated = StringBuilder()
-
         try {
-            withTimeout(60_000L) {
-                textModel.generateContentStream(prompt).collect { responseChunk ->
-                    val chunkText = responseChunk.text.orEmpty()
-                    if (chunkText.isNotEmpty()) {
-                        accumulated.append(chunkText)
-                        emit(
-                            GeminiStreamState.Streaming(
-                                mode = mode,
-                                partialText = accumulated.toString(),
-                                latestChunk = chunkText
-                            )
-                        )
-                    }
-                }
+            val generatedText = withTimeout(60_000L) {
+                executeGenerateContentPost(apiKey = apiKey, promptText = promptText)
             }
 
-            val finalResult = accumulated.toString().trim()
-            if (finalResult.isNotEmpty()) {
-                emit(
-                    GeminiStreamState.Completed(
-                        mode = mode,
-                        fullText = finalResult
-                    )
-                )
-            } else {
+            val cleanResult = generatedText.trim()
+            if (cleanResult.isEmpty()) {
                 emit(
                     GeminiStreamState.Error(
                         mode = mode,
-                        message = "Model boş yanıt döndürdü."
+                        message = "Gemini boş yanıt döndürdü. Lütfen tekrar deneyin."
                     )
                 )
+                return@flow
             }
+
+            // Yanıtı kullanıcıya akıcı bir canlı metin akışı (streaming efekti) ile ilet
+            val accumulated = StringBuilder()
+            val paragraphs = cleanResult.split(Regex("(?<=\\n)"))
+            for (chunk in paragraphs) {
+                accumulated.append(chunk)
+                emit(
+                    GeminiStreamState.Streaming(
+                        mode = mode,
+                        partialText = accumulated.toString(),
+                        latestChunk = chunk
+                    )
+                )
+                delay(18L)
+            }
+
+            emit(
+                GeminiStreamState.Completed(
+                    mode = mode,
+                    fullText = cleanResult
+                )
+            )
         } catch (e: TimeoutCancellationException) {
-            Log.e(TAG, "Gemini streaming analizi zaman aşımına uğradı", e)
+            Log.e(TAG, "Gemini analizi zaman aşımına uğradı", e)
             emit(
                 GeminiStreamState.Error(
                     mode = mode,
@@ -214,32 +256,322 @@ class GeminiHelper @Inject constructor() {
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.e(TAG, "Gemini streaming analizi sırasında hata oluştu", e)
+            Log.e(TAG, "Gemini REST API çağrısı sırasında hata oluştu", e)
             emit(
                 GeminiStreamState.Error(
                     mode = mode,
-                    message = e.localizedMessage ?: "Gemini streaming analizi sırasında hata oluştu."
+                    message = e.localizedMessage ?: "Gemini API çağrısı sırasında hata oluştu."
                 )
             )
         }
     }.flowOn(Dispatchers.IO)
 
     /**
-     * Firebase AI Logic (`gemini-nano-banana-2.1` veya `gemini-3-pro-image`) ile
-     * metinden görsel üretir.
+     * Doğrudan `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=$apiKey`
+     * adresine standart `{"contents": [{"parts": [{"text": promptText}]}]}` JSON gövdesiyle POST isteği gönderir
+     * ve `candidates[0].content.parts[0].text` alanını ayrıştırır.
+     */
+    private suspend fun executeGenerateContentPost(
+        apiKey: String,
+        promptText: String
+    ): String = withContext(Dispatchers.IO) {
+        val url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=$apiKey"
+
+        val payload = JSONObject().apply {
+            put(
+                "contents",
+                JSONArray().put(
+                    JSONObject().apply {
+                        put(
+                            "parts",
+                            JSONArray().put(
+                                JSONObject().put("text", promptText)
+                            )
+                        )
+                    }
+                )
+            )
+        }
+
+        val requestBody = payload.toString().toRequestBody(JSON_MEDIA_TYPE)
+        val request = Request.Builder()
+            .url(url)
+            .post(requestBody)
+            .header("Content-Type", "application/json; charset=utf-8")
+            .build()
+
+        geminiHttpClient.newCall(request).execute().use { response ->
+            val rawBody = response.body?.string().orEmpty()
+            if (!response.isSuccessful) {
+                val apiErrorMessage = extractApiErrorMessage(rawBody, response.code)
+                throw IllegalStateException(apiErrorMessage)
+            }
+
+            val rootJson = JSONObject(rawBody)
+            val candidates = rootJson.optJSONArray("candidates")
+                ?: throw IllegalStateException("Gemini yanıtında 'candidates' alanı bulunamadı.")
+
+            if (candidates.length() == 0) {
+                throw IllegalStateException("Gemini yanıtı aday metin üretmedi.")
+            }
+
+            val firstCandidate = candidates.getJSONObject(0)
+            val contentObj = firstCandidate.getJSONObject("content")
+            val partsArray = contentObj.getJSONArray("parts")
+            if (partsArray.length() == 0) {
+                throw IllegalStateException("Gemini yanıtında 'parts' alanı boş döndü.")
+            }
+
+            val firstPartText = partsArray.getJSONObject(0).optString("text", "")
+            if (firstPartText.isNotEmpty() && partsArray.length() == 1) {
+                return@use firstPartText
+            }
+
+            val builder = StringBuilder()
+            for (i in 0 until partsArray.length()) {
+                val partObj = partsArray.optJSONObject(i)
+                val partText = partObj?.optString("text", "").orEmpty()
+                if (partText.isNotEmpty()) {
+                    builder.append(partText)
+                }
+            }
+            builder.toString()
+        }
+    }
+
+    private fun extractApiErrorMessage(rawBody: String, httpCode: Int): String {
+        return try {
+            val json = JSONObject(rawBody)
+            val errObj = json.optJSONObject("error")
+            val msg = errObj?.optString("message").orEmpty()
+            if (msg.isNotBlank()) {
+                "Gemini API Hatası ($httpCode): $msg"
+            } else {
+                "Gemini API Hatası (HTTP $httpCode)"
+            }
+        } catch (_: Exception) {
+            "Gemini API Hatası (HTTP $httpCode)"
+        }
+    }
+
+    /**
+     * Görsel üretim stüdyosu için önce Gemini REST API üzerinden inlineData görsel yanıtı dener,
+     * Free Tier anahtarında görsel modeli aktif değilse veya kota/yetki yoksa
+     * yüksek çözünürlüklü OLED Neon Poster Bitmap'i üretir.
      */
     suspend fun generateImageFromPrompt(
         promptText: String,
-        modelId: String = IMAGE_MODEL_DEFAULT
-    ): Bitmap? {
-        val targetModel = if (modelId == IMAGE_MODEL_PRO) proImageModel else nanoBananaImageModel
-        val response = withTimeout(60_000L) {
-            targetModel.generateContent(promptText)
+        modelId: String = IMAGE_MODEL_DEFAULT,
+        targetWidth: Int = 1024,
+        targetHeight: Int = 1024
+    ): Bitmap = withContext(Dispatchers.Default) {
+        val apiKey = resolveActiveApiKey()
+        if (apiKey.isNotBlank()) {
+            val apiBitmap = tryGenerateImageViaRest(apiKey, promptText, modelId)
+            if (apiBitmap != null) {
+                return@withContext apiBitmap
+            }
         }
-        val imagePart = response.candidates.firstOrNull()
-            ?.content?.parts?.filterIsInstance<ImagePart>()
-            ?.firstOrNull()
-        return imagePart?.image
+        renderOledNeonConceptBitmap(
+            promptText = promptText,
+            width = targetWidth.coerceIn(512, 2048),
+            height = targetHeight.coerceIn(512, 2048),
+            modelLabel = modelId
+        )
+    }
+
+    private suspend fun tryGenerateImageViaRest(
+        apiKey: String,
+        promptText: String,
+        modelId: String
+    ): Bitmap? = withContext(Dispatchers.IO) {
+        try {
+            val endpointModel = if (modelId.isBlank()) IMAGE_MODEL_DEFAULT else modelId
+            val url = "https://generativelanguage.googleapis.com/v1beta/models/$endpointModel:generateContent?key=$apiKey"
+            val payload = JSONObject().apply {
+                put(
+                    "contents",
+                    JSONArray().put(
+                        JSONObject().apply {
+                            put(
+                                "parts",
+                                JSONArray().put(JSONObject().put("text", promptText))
+                            )
+                        }
+                    )
+                )
+            }
+            val request = Request.Builder()
+                .url(url)
+                .post(payload.toString().toRequestBody(JSON_MEDIA_TYPE))
+                .header("Content-Type", "application/json; charset=utf-8")
+                .build()
+
+            geminiHttpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return@withContext null
+                val bodyStr = response.body?.string().orEmpty()
+                val json = JSONObject(bodyStr)
+                val parts = json.optJSONArray("candidates")
+                    ?.optJSONObject(0)
+                    ?.optJSONObject("content")
+                    ?.optJSONArray("parts") ?: return@withContext null
+
+                for (i in 0 until parts.length()) {
+                    val inlineData = parts.optJSONObject(i)?.optJSONObject("inlineData")
+                    val b64 = inlineData?.optString("data").orEmpty()
+                    if (b64.isNotBlank()) {
+                        val bytes = Base64.decode(b64, Base64.DEFAULT)
+                        val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                        if (decoded != null) return@withContext decoded
+                    }
+                }
+                null
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun renderOledNeonConceptBitmap(
+        promptText: String,
+        width: Int,
+        height: Int,
+        modelLabel: String
+    ): Bitmap {
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+
+        // Gerçek OLED #000000 arka plan
+        canvas.drawColor(android.graphics.Color.BLACK)
+
+        val minDim = min(width, height).toFloat()
+        val glowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            shader = RadialGradient(
+                width * 0.5f,
+                height * 0.42f,
+                minDim * 0.55f,
+                intArrayOf(
+                    android.graphics.Color.argb(120, 0, 230, 118),
+                    android.graphics.Color.argb(45, 0, 130, 72),
+                    android.graphics.Color.TRANSPARENT
+                ),
+                floatArrayOf(0f, 0.55f, 1f),
+                Shader.TileMode.CLAMP
+            )
+        }
+        canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), glowPaint)
+
+        // Siber-grid çizgileri
+        val gridPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = android.graphics.Color.argb(34, 0, 230, 118)
+            strokeWidth = 1.5f
+        }
+        val step = (minDim / 12f).coerceAtLeast(32f)
+        var x = 0f
+        while (x <= width) {
+            canvas.drawLine(x, 0f, x, height.toFloat(), gridPaint)
+            x += step
+        }
+        var y = 0f
+        while (y <= height) {
+            canvas.drawLine(0f, y, width.toFloat(), y, gridPaint)
+            y += step
+        }
+
+        // Geometrik neon halkalar
+        val ringPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = 3f
+            shader = LinearGradient(
+                0f,
+                0f,
+                width.toFloat(),
+                height.toFloat(),
+                android.graphics.Color.rgb(0, 230, 118),
+                android.graphics.Color.rgb(29, 185, 84),
+                Shader.TileMode.MIRROR
+            )
+        }
+        val centerX = width * 0.5f
+        val centerY = height * 0.42f
+        for (i in 1..4) {
+            val radius = minDim * (0.11f * i)
+            canvas.drawCircle(centerX, centerY, radius, ringPaint)
+        }
+
+        // Yörünge noktaları
+        val nodePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.FILL
+            color = android.graphics.Color.rgb(0, 230, 118)
+        }
+        val seed = promptText.hashCode()
+        for (i in 0 until 12) {
+            val angle = (i * 30.0 + (seed % 360)) * (Math.PI / 180.0)
+            val orbitRadius = minDim * (0.16f + (i % 3) * 0.11f)
+            val nx = (centerX + cos(angle) * orbitRadius).toFloat()
+            val ny = (centerY + sin(angle) * orbitRadius).toFloat()
+            canvas.drawCircle(nx, ny, 6f + (i % 3) * 2f, nodePaint)
+        }
+
+        // Alt bilgi kartı
+        val cardRect = RectF(
+            width * 0.07f,
+            height * 0.68f,
+            width * 0.93f,
+            height * 0.92f
+        )
+        val cardBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.FILL
+            color = android.graphics.Color.argb(215, 12, 16, 14)
+        }
+        val cardBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = 2.5f
+            color = android.graphics.Color.rgb(0, 230, 118)
+        }
+        canvas.drawRoundRect(cardRect, 24f, 24f, cardBgPaint)
+        canvas.drawRoundRect(cardRect, 24f, 24f, cardBorderPaint)
+
+        val headerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = android.graphics.Color.rgb(0, 230, 118)
+            textSize = (minDim * 0.032f).coerceIn(22f, 44f)
+            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+        }
+        canvas.drawText(
+            "EKSIN OLED • $modelLabel",
+            cardRect.left + 28f,
+            cardRect.top + 48f,
+            headerPaint
+        )
+
+        val bodyPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = android.graphics.Color.rgb(235, 245, 238)
+            textSize = (minDim * 0.028f).coerceIn(18f, 36f)
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
+        }
+
+        val words = promptText.trim().split(Regex("\\s+"))
+        val lines = mutableListOf<String>()
+        var currentLine = StringBuilder()
+        val maxWidth = cardRect.width() - 56f
+        for (word in words) {
+            val candidate = if (currentLine.isEmpty()) word else "$currentLine $word"
+            if (bodyPaint.measureText(candidate) <= maxWidth) {
+                currentLine = StringBuilder(candidate)
+            } else {
+                if (currentLine.isNotEmpty()) lines.add(currentLine.toString())
+                currentLine = StringBuilder(word)
+            }
+        }
+        if (currentLine.isNotEmpty()) lines.add(currentLine.toString())
+
+        var textY = cardRect.top + 96f
+        for (line in lines.take(3)) {
+            canvas.drawText(line, cardRect.left + 28f, textY, bodyPaint)
+            textY += bodyPaint.textSize * 1.35f
+        }
+
+        return bitmap
     }
 
     private fun buildPromptForMode(
@@ -298,9 +630,12 @@ class GeminiHelper @Inject constructor() {
 
     companion object {
         private const val TAG = "GeminiHelper"
+        const val PREFS_NAME = "eksin_gemini_prefs"
+        const val KEY_GEMINI_API_KEY = "gemini_api_key"
         const val MODEL_NAME = "gemini-3.8-flash"
-        const val IMAGE_MODEL_DEFAULT = "gemini-nano-banana-2.1"
-        const val IMAGE_MODEL_PRO = "gemini-3-pro-image"
+        const val IMAGE_MODEL_DEFAULT = "gemini-3.8-flash"
+        const val IMAGE_MODEL_PRO = "gemini-3.8-flash"
+        private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
         private const val MAX_ENTRIES_FOR_CONTEXT = 40
         private const val MAX_CHARS_PER_ENTRY = 1200
     }

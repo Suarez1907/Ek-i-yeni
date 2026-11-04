@@ -98,6 +98,8 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -250,9 +252,9 @@ fun MainScaffold(
                                         .background(EksiNeonGreen)
                                 )
                                 Text(
-                                    text = "ekşin oled",
+                                    text = "Ekşi+",
                                     fontWeight = FontWeight.ExtraBold,
-                                    fontSize = 18.sp,
+                                    fontSize = 19.sp,
                                     letterSpacing = (-0.3).sp,
                                     color = MaterialTheme.colorScheme.onSurface
                                 )
@@ -1018,12 +1020,26 @@ private fun DebeAndPeriodicBestsScreenContent(
 
                                 Spacer(modifier = Modifier.width(12.dp))
 
+                                val pillText = when {
+                                    (activeCategory == DebeAndStatsCategory.DEBE || activeRankingTab == PeriodicRankingTab.TOP_ENTRIES) &&
+                                        item.favoriteCount > 0 -> "♥ ${item.favoriteCount}"
+                                    item.badgeText.isNotBlank() -> item.badgeText
+                                    else -> "♥ ..."
+                                }
+
                                 Surface(
                                     color = OledPillGreenBg,
-                                    shape = RoundedCornerShape(50)
+                                    shape = RoundedCornerShape(50),
+                                    modifier = Modifier
+                                        .border(
+                                            width = 0.6.dp,
+                                            color = EksiNeonGreen.copy(alpha = 0.45f),
+                                            shape = RoundedCornerShape(50)
+                                        )
+                                        .testTag("debe_fav_pill_${index + 1}")
                                 ) {
                                     Text(
-                                        text = item.badgeText,
+                                        text = pillText,
                                         color = EksiNeonGreen,
                                         fontSize = 12.sp,
                                         fontWeight = FontWeight.Bold,
@@ -1280,7 +1296,9 @@ private fun TopicPagingList(
                     }
 
                     val badgeText = when {
-                        isDebeMode -> "★ DEBE"
+                        isDebeMode && item.favoriteCount > 0 -> "♥ ${item.favoriteCount}"
+                        isDebeMode && item.entryCountText.isNotBlank() -> item.entryCountText
+                        isDebeMode -> "♥ ..."
                         item.entryCountText.isNotBlank() -> item.entryCountText
                         item.entryCount > 0 -> item.entryCount.toString()
                         else -> ""
@@ -1394,11 +1412,19 @@ private fun ProfileAndStudioScreenContent(
     val bookmarks by viewModel.bookmarkedEntries.collectAsStateWithLifecycle()
     val hasCfClearance by viewModel.hasCfClearance.collectAsStateWithLifecycle()
     val currentTheme by viewModel.themeMode.collectAsStateWithLifecycle()
+    val savedGeminiKey by viewModel.geminiApiKey.collectAsStateWithLifecycle()
+    val isGeminiKeyConfigured by viewModel.isGeminiKeyConfigured.collectAsStateWithLifecycle()
 
     val selectedModel by viewModel.selectedImageModel.collectAsStateWithLifecycle()
     val selectedSize by viewModel.selectedImageSize.collectAsStateWithLifecycle()
     val selectedRatio by viewModel.selectedAspectRatio.collectAsStateWithLifecycle()
     val aiImageState by viewModel.aiImageState.collectAsStateWithLifecycle()
+
+    var apiKeyInput by rememberSaveable(savedGeminiKey) {
+        mutableStateOf(savedGeminiKey)
+    }
+    var showApiKeyPlain by rememberSaveable { mutableStateOf(false) }
+    var apiKeyFeedbackMessage by remember { mutableStateOf<String?>(null) }
 
     var promptInput by rememberSaveable {
         mutableStateOf("Gece yarısı OLED siyah ekranda yeşil neon ışıklarla aydınlanan fütüristik sözlük kütüphanesi")
@@ -1541,6 +1567,156 @@ private fun ProfileAndStudioScreenContent(
                         ) {
                             Text("Sıfırla", color = OledTextSecondary)
                         }
+                    }
+                }
+            }
+        }
+
+        // 1.5 Gemini API Anahtarı (Google AI Studio - Free Tier & SharedPreferences)
+        item {
+            Card(
+                shape = RoundedCornerShape(14.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .border(0.5.dp, OledHairlineDivider, RoundedCornerShape(14.dp))
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.AutoAwesome,
+                                contentDescription = null,
+                                tint = EksiNeonGreen
+                            )
+                            Text(
+                                text = "Gemini API Anahtarı (Google AI Studio)",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = EksiNeonGreen
+                            )
+                        }
+
+                        Surface(
+                            color = if (isGeminiKeyConfigured) OledPillGreenBg else MaterialTheme.colorScheme.background,
+                            shape = RoundedCornerShape(50),
+                            modifier = Modifier.border(
+                                width = 0.6.dp,
+                                color = if (isGeminiKeyConfigured) EksiNeonGreen else OledHairlineDivider,
+                                shape = RoundedCornerShape(50)
+                            )
+                        ) {
+                            Text(
+                                text = if (isGeminiKeyConfigured) "Aktif" else "Girilmedi",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (isGeminiKeyConfigured) EksiNeonGreen else OledTextSecondary,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                            )
+                        }
+                    }
+
+                    Text(
+                        text = "Başlık içi '✨ AI Özet' (gemini-3.8-flash) özelliği için ücretsiz Google AI Studio API anahtarınızı buraya girin. Anahtarınız yalnızca cihazınızda (SharedPreferences) saklanır.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = OledTextSecondary
+                    )
+
+                    OutlinedTextField(
+                        value = apiKeyInput,
+                        onValueChange = {
+                            apiKeyInput = it
+                            apiKeyFeedbackMessage = null
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("gemini_api_key_input"),
+                        singleLine = true,
+                        label = { Text("AIzaSy... (Gemini API Key)") },
+                        visualTransformation = if (showApiKeyPlain) {
+                            VisualTransformation.None
+                        } else {
+                            PasswordVisualTransformation()
+                        },
+                        trailingIcon = {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                AssistChip(
+                                    onClick = { showApiKeyPlain = !showApiKeyPlain },
+                                    label = {
+                                        Text(
+                                            text = if (showApiKeyPlain) "Gizle" else "Göster",
+                                            fontSize = 11.sp
+                                        )
+                                    },
+                                    modifier = Modifier.padding(end = 6.dp)
+                                )
+                            }
+                        },
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = EksiNeonGreen,
+                            unfocusedBorderColor = OledHairlineDivider,
+                            focusedContainerColor = MaterialTheme.colorScheme.background,
+                            unfocusedContainerColor = MaterialTheme.colorScheme.background,
+                            focusedTextColor = OledTextPrimary,
+                            unfocusedTextColor = OledTextPrimary
+                        )
+                    )
+
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Button(
+                            onClick = {
+                                viewModel.saveGeminiApiKey(apiKeyInput)
+                                apiKeyFeedbackMessage = "Gemini API anahtarı cihazınıza (SharedPreferences) kaydedildi."
+                            },
+                            enabled = apiKeyInput.isNotBlank(),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = EksiNeonGreen,
+                                contentColor = OledOnAccentColor
+                            ),
+                            shape = RoundedCornerShape(50),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("save_gemini_api_key_button")
+                        ) {
+                            Text("Anahtarı Kaydet", fontWeight = FontWeight.Bold)
+                        }
+
+                        if (savedGeminiKey.isNotBlank() || apiKeyInput.isNotBlank()) {
+                            OutlinedButton(
+                                onClick = {
+                                    apiKeyInput = ""
+                                    viewModel.clearGeminiApiKey()
+                                    apiKeyFeedbackMessage = "Kayıtlı API anahtarı temizlendi."
+                                },
+                                shape = RoundedCornerShape(50),
+                                modifier = Modifier.testTag("clear_gemini_api_key_button")
+                            ) {
+                                Text("Temizle", color = OledTextSecondary)
+                            }
+                        }
+                    }
+
+                    apiKeyFeedbackMessage?.let { feedback ->
+                        Text(
+                            text = feedback,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = EksiNeonGreen,
+                            fontWeight = FontWeight.Medium
+                        )
                     }
                 }
             }

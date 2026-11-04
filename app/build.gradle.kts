@@ -72,7 +72,6 @@ android {
 secrets {
   propertiesFileName = ".env"
   defaultPropertiesFileName = ".env.example"
-  ignoreList.add("FIREBASE_APPCHECK_DEBUG_TOKEN")
 }
 
 dependencies {
@@ -119,12 +118,6 @@ dependencies {
 
   // Coil (Image Loading)
   implementation(libs.coil.compose)
-
-  // Firebase AI Logic (Gemini API) & App Check
-  implementation(platform(libs.firebase.bom))
-  implementation(libs.firebase.ai)
-  implementation(libs.firebase.appcheck.recaptcha)
-  implementation(libs.firebase.appcheck.debug)
 
   // Testing
   testImplementation(libs.androidx.compose.ui.test.junit4)

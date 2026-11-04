@@ -39,8 +39,10 @@ import com.example.ui.theme.ThemePreferencesManager
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -51,6 +53,9 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import javax.inject.Inject
@@ -222,6 +227,12 @@ class EksinViewModel @Inject constructor(
     val geminiStreamState: StateFlow<GeminiStreamState> = _geminiStreamState.asStateFlow()
     private var activeGeminiJob: Job? = null
 
+    private val _geminiApiKey = MutableStateFlow(geminiHelper.getUserSavedApiKey())
+    val geminiApiKey: StateFlow<String> = _geminiApiKey.asStateFlow()
+
+    private val _isGeminiKeyConfigured = MutableStateFlow(geminiHelper.hasValidApiKey())
+    val isGeminiKeyConfigured: StateFlow<Boolean> = _isGeminiKeyConfigured.asStateFlow()
+
     private val _aiImageState = MutableStateFlow<AiImageState>(AiImageState.Idle)
     val aiImageState: StateFlow<AiImageState> = _aiImageState.asStateFlow()
 
@@ -346,9 +357,15 @@ class EksinViewModel @Inject constructor(
                 val res = repository.fetchDebeItems()
                 res.fold(
                     onSuccess = { list ->
+                        val subtitle = "Dünün En Beğenilen ${list.size} Entry'si (DEBE)"
                         _debeAndStatsUiState.value = DebeAndStatsUiState.Success(
                             items = list,
-                            subtitle = "Dünün En Beğenilen ${list.size} Entry'si (DEBE)"
+                            subtitle = subtitle
+                        )
+                        enrichItemsWithFavoriteCountsInBackground(
+                            initialItems = list,
+                            subtitle = subtitle,
+                            sortDescendingAfterUpdate = false
                         )
                     },
                     onFailure = { err ->
@@ -361,10 +378,18 @@ class EksinViewModel @Inject constructor(
                 val res = repository.fetchPeriodicBestItems(period = period, rankingTab = tab)
                 res.fold(
                     onSuccess = { list ->
+                        val subtitle = "${period.label} • ${tab.title} (${list.size})"
                         _debeAndStatsUiState.value = DebeAndStatsUiState.Success(
                             items = list,
-                            subtitle = "${period.label} • ${tab.title} (${list.size})"
+                            subtitle = subtitle
                         )
+                        if (tab == PeriodicRankingTab.TOP_ENTRIES) {
+                            enrichItemsWithFavoriteCountsInBackground(
+                                initialItems = list,
+                                subtitle = subtitle,
+                                sortDescendingAfterUpdate = true
+                            )
+                        }
                     },
                     onFailure = { err ->
                         _debeAndStatsUiState.value = DebeAndStatsUiState.Error(
@@ -372,6 +397,60 @@ class EksinViewModel @Inject constructor(
                         )
                     }
                 )
+            }
+        }
+    }
+
+    /**
+     * DEBE veya En Beğenilen Entry'ler ekrana gelir gelmez arka planda `withContext(Dispatchers.IO)`
+     * ve `Semaphore(4)` ile paralel olarak her bir entry'nin detayından `data-favorite-count`
+     * (veya `.favorite-count`) değerini çeker, hafızaya (`entryFavoriteCountCache`) alır ve
+     * UI state'ini anlık olarak (`♥ 342` formatında) günceller.
+     */
+    private suspend fun enrichItemsWithFavoriteCountsInBackground(
+        initialItems: List<RankedTopicOrEntryItem>,
+        subtitle: String,
+        sortDescendingAfterUpdate: Boolean
+    ) {
+        if (initialItems.none { it.favoriteCount <= 0 }) return
+
+        val workingArray = initialItems.toMutableList()
+        val stateMutex = kotlinx.coroutines.sync.Mutex()
+        val semaphore = Semaphore(4)
+
+        withContext(Dispatchers.IO) {
+            coroutineScope {
+                initialItems.forEachIndexed { index, item ->
+                    if (item.favoriteCount <= 0) {
+                        launch {
+                            semaphore.withPermit {
+                                val enriched = repository.fetchAndCacheEntryFavoriteCount(item)
+                                if (enriched.favoriteCount != item.favoriteCount ||
+                                    enriched.badgeText != item.badgeText ||
+                                    enriched.author != item.author
+                                ) {
+                                    stateMutex.lock()
+                                    try {
+                                        workingArray[index] = enriched
+                                        val snapshot = if (sortDescendingAfterUpdate) {
+                                            workingArray
+                                                .sortedByDescending { it.favoriteCount }
+                                                .mapIndexed { idx, it -> it.copy(rank = idx + 1) }
+                                        } else {
+                                            workingArray.toList()
+                                        }
+                                        _debeAndStatsUiState.value = DebeAndStatsUiState.Success(
+                                            items = snapshot,
+                                            subtitle = subtitle
+                                        )
+                                    } finally {
+                                        stateMutex.unlock()
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -899,6 +978,13 @@ class EksinViewModel @Inject constructor(
         entries: List<EntryItem>
     ) {
         activeGeminiJob?.cancel()
+        val savedKey = geminiHelper.getUserSavedApiKey()
+        _geminiApiKey.value = savedKey
+        _isGeminiKeyConfigured.value = savedKey.isNotBlank()
+        if (savedKey.isBlank()) {
+            _geminiStreamState.value = GeminiStreamState.AwaitingApiKey(mode)
+            return
+        }
         activeGeminiJob = viewModelScope.launch {
             geminiHelper.executeStreamingAnalysis(
                 mode = mode,
@@ -929,6 +1015,23 @@ class EksinViewModel @Inject constructor(
     fun clearGeminiStream() {
         activeGeminiJob?.cancel()
         _geminiStreamState.value = GeminiStreamState.Idle
+    }
+
+    fun saveGeminiApiKey(rawKey: String) {
+        val trimmed = rawKey.trim()
+        geminiHelper.saveUserApiKey(trimmed)
+        _geminiApiKey.value = geminiHelper.getUserSavedApiKey()
+        _isGeminiKeyConfigured.value = geminiHelper.hasValidApiKey()
+    }
+
+    fun clearGeminiApiKey() {
+        activeGeminiJob?.cancel()
+        geminiHelper.clearUserApiKey()
+        _geminiApiKey.value = geminiHelper.getUserSavedApiKey()
+        _isGeminiKeyConfigured.value = geminiHelper.hasValidApiKey()
+        if (_geminiStreamState.value !is GeminiStreamState.Idle) {
+            _geminiStreamState.value = GeminiStreamState.AwaitingApiKey()
+        }
     }
 
     fun selectImageModel(model: StudioImageModel) {

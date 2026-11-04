@@ -60,7 +60,17 @@ object AppModule {
             readStateDao = readStateDao,
             eksinDao = eksinDao
         )
-        val geminiHelper = GeminiHelper()
+        val userAgentInterceptor = UserAgentInterceptor(userAgentProvider)
+        val cloudflareInterceptor = CloudflareInterceptor(cloudflareManager)
+        val okHttpClient = provideOkHttpClient(
+            cookieJar = cookieJar,
+            userAgentInterceptor = userAgentInterceptor,
+            cloudflareInterceptor = cloudflareInterceptor
+        )
+        val geminiHelper = GeminiHelper(
+            appContext = appContext,
+            baseOkHttpClient = okHttpClient
+        )
 
         return EksinServiceContainer(
             appContext = appContext,

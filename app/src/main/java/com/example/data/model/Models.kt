@@ -12,6 +12,7 @@ data class TopicItem(
     val url: String,
     val entryCount: Int = 0,
     val entryCountText: String = "",
+    val favoriteCount: Int = 0,
     val isTracked: Boolean = false
 ) {
     /**
@@ -181,6 +182,7 @@ data class RankedTopicOrEntryItem(
     val title: String,
     val url: String,
     val badgeText: String,
+    val favoriteCount: Int = 0,
     val author: String? = null,
     val entryId: String? = null,
     val snippet: String? = null,
@@ -188,12 +190,14 @@ data class RankedTopicOrEntryItem(
 ) {
     fun toTopicItem(): TopicItem {
         val cleanSlug = title.lowercase().replace(" ", "-")
+        val formattedBadge = if (favoriteCount > 0) "♥ $favoriteCount" else badgeText
         return TopicItem(
             id = entryId ?: id,
             title = title,
             slug = cleanSlug,
             url = url,
-            entryCountText = badgeText
+            entryCountText = formattedBadge,
+            favoriteCount = favoriteCount
         )
     }
 }

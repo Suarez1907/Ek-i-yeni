@@ -173,6 +173,8 @@ fun TopicDetailScreen(
     val favoritedIds by viewModel.favoritedEntryIds.collectAsStateWithLifecycle()
     val bkzPreviewState by viewModel.bkzPreviewState.collectAsStateWithLifecycle()
     val geminiStreamState by viewModel.geminiStreamState.collectAsStateWithLifecycle()
+    val geminiApiKey by viewModel.geminiApiKey.collectAsStateWithLifecycle()
+    val isGeminiKeyConfigured by viewModel.isGeminiKeyConfigured.collectAsStateWithLifecycle()
     val themeMode by viewModel.themeMode.collectAsStateWithLifecycle()
     val showThemeDialog by viewModel.showThemeDialog.collectAsStateWithLifecycle()
 
@@ -275,7 +277,17 @@ fun TopicDetailScreen(
     GeminiSummaryBottomSheet(
         topicTitle = activeTitle,
         streamState = geminiStreamState,
+        hasSavedApiKey = isGeminiKeyConfigured,
+        savedApiKey = geminiApiKey,
         onSelectMode = { mode ->
+            viewModel.runGeminiAnalysisStream(
+                mode = mode,
+                topicTitle = activeTitle,
+                entries = currentEntries.take(40)
+            )
+        },
+        onSaveApiKeyAndSummarize = { newApiKey, mode ->
+            viewModel.saveGeminiApiKey(newApiKey)
             viewModel.runGeminiAnalysisStream(
                 mode = mode,
                 topicTitle = activeTitle,
