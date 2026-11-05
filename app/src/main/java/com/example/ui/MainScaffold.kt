@@ -65,6 +65,7 @@ import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -84,6 +85,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -131,6 +133,7 @@ import com.example.ui.theme.OledTextPrimary
 import com.example.ui.theme.OledTextSecondary
 import com.example.ui.theme.OledTopicRead
 import com.example.ui.theme.OledTopicUnread
+import kotlinx.coroutines.launch
 
 /**
  * Tek elle kullanıma uygun Alt Navigasyon Barı sekmeleri:
@@ -168,7 +171,76 @@ fun MainScaffold(
         allReadStates.associateBy { it.topicKey }
     }
 
+    val coroutineScope = rememberCoroutineScope()
     var currentDestination by rememberSaveable { mutableStateOf(MainNavDestination.GUNDEM) }
+
+    // 2. KURAL: Her sekme için ayrı LazyListState ve ayrı LazyPagingItems en üst seviyede (TopicDetailScreen
+    // veya AuthWebViewScreen açıldığında bile silinmeyecek şekilde) tutulur. Böylece bir başlığa tıklayıp
+    // geri dönüldüğünde kaydırma konumu (firstVisibleItemIndex ve scrollOffset) %100 korunur.
+    val gundemListState = rememberLazyListState()
+    val bugunListState = rememberLazyListState()
+    val olaylarListState = rememberLazyListState()
+    val kanallarListState = rememberLazyListState()
+    val debeListState = rememberLazyListState()
+    val searchListState = rememberLazyListState()
+
+    val gundemPagingItems = viewModel.gundemTopicsPagingFlow.collectAsLazyPagingItems()
+    val bugunPagingItems = viewModel.bugunTopicsPagingFlow.collectAsLazyPagingItems()
+    val olaylarPagingItems = viewModel.olaylarTopicsPagingFlow.collectAsLazyPagingItems()
+    val channelPagingItems = viewModel.channelTopicsPagingFlow.collectAsLazyPagingItems()
+    val searchPagingItems = viewModel.searchTopicsPagingFlow.collectAsLazyPagingItems()
+
+    LaunchedEffect(gundemPagingItems.itemCount, bugunPagingItems.itemCount) {
+        if (gundemPagingItems.itemCount > 0 || bugunPagingItems.itemCount > 0) {
+            viewModel.refreshCookieState()
+        }
+    }
+
+    val activeScrollListState = when (currentDestination) {
+        MainNavDestination.GUNDEM -> when (selectedSection) {
+            LeftFrameSection.OLAYLAR -> olaylarListState
+            LeftFrameSection.BUGUN -> bugunListState
+            else -> gundemListState
+        }
+        MainNavDestination.BUGUN -> bugunListState
+        MainNavDestination.KANALLAR -> kanallarListState
+        MainNavDestination.DEBE_ENLER -> debeListState
+        MainNavDestination.ARAMA -> searchListState
+        MainNavDestination.PROFIL -> gundemListState
+    }
+    val isHeaderVisible = rememberDirectionalHeaderVisibility(activeScrollListState)
+    val isDebeActive = currentDestination == MainNavDestination.DEBE_ENLER
+
+    // 1. KURAL: Alt veya üst bardaki "Gündem" butonuna tıklandığında:
+    // - Başka sekmedeyse Gündem sekmesine geçer.
+    // - Zaten Gündem sekmesindeyse (re-click) Gündem önbelleğini temizler, baştan çeker ve en üste kaydırır.
+    val handleGundemClick: () -> Unit = {
+        val alreadyOnGundem = currentDestination == MainNavDestination.GUNDEM &&
+            selectedSection == LeftFrameSection.GUNDEM
+        if (alreadyOnGundem) {
+            viewModel.forceRefreshGundem()
+            gundemPagingItems.refresh()
+            coroutineScope.launch {
+                gundemListState.animateScrollToItem(0)
+            }
+        } else {
+            currentDestination = MainNavDestination.GUNDEM
+            viewModel.selectSection(LeftFrameSection.GUNDEM)
+        }
+    }
+
+    // 4. KURAL: Üst bardaki "DEBE", üst çipteki "🏆 DEBE & Enler" ve alt bardaki "DEBE" butonlarının
+    // tamamı aynı DEBE ekranını ve "Dünün En Beğenilenleri (DEBE)" sekmesini açar.
+    val handleDebeClick: () -> Unit = {
+        val alreadyOnDebe = currentDestination == MainNavDestination.DEBE_ENLER
+        currentDestination = MainNavDestination.DEBE_ENLER
+        viewModel.openDebeSection(forceReload = alreadyOnDebe)
+        if (alreadyOnDebe) {
+            coroutineScope.launch {
+                debeListState.animateScrollToItem(0)
+            }
+        }
+    }
 
     if (showThemeDialog) {
         ThemeSelectorDialog(
@@ -178,338 +250,434 @@ fun MainScaffold(
         )
     }
 
-    // 1. Kullanıcı Cloudflare Doğrulama veya Giriş WebView Ekranını açtığında göster
-    activeAuthSheet?.let { sheet ->
-        AuthWebViewScreen(
-            initialUrl = sheet.url,
-            mode = sheet.mode,
-            cookieJar = viewModel.cookieJar,
-            userAgentProvider = viewModel.userAgentProvider,
-            webViewFetchBridge = viewModel.webViewFetchBridge,
-            onVerificationSuccess = { viewModel.onAuthVerificationCompleted() },
-            onDismiss = { viewModel.onAuthVerificationDismissed() }
-        )
-        return
-    }
-
-    // 2. Başlık Detay Ekranı
-    selectedTopic?.let { topic ->
-        TopicDetailScreen(
-            topic = topic,
-            viewModel = viewModel,
-            onBack = { viewModel.closeTopicDetail() }
-        )
-        return
-    }
-
-    val leftFrameListState = rememberLazyListState()
-    val channelsListState = rememberLazyListState()
-    val activeScrollListState = when (currentDestination) {
-        MainNavDestination.KANALLAR -> channelsListState
-        else -> leftFrameListState
-    }
-    val isHeaderVisible = rememberDirectionalHeaderVisibility(activeScrollListState)
-    val isDebeActive = currentDestination == MainNavDestination.DEBE_ENLER
-
-    Scaffold(
-        modifier = Modifier.fillMaxSize(),
-        containerColor = MaterialTheme.colorScheme.background,
-        contentWindowInsets = WindowInsets.safeDrawing,
-        topBar = {
-            AnimatedVisibility(
-                visible = isHeaderVisible ||
-                    currentDestination == MainNavDestination.ARAMA ||
-                    currentDestination == MainNavDestination.PROFIL ||
-                    currentDestination == MainNavDestination.DEBE_ENLER,
-                enter = slideInVertically(
-                    initialOffsetY = { -it },
-                    animationSpec = tween(durationMillis = 220)
-                ) + fadeIn(animationSpec = tween(durationMillis = 180)),
-                exit = slideOutVertically(
-                    targetOffsetY = { -it },
-                    animationSpec = tween(durationMillis = 220)
-                ) + fadeOut(animationSpec = tween(durationMillis = 160))
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(MaterialTheme.colorScheme.surface)
+    Box(modifier = Modifier.fillMaxSize()) {
+        Scaffold(
+            modifier = Modifier.fillMaxSize(),
+            containerColor = MaterialTheme.colorScheme.background,
+            contentWindowInsets = WindowInsets.safeDrawing,
+            topBar = {
+                AnimatedVisibility(
+                    visible = isHeaderVisible ||
+                        currentDestination == MainNavDestination.ARAMA ||
+                        currentDestination == MainNavDestination.PROFIL ||
+                        currentDestination == MainNavDestination.DEBE_ENLER,
+                    enter = slideInVertically(
+                        initialOffsetY = { -it },
+                        animationSpec = tween(durationMillis = 220)
+                    ) + fadeIn(animationSpec = tween(durationMillis = 180)),
+                    exit = slideOutVertically(
+                        targetOffsetY = { -it },
+                        animationSpec = tween(durationMillis = 220)
+                    ) + fadeOut(animationSpec = tween(durationMillis = 160))
                 ) {
-                    TopAppBar(
-                        colors = TopAppBarDefaults.topAppBarColors(
-                            containerColor = MaterialTheme.colorScheme.surface,
-                            titleContentColor = MaterialTheme.colorScheme.onSurface
-                        ),
-                        title = {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(9.dp)
-                                        .clip(CircleShape)
-                                        .background(EksiNeonGreen)
-                                )
-                                Text(
-                                    text = "Ekşi+",
-                                    fontWeight = FontWeight.ExtraBold,
-                                    fontSize = 19.sp,
-                                    letterSpacing = (-0.3).sp,
-                                    color = MaterialTheme.colorScheme.onSurface
-                                )
-                            }
-                        },
-                        actions = {
-                            // Modern Kapsül "DEBE" Butonu -> Gelişmiş DEBE & Dönemsel Enler ekranını açar
-                            Surface(
-                                color = if (isDebeActive) EksiNeonGreen else OledPillGreenBg,
-                                shape = RoundedCornerShape(50),
-                                modifier = Modifier
-                                    .padding(end = 4.dp)
-                                    .clip(RoundedCornerShape(50))
-                                    .clickable {
-                                        if (currentDestination == MainNavDestination.DEBE_ENLER) {
-                                            currentDestination = MainNavDestination.GUNDEM
-                                            viewModel.selectSection(LeftFrameSection.GUNDEM)
-                                        } else {
-                                            currentDestination = MainNavDestination.DEBE_ENLER
-                                            viewModel.loadDebeAndStats()
-                                        }
-                                    }
-                                    .border(
-                                        width = 0.8.dp,
-                                        color = EksiNeonGreen.copy(alpha = if (isDebeActive) 1f else 0.45f),
-                                        shape = RoundedCornerShape(50)
-                                    )
-                                    .testTag("debe_capsule_chip")
-                            ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(MaterialTheme.colorScheme.surface)
+                    ) {
+                        TopAppBar(
+                            colors = TopAppBarDefaults.topAppBarColors(
+                                containerColor = MaterialTheme.colorScheme.surface,
+                                titleContentColor = MaterialTheme.colorScheme.onSurface
+                            ),
+                            title = {
                                 Row(
-                                    modifier = Modifier.padding(horizontal = 11.dp, vertical = 6.dp),
                                     verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Whatshot,
-                                        contentDescription = null,
-                                        tint = if (isDebeActive) OledOnAccentColor else EksiNeonGreen,
-                                        modifier = Modifier.size(14.dp)
+                                    Box(
+                                        modifier = Modifier
+                                            .size(9.dp)
+                                            .clip(CircleShape)
+                                            .background(EksiNeonGreen)
                                     )
                                     Text(
-                                        text = "DEBE",
-                                        fontSize = 11.sp,
+                                        text = "Ekşi+",
                                         fontWeight = FontWeight.ExtraBold,
-                                        color = if (isDebeActive) OledOnAccentColor else EksiNeonGreen
+                                        fontSize = 19.sp,
+                                        letterSpacing = (-0.3).sp,
+                                        color = MaterialTheme.colorScheme.onSurface
                                     )
                                 }
-                            }
+                            },
+                            actions = {
+                                // Modern Kapsül "DEBE" Butonu -> Doğrudan Dünün En Beğenilenleri (DEBE) ekranını açar
+                                Surface(
+                                    color = if (isDebeActive) EksiNeonGreen else OledPillGreenBg,
+                                    shape = RoundedCornerShape(50),
+                                    modifier = Modifier
+                                        .padding(end = 4.dp)
+                                        .clip(RoundedCornerShape(50))
+                                        .clickable { handleDebeClick() }
+                                        .border(
+                                            width = 0.8.dp,
+                                            color = EksiNeonGreen.copy(alpha = if (isDebeActive) 1f else 0.45f),
+                                            shape = RoundedCornerShape(50)
+                                        )
+                                        .testTag("debe_capsule_chip")
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 11.dp, vertical = 6.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Whatshot,
+                                            contentDescription = null,
+                                            tint = if (isDebeActive) OledOnAccentColor else EksiNeonGreen,
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                        Text(
+                                            text = "DEBE",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = if (isDebeActive) OledOnAccentColor else EksiNeonGreen
+                                        )
+                                    }
+                                }
 
-                            // 4. Tema / Renk Seçici (🎨) İkonu
-                            IconButton(
-                                onClick = { viewModel.openThemeDialog() },
-                                modifier = Modifier.testTag("top_theme_button")
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Palette,
-                                    contentDescription = "Tema Seçici",
-                                    tint = EksiNeonGreen,
-                                    modifier = Modifier.size(21.dp)
-                                )
-                            }
-
-                            // Kalkan ikonu + sadece küçük yeşil durum noktası
-                            IconButton(
-                                onClick = { viewModel.openCloudflareVerification() },
-                                modifier = Modifier.testTag("top_cloudflare_button")
-                            ) {
-                                Box(contentAlignment = Alignment.Center) {
+                                // 4. Tema / Renk Seçici (🎨) İkonu
+                                IconButton(
+                                    onClick = { viewModel.openThemeDialog() },
+                                    modifier = Modifier.testTag("top_theme_button")
+                                ) {
                                     Icon(
-                                        imageVector = Icons.Default.Security,
-                                        contentDescription = "Cloudflare Durumu",
+                                        imageVector = Icons.Default.Palette,
+                                        contentDescription = "Tema Seçici",
+                                        tint = EksiNeonGreen,
+                                        modifier = Modifier.size(21.dp)
+                                    )
+                                }
+
+                                // Kalkan ikonu + sadece küçük yeşil durum noktası
+                                IconButton(
+                                    onClick = { viewModel.openCloudflareVerification() },
+                                    modifier = Modifier.testTag("top_cloudflare_button")
+                                ) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        Icon(
+                                            imageVector = Icons.Default.Security,
+                                            contentDescription = "Cloudflare Durumu",
+                                            tint = OledTextSecondary,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                        Box(
+                                            modifier = Modifier
+                                                .align(Alignment.TopEnd)
+                                                .size(8.dp)
+                                                .clip(CircleShape)
+                                                .background(
+                                                    if (hasCfClearance) EksiNeonGreen else Color(0xFFFFB74D)
+                                                )
+                                                .border(1.2.dp, MaterialTheme.colorScheme.surface, CircleShape)
+                                                .testTag("cf_status_badge")
+                                        )
+                                    }
+                                }
+
+                                IconButton(
+                                    onClick = {
+                                        if (currentDestination == MainNavDestination.GUNDEM &&
+                                            selectedSection == LeftFrameSection.GUNDEM
+                                        ) {
+                                            handleGundemClick()
+                                        } else {
+                                            viewModel.triggerRefresh()
+                                        }
+                                    },
+                                    modifier = Modifier.testTag("top_refresh_button")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Refresh,
+                                        contentDescription = "Yenile",
                                         tint = OledTextSecondary,
                                         modifier = Modifier.size(20.dp)
                                     )
-                                    Box(
-                                        modifier = Modifier
-                                            .align(Alignment.TopEnd)
-                                            .size(8.dp)
-                                            .clip(CircleShape)
-                                            .background(
-                                                if (hasCfClearance) EksiNeonGreen else Color(0xFFFFB74D)
-                                            )
-                                            .border(1.2.dp, MaterialTheme.colorScheme.surface, CircleShape)
-                                            .testTag("cf_status_badge")
-                                    )
                                 }
                             }
+                        )
 
-                            IconButton(
-                                onClick = { viewModel.triggerRefresh() },
-                                modifier = Modifier.testTag("top_refresh_button")
+                        // Ana ekran üst sekme çubuğu: Gündem | Bugün | Kanallar | DEBE & Enler | Olaylar
+                        if (currentDestination == MainNavDestination.GUNDEM ||
+                            currentDestination == MainNavDestination.BUGUN ||
+                            currentDestination == MainNavDestination.KANALLAR ||
+                            currentDestination == MainNavDestination.DEBE_ENLER
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState())
+                                    .padding(horizontal = 12.dp, vertical = 4.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Icon(
-                                    imageVector = Icons.Default.Refresh,
-                                    contentDescription = "Yenile",
-                                    tint = OledTextSecondary,
-                                    modifier = Modifier.size(20.dp)
+                                TopQuickSectionChip(
+                                    label = "🔥 Gündem",
+                                    selected = currentDestination == MainNavDestination.GUNDEM &&
+                                        selectedSection == LeftFrameSection.GUNDEM,
+                                    onClick = { handleGundemClick() }
+                                )
+                                TopQuickSectionChip(
+                                    label = "📅 Bugün",
+                                    selected = currentDestination == MainNavDestination.BUGUN,
+                                    onClick = {
+                                        val alreadyOnBugun = currentDestination == MainNavDestination.BUGUN
+                                        currentDestination = MainNavDestination.BUGUN
+                                        viewModel.selectSection(LeftFrameSection.BUGUN)
+                                        if (alreadyOnBugun) {
+                                            bugunPagingItems.refresh()
+                                            coroutineScope.launch {
+                                                bugunListState.animateScrollToItem(0)
+                                            }
+                                        }
+                                    }
+                                )
+                                TopQuickSectionChip(
+                                    label = "# Kanallar",
+                                    selected = currentDestination == MainNavDestination.KANALLAR,
+                                    onClick = {
+                                        currentDestination = MainNavDestination.KANALLAR
+                                    }
+                                )
+                                TopQuickSectionChip(
+                                    label = "🏆 DEBE & Enler",
+                                    selected = currentDestination == MainNavDestination.DEBE_ENLER,
+                                    onClick = { handleDebeClick() }
+                                )
+                                TopQuickSectionChip(
+                                    label = "🔔 Olaylar",
+                                    selected = currentDestination == MainNavDestination.GUNDEM &&
+                                        selectedSection == LeftFrameSection.OLAYLAR,
+                                    onClick = {
+                                        currentDestination = MainNavDestination.GUNDEM
+                                        viewModel.selectSection(LeftFrameSection.OLAYLAR)
+                                    }
                                 )
                             }
                         }
+
+                        HorizontalDivider(color = OledHairlineDivider, thickness = 0.5.dp)
+                    }
+                }
+            },
+            bottomBar = {
+                NavigationBar(
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    contentColor = MaterialTheme.colorScheme.onSurface,
+                    tonalElevation = 0.dp,
+                    modifier = Modifier.border(0.5.dp, OledHairlineDivider)
+                ) {
+                    val navColors = NavigationBarItemDefaults.colors(
+                        selectedIconColor = OledOnAccentColor,
+                        selectedTextColor = EksiNeonGreen,
+                        indicatorColor = EksiNeonGreen,
+                        unselectedIconColor = OledTextSecondary,
+                        unselectedTextColor = OledTextSecondary
                     )
 
-                    // Ana ekran üst sekme çubuğu: Gündem | Bugün | Kanallar | DEBE & Enler | Olaylar
-                    if (currentDestination == MainNavDestination.GUNDEM ||
-                        currentDestination == MainNavDestination.BUGUN ||
-                        currentDestination == MainNavDestination.KANALLAR ||
-                        currentDestination == MainNavDestination.DEBE_ENLER
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .horizontalScroll(rememberScrollState())
-                                .padding(horizontal = 12.dp, vertical = 4.dp),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                    MainNavDestination.entries.forEach { destination ->
+                        val isSelected = currentDestination == destination
+                        NavigationBarItem(
+                            selected = isSelected,
+                            onClick = {
+                                when (destination) {
+                                    MainNavDestination.GUNDEM -> handleGundemClick()
+                                    MainNavDestination.BUGUN -> {
+                                        val alreadyOnBugun = currentDestination == MainNavDestination.BUGUN
+                                        currentDestination = MainNavDestination.BUGUN
+                                        viewModel.selectSection(LeftFrameSection.BUGUN)
+                                        if (alreadyOnBugun) {
+                                            bugunPagingItems.refresh()
+                                            coroutineScope.launch {
+                                                bugunListState.animateScrollToItem(0)
+                                            }
+                                        }
+                                    }
+                                    MainNavDestination.KANALLAR -> {
+                                        val alreadyOnKanallar = currentDestination == MainNavDestination.KANALLAR
+                                        currentDestination = MainNavDestination.KANALLAR
+                                        if (alreadyOnKanallar) {
+                                            channelPagingItems.refresh()
+                                            coroutineScope.launch {
+                                                kanallarListState.animateScrollToItem(0)
+                                            }
+                                        }
+                                    }
+                                    MainNavDestination.DEBE_ENLER -> handleDebeClick()
+                                    MainNavDestination.ARAMA -> {
+                                        currentDestination = MainNavDestination.ARAMA
+                                    }
+                                    MainNavDestination.PROFIL -> {
+                                        currentDestination = MainNavDestination.PROFIL
+                                    }
+                                }
+                            },
+                            icon = {
+                                Icon(
+                                    imageVector = destination.icon,
+                                    contentDescription = destination.title
+                                )
+                            },
+                            label = {
+                                Text(
+                                    text = destination.title,
+                                    fontSize = 10.sp,
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                    maxLines = 1
+                                )
+                            },
+                            colors = navColors,
+                            modifier = Modifier.testTag(destination.testTag)
+                        )
+                    }
+                }
+            }
+        ) { innerPadding ->
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding)
+                    .background(MaterialTheme.colorScheme.background)
+            ) {
+                if (!hasCfClearance && pendingCfChallenge != null) {
+                    val challenge = pendingCfChallenge
+                    if (challenge != null) {
+                        Surface(
+                            color = MaterialTheme.colorScheme.surfaceVariant,
+                            modifier = Modifier.fillMaxWidth()
                         ) {
-                            TopQuickSectionChip(
-                                label = "🔥 Gündem",
-                                selected = currentDestination == MainNavDestination.GUNDEM &&
-                                    selectedSection == LeftFrameSection.GUNDEM,
-                                onClick = {
-                                    currentDestination = MainNavDestination.GUNDEM
-                                    viewModel.selectSection(LeftFrameSection.GUNDEM)
-                                }
-                            )
-                            TopQuickSectionChip(
-                                label = "📅 Bugün",
-                                selected = currentDestination == MainNavDestination.BUGUN ||
-                                    (currentDestination == MainNavDestination.GUNDEM && selectedSection == LeftFrameSection.BUGUN),
-                                onClick = {
-                                    currentDestination = MainNavDestination.BUGUN
-                                    viewModel.selectSection(LeftFrameSection.BUGUN)
-                                }
-                            )
-                            TopQuickSectionChip(
-                                label = "# Kanallar",
-                                selected = currentDestination == MainNavDestination.KANALLAR,
-                                onClick = {
-                                    currentDestination = MainNavDestination.KANALLAR
-                                }
-                            )
-                            TopQuickSectionChip(
-                                label = "🏆 DEBE & Enler",
-                                selected = currentDestination == MainNavDestination.DEBE_ENLER,
-                                onClick = {
-                                    currentDestination = MainNavDestination.DEBE_ENLER
-                                    viewModel.loadDebeAndStats()
-                                }
-                            )
-                            TopQuickSectionChip(
-                                label = "🔔 Olaylar",
-                                selected = currentDestination == MainNavDestination.GUNDEM &&
-                                    selectedSection == LeftFrameSection.OLAYLAR,
-                                onClick = {
-                                    currentDestination = MainNavDestination.GUNDEM
-                                    viewModel.selectSection(LeftFrameSection.OLAYLAR)
-                                }
-                            )
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 14.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(
+                                    text = challenge.reason,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = OledTextPrimary,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                AssistChip(
+                                    onClick = {
+                                        viewModel.openCloudflareVerification(challenge.targetUrl)
+                                    },
+                                    label = {
+                                        Text(
+                                            text = "Doğrula",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = EksiNeonGreen
+                                        )
+                                    }
+                                )
+                            }
                         }
                     }
-
-                    HorizontalDivider(color = OledHairlineDivider, thickness = 0.5.dp)
                 }
-            }
-        },
-        bottomBar = {
-            NavigationBar(
-                containerColor = MaterialTheme.colorScheme.surface,
-                contentColor = MaterialTheme.colorScheme.onSurface,
-                tonalElevation = 0.dp,
-                modifier = Modifier.border(0.5.dp, OledHairlineDivider)
-            ) {
-                val navColors = NavigationBarItemDefaults.colors(
-                    selectedIconColor = OledOnAccentColor,
-                    selectedTextColor = EksiNeonGreen,
-                    indicatorColor = EksiNeonGreen,
-                    unselectedIconColor = OledTextSecondary,
-                    unselectedTextColor = OledTextSecondary
-                )
 
-                MainNavDestination.entries.forEach { destination ->
-                    val isSelected = currentDestination == destination
-                    NavigationBarItem(
-                        selected = isSelected,
-                        onClick = {
-                            currentDestination = destination
-                            when (destination) {
-                                MainNavDestination.GUNDEM ->
-                                    viewModel.selectSection(LeftFrameSection.GUNDEM)
-                                MainNavDestination.BUGUN ->
-                                    viewModel.selectSection(LeftFrameSection.BUGUN)
-                                MainNavDestination.KANALLAR -> Unit
-                                MainNavDestination.DEBE_ENLER ->
-                                    viewModel.loadDebeAndStats()
-                                MainNavDestination.ARAMA,
-                                MainNavDestination.PROFIL -> Unit
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(MaterialTheme.colorScheme.background)
+                ) {
+                    when (currentDestination) {
+                        MainNavDestination.GUNDEM -> {
+                            val activePaging = if (selectedSection == LeftFrameSection.OLAYLAR) {
+                                olaylarPagingItems
+                            } else {
+                                gundemPagingItems
                             }
-                        },
-                        icon = {
-                            Icon(
-                                imageVector = destination.icon,
-                                contentDescription = destination.title
-                            )
-                        },
-                        label = {
-                            Text(
-                                text = destination.title,
-                                fontSize = 10.sp,
-                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                                maxLines = 1
-                            )
-                        },
-                        colors = navColors,
-                        modifier = Modifier.testTag(destination.testTag)
-                    )
-                }
-            }
-        }
-    ) { innerPadding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-                .background(MaterialTheme.colorScheme.background)
-        ) {
-            if (!hasCfClearance && pendingCfChallenge != null) {
-                val challenge = pendingCfChallenge
-                if (challenge != null) {
-                    Surface(
-                        color = MaterialTheme.colorScheme.surfaceVariant,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 14.dp, vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text(
-                                text = challenge.reason,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = OledTextPrimary,
-                                modifier = Modifier.weight(1f)
-                            )
-                            AssistChip(
-                                onClick = {
-                                    viewModel.openCloudflareVerification(challenge.targetUrl)
+                            val activeState = if (selectedSection == LeftFrameSection.OLAYLAR) {
+                                olaylarListState
+                            } else {
+                                gundemListState
+                            }
+                            val emptyTitle = if (selectedSection == LeftFrameSection.OLAYLAR) {
+                                "Olaylar"
+                            } else {
+                                "Gündem"
+                            }
+
+                            TopicPagingList(
+                                pagingItems = activePaging,
+                                listState = activeState,
+                                isDebeMode = false,
+                                readStateByUrl = readStateByUrl,
+                                onTopicClick = { topic ->
+                                    viewModel.openTopic(
+                                        topic = topic,
+                                        preferTodayMode = selectedSection != LeftFrameSection.OLAYLAR
+                                    )
                                 },
-                                label = {
-                                    Text(
-                                        text = "Doğrula",
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = EksiNeonGreen
+                                onOpenCloudflare = { viewModel.openCloudflareVerification() },
+                                emptyMessage = "$emptyTitle sekmesinde başlık bulunamadı."
+                            )
+                        }
+
+                        MainNavDestination.BUGUN -> {
+                            TopicPagingList(
+                                pagingItems = bugunPagingItems,
+                                listState = bugunListState,
+                                isDebeMode = false,
+                                readStateByUrl = readStateByUrl,
+                                onTopicClick = { topic ->
+                                    viewModel.openTopic(
+                                        topic = topic,
+                                        preferTodayMode = true
+                                    )
+                                },
+                                onOpenCloudflare = { viewModel.openCloudflareVerification() },
+                                emptyMessage = "Bugün sekmesinde başlık bulunamadı."
+                            )
+                        }
+
+                        MainNavDestination.KANALLAR -> {
+                            ChannelsScreenContent(
+                                viewModel = viewModel,
+                                channelPagingItems = channelPagingItems,
+                                listState = kanallarListState,
+                                readStateByUrl = readStateByUrl,
+                                onTopicClick = { topic ->
+                                    viewModel.openTopic(topic = topic, preferTodayMode = true)
+                                },
+                                onOpenCloudflare = { viewModel.openCloudflareVerification() }
+                            )
+                        }
+
+                        MainNavDestination.DEBE_ENLER -> {
+                            DebeAndPeriodicBestsScreenContent(
+                                viewModel = viewModel,
+                                listState = debeListState,
+                                readStateByUrl = readStateByUrl
+                            )
+                        }
+
+                        MainNavDestination.ARAMA -> {
+                            SearchScreenContent(
+                                viewModel = viewModel,
+                                searchPagingItems = searchPagingItems,
+                                searchListState = searchListState,
+                                readStateByUrl = readStateByUrl,
+                                onTopicClick = { viewModel.openTopic(it, preferTodayMode = false) },
+                                onOpenCloudflare = { viewModel.openCloudflareVerification() }
+                            )
+                        }
+
+                        MainNavDestination.PROFIL -> {
+                            ProfileAndStudioScreenContent(
+                                viewModel = viewModel,
+                                hasUserSession = hasUserSession,
+                                onOpenTopicUrl = { title, url ->
+                                    viewModel.openTopic(
+                                        TopicItem(
+                                            id = url,
+                                            title = title,
+                                            slug = title.replace(" ", "-"),
+                                            url = url
+                                        ),
+                                        preferTodayMode = false
                                     )
                                 }
                             )
@@ -517,86 +685,39 @@ fun MainScaffold(
                     }
                 }
             }
+        }
 
+        // Başlık Detay Ekranı (Alt katmandaki Scaffold ve LazyListState'leri yok etmeden üstte açılır)
+        selectedTopic?.let { topic ->
             Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(MaterialTheme.colorScheme.background)
             ) {
-                when (currentDestination) {
-                    MainNavDestination.GUNDEM,
-                    MainNavDestination.BUGUN -> {
-                        val pagingItems = viewModel.leftFramePagingFlow.collectAsLazyPagingItems()
-                        LaunchedEffect(pagingItems.itemCount) {
-                            if (pagingItems.itemCount > 0) {
-                                viewModel.refreshCookieState()
-                            }
-                        }
+                TopicDetailScreen(
+                    topic = topic,
+                    viewModel = viewModel,
+                    onBack = { viewModel.closeTopicDetail() }
+                )
+            }
+        }
 
-                        TopicPagingList(
-                            pagingItems = pagingItems,
-                            listState = leftFrameListState,
-                            isDebeMode = false,
-                            readStateByUrl = readStateByUrl,
-                            onTopicClick = { topic ->
-                                // Gündem / Bugün'den tıklanan başlıklar varsayılan olarak "Sadece Bugün" modunda açılır
-                                viewModel.openTopic(
-                                    topic = topic,
-                                    preferTodayMode = selectedSection != LeftFrameSection.OLAYLAR
-                                )
-                            },
-                            onOpenCloudflare = { viewModel.openCloudflareVerification() },
-                            emptyMessage = "${selectedSection.title} sekmesinde başlık bulunamadı."
-                        )
-                    }
-
-                    MainNavDestination.KANALLAR -> {
-                        ChannelsScreenContent(
-                            viewModel = viewModel,
-                            listState = channelsListState,
-                            readStateByUrl = readStateByUrl,
-                            onTopicClick = { topic ->
-                                // Kanallar'dan tıklanan başlıklar varsayılan olarak "Sadece Bugün" modunda açılır
-                                viewModel.openTopic(topic = topic, preferTodayMode = true)
-                            },
-                            onOpenCloudflare = { viewModel.openCloudflareVerification() }
-                        )
-                    }
-
-                    MainNavDestination.DEBE_ENLER -> {
-                        DebeAndPeriodicBestsScreenContent(
-                            viewModel = viewModel,
-                            readStateByUrl = readStateByUrl
-                        )
-                    }
-
-                    MainNavDestination.ARAMA -> {
-                        SearchScreenContent(
-                            viewModel = viewModel,
-                            readStateByUrl = readStateByUrl,
-                            onTopicClick = { viewModel.openTopic(it, preferTodayMode = false) },
-                            onOpenCloudflare = { viewModel.openCloudflareVerification() }
-                        )
-                    }
-
-                    MainNavDestination.PROFIL -> {
-                        ProfileAndStudioScreenContent(
-                            viewModel = viewModel,
-                            hasUserSession = hasUserSession,
-                            onOpenTopicUrl = { title, url ->
-                                viewModel.openTopic(
-                                    TopicItem(
-                                        id = url,
-                                        title = title,
-                                        slug = title.replace(" ", "-"),
-                                        url = url
-                                    ),
-                                    preferTodayMode = false
-                                )
-                            }
-                        )
-                    }
-                }
+        // Cloudflare Doğrulama veya Giriş WebView Ekranı
+        activeAuthSheet?.let { sheet ->
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(MaterialTheme.colorScheme.background)
+            ) {
+                AuthWebViewScreen(
+                    initialUrl = sheet.url,
+                    mode = sheet.mode,
+                    cookieJar = viewModel.cookieJar,
+                    userAgentProvider = viewModel.userAgentProvider,
+                    webViewFetchBridge = viewModel.webViewFetchBridge,
+                    onVerificationSuccess = { viewModel.onAuthVerificationCompleted() },
+                    onDismiss = { viewModel.onAuthVerificationDismissed() }
+                )
             }
         }
     }
@@ -639,13 +760,14 @@ private fun TopQuickSectionChip(
 @Composable
 private fun ChannelsScreenContent(
     viewModel: EksinViewModel,
+    channelPagingItems: LazyPagingItems<TopicItem>,
     listState: LazyListState,
     readStateByUrl: Map<String, TopicReadStateEntity>,
     onTopicClick: (TopicItem) -> Unit,
     onOpenCloudflare: () -> Unit
 ) {
     val selectedChannel by viewModel.selectedChannel.collectAsStateWithLifecycle()
-    val channelPagingItems = viewModel.channelTopicsPagingFlow.collectAsLazyPagingItems()
+    val coroutineScope = rememberCoroutineScope()
 
     Column(
         modifier = Modifier
@@ -667,7 +789,15 @@ private fun ChannelsScreenContent(
                 val isSelected = selectedChannel == channel
                 FilterChip(
                     selected = isSelected,
-                    onClick = { viewModel.selectChannel(channel) },
+                    onClick = {
+                        if (isSelected) {
+                            channelPagingItems.refresh()
+                            coroutineScope.launch { listState.animateScrollToItem(0) }
+                        } else {
+                            viewModel.selectChannel(channel)
+                            coroutineScope.launch { listState.scrollToItem(0) }
+                        }
+                    },
                     shape = RoundedCornerShape(50),
                     label = {
                         Text(
@@ -743,6 +873,7 @@ private fun ChannelsScreenContent(
 @Composable
 private fun DebeAndPeriodicBestsScreenContent(
     viewModel: EksinViewModel,
+    listState: LazyListState,
     readStateByUrl: Map<String, TopicReadStateEntity>
 ) {
     val activeCategory by viewModel.debeAndStatsCategory.collectAsStateWithLifecycle()
@@ -945,6 +1076,7 @@ private fun DebeAndPeriodicBestsScreenContent(
                     HorizontalDivider(color = OledHairlineDivider, thickness = 0.5.dp)
 
                     LazyColumn(
+                        state = listState,
                         modifier = Modifier
                             .fillMaxSize()
                             .background(MaterialTheme.colorScheme.background)
@@ -1086,6 +1218,8 @@ private fun rememberDirectionalHeaderVisibility(listState: LazyListState): Boole
 @Composable
 private fun SearchScreenContent(
     viewModel: EksinViewModel,
+    searchPagingItems: LazyPagingItems<TopicItem>,
+    searchListState: LazyListState,
     readStateByUrl: Map<String, TopicReadStateEntity>,
     onTopicClick: (TopicItem) -> Unit,
     onOpenCloudflare: () -> Unit
@@ -1093,8 +1227,6 @@ private fun SearchScreenContent(
     val query by viewModel.searchQuery.collectAsStateWithLifecycle()
     val sortOrder by viewModel.searchSortOrder.collectAsStateWithLifecycle()
     val submittedFilter by viewModel.submittedSearchFilter.collectAsStateWithLifecycle()
-    val searchPagingItems = viewModel.searchTopicsPagingFlow.collectAsLazyPagingItems()
-    val searchListState = rememberLazyListState()
     val focusManager = LocalFocusManager.current
 
     Column(
@@ -1226,14 +1358,25 @@ private fun TopicPagingList(
             return@Box
         }
 
-        LazyColumn(
-            state = listState,
-            modifier = Modifier
-                .fillMaxSize()
-                .background(MaterialTheme.colorScheme.background)
-                .testTag("topic_paging_list"),
-            contentPadding = PaddingValues(vertical = 2.dp)
-        ) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            if (refreshState is LoadState.Loading && pagingItems.itemCount > 0) {
+                LinearProgressIndicator(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(2.dp),
+                    color = EksiNeonGreen,
+                    trackColor = Color.Transparent
+                )
+            }
+
+            LazyColumn(
+                state = listState,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(MaterialTheme.colorScheme.background)
+                    .testTag("topic_paging_list"),
+                contentPadding = PaddingValues(vertical = 2.dp)
+            ) {
             items(
                 count = pagingItems.itemCount,
                 key = { index -> "${index}_${pagingItems.peek(index)?.url ?: "topic"}" }
@@ -1328,6 +1471,7 @@ private fun TopicPagingList(
                 item {
                     TopicListSkeletonShimmer(itemCount = 3)
                 }
+            }
             }
         }
 

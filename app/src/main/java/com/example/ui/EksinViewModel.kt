@@ -161,6 +161,9 @@ class EksinViewModel @Inject constructor(
     private var activeDebeStatsJob: Job? = null
 
     private val _refreshTrigger = MutableStateFlow(0)
+    private val _gundemRefreshTrigger = MutableStateFlow(0)
+    private val _bugunRefreshTrigger = MutableStateFlow(0)
+    private val _olaylarRefreshTrigger = MutableStateFlow(0)
 
     private val _searchQuery = MutableStateFlow("")
     val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
@@ -268,6 +271,32 @@ class EksinViewModel @Inject constructor(
             initialValue = emptyList()
         )
 
+    /**
+     * 3. KURAL: Gündem, Bugün ve Olaylar sekmeleri birbirinden tamamen bağımsız StateFlow / PagingFlow
+     * olarak tutulur; böylece sekme değiştirildiğinde veya başlık detayından geri dönüldüğünde
+     * ne liste verisi ne de kaydırma konumu sıfırlanır.
+     */
+    val gundemTopicsPagingFlow: Flow<PagingData<TopicItem>> =
+        combine(_gundemRefreshTrigger, _refreshTrigger) { g, r -> g + r }
+            .flatMapLatest {
+                repository.getGundemTopicsPager()
+            }
+            .cachedIn(viewModelScope)
+
+    val bugunTopicsPagingFlow: Flow<PagingData<TopicItem>> =
+        combine(_bugunRefreshTrigger, _refreshTrigger) { b, r -> b + r }
+            .flatMapLatest {
+                repository.getBugunTopicsPager()
+            }
+            .cachedIn(viewModelScope)
+
+    val olaylarTopicsPagingFlow: Flow<PagingData<TopicItem>> =
+        combine(_olaylarRefreshTrigger, _refreshTrigger) { o, r -> o + r }
+            .flatMapLatest {
+                repository.getOlaylarTopicsPager()
+            }
+            .cachedIn(viewModelScope)
+
     val leftFramePagingFlow: Flow<PagingData<TopicItem>> =
         combine(_selectedSection, _refreshTrigger) { section, _ -> section }
             .flatMapLatest { section ->
@@ -329,6 +358,31 @@ class EksinViewModel @Inject constructor(
         } else if (_debeAndStatsUiState.value !is DebeAndStatsUiState.Success) {
             loadDebeAndStats()
         }
+    }
+
+    /**
+     * 4. KURAL: Üst bardaki "DEBE" butonu, üst çipteki "🏆 DEBE & Enler" ve alt bardaki "DEBE"
+     * sekmesi tıklandığında her zaman "Dünün En Beğenilenleri (DEBE)" (`DebeAndStatsCategory.DEBE`)
+     * sekmesini aktif eder ve DEBE listesini yükler.
+     */
+    fun openDebeSection(forceReload: Boolean = false) {
+        val categoryChanged = _debeAndStatsCategory.value != DebeAndStatsCategory.DEBE
+        _debeAndStatsCategory.value = DebeAndStatsCategory.DEBE
+        val currentState = _debeAndStatsUiState.value
+        val isEmptySuccess = currentState is DebeAndStatsUiState.Success && currentState.items.isEmpty()
+        if (forceReload || categoryChanged || currentState !is DebeAndStatsUiState.Success || isEmptySuccess) {
+            loadDebeAndStats()
+        }
+    }
+
+    /**
+     * 1. KURAL: Alt veya üst bardaki "Gündem" butonuna tekrar (re-select) basıldığında
+     * Gündem önbelleğini temizler (`clearGundemCache`) ve Gündem başlıklarını baştan çeker.
+     */
+    fun forceRefreshGundem() {
+        _selectedSection.value = LeftFrameSection.GUNDEM
+        repository.clearGundemCache()
+        _gundemRefreshTrigger.value += 1
     }
 
     fun selectPeriodicTimeRange(period: PeriodicTimeRange) {

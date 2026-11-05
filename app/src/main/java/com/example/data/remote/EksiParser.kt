@@ -162,57 +162,126 @@ class EksiParser @Inject constructor() {
 
     /**
      * DEBE (`/debe` veya `/basliklar/debe`) sayfasından dünün en beğenilen 50 entry'sini ayrıştırır.
+     * Hem tam sayfa (`#content-body ul.topic-list li a`, `.debe-list a`, `ol.stats-list li a`, `a[href^="/entry/"]`)
+     * hem de AJAX sol frame (`#partial-index ul.topic-list li a`, `ul.topic-list.partial li a`) DOM yapılarını destekler.
      * Eğer HTML'de favori sayısı doğrudan varsa `favoriteCount` ve `♥ {fav}` rozetini doldurur.
      */
     fun parseDebeEntriesList(html: String): List<RankedTopicOrEntryItem> {
         if (html.isBlank()) return emptyList()
         val doc: Document = Jsoup.parse(html, BASE_URL)
 
-        val listItems = doc.select(
-            "ul.topic-list.partial li, ul.topic-list li, #partial-index ul li, #content-body ul.topic-list li, ol.debe-list li, ul#threads li"
+        val candidateElements = mutableListOf<Element>()
+
+        val primaryLiSelectors = listOf(
+            "#content-body ul.topic-list li",
+            "#partial-index ul.topic-list li",
+            "ul.topic-list.partial li",
+            ".debe-list li",
+            "ol.debe-list li",
+            "ol.stats-list li",
+            "#partial-index ul li",
+            "ul.topic-list li",
+            "ul#threads li"
         )
+        for (selector in primaryLiSelectors) {
+            val found = doc.select(selector).filter { el ->
+                el.parents().none { p ->
+                    p.id().equals("entry-item-list", ignoreCase = true) ||
+                        p.hasClass("entry-footer") ||
+                        p.tagName().equals("footer", ignoreCase = true)
+                }
+            }
+            if (found.isNotEmpty()) {
+                candidateElements.addAll(found)
+                break
+            }
+        }
+
+        if (candidateElements.isEmpty()) {
+            val directAnchors = doc.select(
+                ".debe-list a[href], #content-body a[href^=\"/entry/\"], #content-body a[href*=\"/entry/\"], #partial-index a[href*=\"/entry/\"], a[href*=\"a=debe\"]"
+            ).filter { anchor ->
+                anchor.parents().none { p ->
+                    p.id().equals("entry-item-list", ignoreCase = true) ||
+                        p.hasClass("info") ||
+                        p.tagName().equals("footer", ignoreCase = true)
+                }
+            }
+            candidateElements.addAll(directAnchors)
+        }
 
         val result = mutableListOf<RankedTopicOrEntryItem>()
+        val seenKeys = LinkedHashSet<String>()
         var rankCounter = 1
 
-        for (li in listItems) {
+        for (element in candidateElements) {
             if (rankCounter > 50) break
-            if (li.hasClass("sponsored") || li.id().contains("sponsored", ignoreCase = true)) {
+            if (element.hasClass("sponsored") || element.id().contains("sponsored", ignoreCase = true)) {
                 continue
             }
 
-            val anchor = li.selectFirst("a[href]") ?: continue
+            val anchor = if (element.tagName().equals("a", ignoreCase = true)) {
+                element
+            } else {
+                element.selectFirst("a[href^=\"/entry/\"], a[href*=\"/entry/\"], a[href*=\"a=debe\"], a[href]")
+            } ?: continue
+
             val rawHref = anchor.attr("href").trim()
-            if (rawHref.isBlank() || rawHref.startsWith("javascript:")) continue
+            if (rawHref.isBlank() ||
+                rawHref.startsWith("javascript:") ||
+                rawHref.startsWith("/biri/", ignoreCase = true) ||
+                rawHref.contains("/iletisim", ignoreCase = true) ||
+                rawHref.contains("/reklam", ignoreCase = true)
+            ) {
+                continue
+            }
 
             val caption = anchor.selectFirst("span.caption")?.text()?.trim()
-            val detailAuthor = li.selectFirst("div.detail, span.detail, a.entry-author")?.text()?.trim()
-            val smallText = (anchor.selectFirst("small") ?: li.selectFirst("small"))?.text()?.trim().orEmpty()
+                ?: element.selectFirst("span.caption")?.text()?.trim()
+            val detailAuthor = element.selectFirst("div.detail, span.detail, a.entry-author")?.text()?.trim()
+            val smallText = (anchor.selectFirst("small") ?: element.selectFirst("small"))?.text()?.trim().orEmpty()
 
-            val explicitFav = li.attr("data-favorite-count").toIntOrNull()
+            val explicitFav = element.attr("data-favorite-count").toIntOrNull()
                 ?: anchor.attr("data-favorite-count").toIntOrNull()
-                ?: li.selectFirst(".favorite-count, span.favorite-count")?.text()?.trim()?.let { parseEntryCount(it) }
+                ?: element.selectFirst(".favorite-count, span.favorite-count")?.text()?.trim()?.let { parseEntryCount(it) }
                 ?: parseEntryCount(smallText)
 
-            val title = if (!caption.isNullOrBlank()) {
+            val rawTitle = if (!caption.isNullOrBlank()) {
                 caption
             } else {
                 val clone = anchor.clone()
                 clone.select("small, div.detail, span.detail").remove()
                 clone.text().trim()
             }
-            if (title.isBlank()) continue
+            val cleanedTitle = rawTitle
+                .replace(Regex("""^#\d+\s*[-–—:]?\s*"""), "")
+                .trim()
+            if (cleanedTitle.isBlank()) continue
 
             val normalizedUrl = normalizeUrl(rawHref)
-            val entryId = if (normalizedUrl.contains("/entry/")) {
-                normalizedUrl.substringAfter("/entry/").substringBefore("?").filter { it.isDigit() }
+            val entryIdFromHref = if (normalizedUrl.contains("/entry/")) {
+                normalizedUrl.substringAfter("/entry/").substringBefore("?").substringBefore("/").filter { it.isDigit() }
             } else {
-                null
+                ""
             }
-            val isDirectEntry = !entryId.isNullOrBlank() || normalizedUrl.contains("a=debe", ignoreCase = true)
+            val entryIdFromAttr = element.attr("data-entry-id").filter { it.isDigit() }
+                .ifBlank { anchor.attr("data-entry-id").filter { it.isDigit() } }
+                .ifBlank { element.attr("data-id").filter { it.isDigit() } }
+
+            val entryId = entryIdFromHref.ifBlank { entryIdFromAttr }.takeIf { it.isNotBlank() }
+            val finalUrl = if (entryId != null) {
+                "$BASE_URL/entry/$entryId"
+            } else {
+                normalizedUrl
+            }
+            val dedupeKey = entryId ?: finalUrl
+            if (!seenKeys.add(dedupeKey)) continue
+
+            val isDirectEntry = entryId != null || finalUrl.contains("a=debe", ignoreCase = true)
 
             val badgeText = when {
                 explicitFav > 0 -> "♥ $explicitFav"
+                smallText.isNotBlank() && smallText.all { it.isDigit() || it == '.' || it == ',' || it == 'b' } -> "♥ $smallText"
                 smallText.isNotBlank() -> smallText
                 else -> "♥ ..."
             }
@@ -220,9 +289,9 @@ class EksiParser @Inject constructor() {
             result.add(
                 RankedTopicOrEntryItem(
                     rank = rankCounter,
-                    id = entryId ?: extractTopicId(normalizedUrl).ifBlank { "debe_$rankCounter" },
-                    title = title,
-                    url = normalizedUrl,
+                    id = entryId ?: extractTopicId(finalUrl).ifBlank { "debe_$rankCounter" },
+                    title = cleanedTitle,
+                    url = finalUrl,
                     badgeText = badgeText,
                     favoriteCount = explicitFav,
                     author = detailAuthor?.takeIf { it.isNotBlank() },
@@ -233,7 +302,7 @@ class EksiParser @Inject constructor() {
             rankCounter++
         }
 
-        return result.distinctBy { it.url }.take(50)
+        return result.take(50)
     }
 
     /**
