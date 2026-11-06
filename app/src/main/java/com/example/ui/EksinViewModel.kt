@@ -4,12 +4,18 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.net.Uri
 import android.util.Log
+import android.util.LruCache
+import androidx.compose.runtime.Immutable
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.createSavedStateHandle
 import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.viewmodel.CreationExtras
 import androidx.paging.PagingData
 import androidx.paging.cachedIn
 import com.example.ai.GeminiAnalysisMode
 import com.example.ai.GeminiHelper
+import com.example.ai.GeminiImageGenerationResult
 import com.example.ai.GeminiStreamState
 import com.example.data.local.BookmarkedEntryEntity
 import com.example.data.local.TopicReadStateEntity
@@ -27,8 +33,10 @@ import com.example.data.model.TopicFilterMode
 import com.example.data.model.TopicItem
 import com.example.data.model.TopicPageData
 import com.example.data.repository.EksiRepository
+import com.example.di.AppModule
 import com.example.network.CloudflareChallengeEvent
 import com.example.network.CloudflareChallengeManager
+import com.example.network.ContentSource
 import com.example.network.UserAgentProvider
 import com.example.network.WebViewCookieJar
 import com.example.network.WebViewFetchBridge
@@ -56,7 +64,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import javax.inject.Inject
 
@@ -66,6 +73,12 @@ sealed interface AiImageState {
     data class Success(
         val bitmap: Bitmap,
         val modelUsed: String,
+        val sizeLabel: String,
+        val aspectRatioLabel: String
+    ) : AiImageState
+    data class LocalFallbackPreview(
+        val bitmap: Bitmap,
+        val reason: String,
         val sizeLabel: String,
         val aspectRatioLabel: String
     ) : AiImageState
@@ -79,12 +92,15 @@ sealed interface AiImageState {
  */
 sealed interface TopicPageUiState {
     data object Idle : TopicPageUiState
+    @Immutable
     data class Loading(val targetPage: Int) : TopicPageUiState
+    @Immutable
     data class Success(
         val pageData: TopicPageData,
         val entries: List<EntryItem>,
         val loadSequence: Int
     ) : TopicPageUiState
+    @Immutable
     data class Error(
         val targetPage: Int,
         val message: String
@@ -113,6 +129,7 @@ enum class StudioImageModel(val modelId: String, val displayName: String) {
     NANO_BANANA("gemini-nano-banana-2.1", "Gemini Nano Banana 2.1 (Hızlı)")
 }
 
+@Immutable
 data class ActiveAuthSheet(
     val url: String,
     val mode: AuthWebViewMode,
@@ -128,7 +145,8 @@ class EksinViewModel @Inject constructor(
     val userAgentProvider: UserAgentProvider,
     val webViewFetchBridge: WebViewFetchBridge,
     private val cloudflareManager: CloudflareChallengeManager,
-    private val geminiHelper: GeminiHelper
+    private val geminiHelper: GeminiHelper,
+    private val savedStateHandle: SavedStateHandle
 ) : ViewModel() {
 
     // 4. ARAYÜZ RENK / TEMA SEÇENEĞİ (OLED Siyah, Koyu Gri, Klasik Beyaz)
@@ -138,12 +156,16 @@ class EksinViewModel @Inject constructor(
     private val _showThemeDialog = MutableStateFlow(false)
     val showThemeDialog: StateFlow<Boolean> = _showThemeDialog.asStateFlow()
 
+    // Process Death Korumalı Aktif Alt Navigasyon Sekmesi
+    private val _activeNavDestination = MutableStateFlow(loadInitialNavDestination())
+    val activeNavDestination: StateFlow<MainNavDestination> = _activeNavDestination.asStateFlow()
+
     // Sol Frame Sekmesi
-    private val _selectedSection = MutableStateFlow(LeftFrameSection.GUNDEM)
+    private val _selectedSection = MutableStateFlow(loadInitialSection())
     val selectedSection: StateFlow<LeftFrameSection> = _selectedSection.asStateFlow()
 
     // 1. KANALLAR SEKMESİ (#spor, #teknoloji, #siyaset, #ekonomi, ...)
-    private val _selectedChannel = MutableStateFlow(EksiChannel.SPOR)
+    private val _selectedChannel = MutableStateFlow(loadInitialChannel())
     val selectedChannel: StateFlow<EksiChannel> = _selectedChannel.asStateFlow()
 
     // 3. GELİŞMİŞ DEBE & DÖNEMSEL ENLER (Gün / Hafta / Ay)
@@ -174,20 +196,21 @@ class EksinViewModel @Inject constructor(
     private val _submittedSearchFilter = MutableStateFlow(SearchFilter(keywords = ""))
     val submittedSearchFilter: StateFlow<SearchFilter> = _submittedSearchFilter.asStateFlow()
 
-    private val _selectedTopic = MutableStateFlow<TopicItem?>(null)
+    private val _selectedTopic = MutableStateFlow<TopicItem?>(loadInitialSelectedTopic())
     val selectedTopic: StateFlow<TopicItem?> = _selectedTopic.asStateFlow()
 
-    // 1. KURAL: Direct Page State (`currentPage` ve `totalPages`) + `Map<Int, TopicPageData>` Prefetch Cache
-    private val _currentPage = MutableStateFlow(1)
+    // 1. KURAL: Direct Page State (`currentPage` ve `totalPages`) + `LruCache<Int, TopicPageData>(12)` Prefetch Cache
+    private val _currentPage = MutableStateFlow(loadInitialCurrentPage())
     val currentPage: StateFlow<Int> = _currentPage.asStateFlow()
 
-    private val _totalPages = MutableStateFlow(1)
+    private val _totalPages = MutableStateFlow(loadInitialCurrentPage())
     val totalPages: StateFlow<Int> = _totalPages.asStateFlow()
 
     private val _topicPageUiState = MutableStateFlow<TopicPageUiState>(TopicPageUiState.Idle)
     val topicPageUiState: StateFlow<TopicPageUiState> = _topicPageUiState.asStateFlow()
 
-    private val pageMemoryCache = ConcurrentHashMap<Int, TopicPageData>()
+    private val pageCacheLock = Any()
+    private val pageMemoryCache = LruCache<Int, TopicPageData>(MAX_CACHED_TOPIC_PAGES)
     private var activePageLoadJob: Job? = null
     private var activePrefetchJob: Job? = null
     private val pageLoadSequenceGenerator = AtomicInteger(0)
@@ -197,7 +220,7 @@ class EksinViewModel @Inject constructor(
     val restoredReadState: StateFlow<TopicReadStateEntity?> = _restoredReadState.asStateFlow()
 
     // 2. BAŞLIK İÇİ VARSAYILAN "SADECE BUGÜN" MODU (TODAY_POPULAR)
-    private val _topicFilterMode = MutableStateFlow(TopicFilterMode.TODAY_POPULAR)
+    private val _topicFilterMode = MutableStateFlow(loadInitialTopicFilterMode())
     val topicFilterMode: StateFlow<TopicFilterMode> = _topicFilterMode.asStateFlow()
 
     private val _inTopicSearchQuery = MutableStateFlow("")
@@ -220,11 +243,13 @@ class EksinViewModel @Inject constructor(
     val bkzPreviewState: StateFlow<BkzPreviewUiState> = _bkzPreviewState.asStateFlow()
     private var activeBkzJob: Job? = null
 
-    private val _hasCfClearance = MutableStateFlow(webViewFetchBridge.isDomVerified())
+    private val _hasCfClearance = MutableStateFlow(false)
     val hasCfClearance: StateFlow<Boolean> = _hasCfClearance.asStateFlow()
 
-    private val _hasUserSession = MutableStateFlow(cookieJar.hasActiveUserSession())
+    private val _hasUserSession = MutableStateFlow(false)
     val hasUserSession: StateFlow<Boolean> = _hasUserSession.asStateFlow()
+
+    val lastContentSource: StateFlow<ContentSource> = webViewFetchBridge.lastContentSource
 
     private val _geminiStreamState = MutableStateFlow<GeminiStreamState>(GeminiStreamState.Idle)
     val geminiStreamState: StateFlow<GeminiStreamState> = _geminiStreamState.asStateFlow()
@@ -235,6 +260,8 @@ class EksinViewModel @Inject constructor(
 
     private val _isGeminiKeyConfigured = MutableStateFlow(geminiHelper.hasValidApiKey())
     val isGeminiKeyConfigured: StateFlow<Boolean> = _isGeminiKeyConfigured.asStateFlow()
+
+    val geminiKeyDecryptionWarning: StateFlow<String?> = geminiHelper.keyDecryptionWarning
 
     private val _aiImageState = MutableStateFlow<AiImageState>(AiImageState.Idle)
     val aiImageState: StateFlow<AiImageState> = _aiImageState.asStateFlow()
@@ -278,29 +305,32 @@ class EksinViewModel @Inject constructor(
      */
     val gundemTopicsPagingFlow: Flow<PagingData<TopicItem>> =
         combine(_gundemRefreshTrigger, _refreshTrigger) { g, r -> g + r }
-            .flatMapLatest {
-                repository.getGundemTopicsPager()
+            .flatMapLatest { triggerCount ->
+                repository.getGundemTopicsPager(bypassCacheOnFirstPage = triggerCount > 0)
             }
             .cachedIn(viewModelScope)
 
     val bugunTopicsPagingFlow: Flow<PagingData<TopicItem>> =
         combine(_bugunRefreshTrigger, _refreshTrigger) { b, r -> b + r }
-            .flatMapLatest {
-                repository.getBugunTopicsPager()
+            .flatMapLatest { triggerCount ->
+                repository.getBugunTopicsPager(bypassCacheOnFirstPage = triggerCount > 0)
             }
             .cachedIn(viewModelScope)
 
     val olaylarTopicsPagingFlow: Flow<PagingData<TopicItem>> =
         combine(_olaylarRefreshTrigger, _refreshTrigger) { o, r -> o + r }
-            .flatMapLatest {
-                repository.getOlaylarTopicsPager()
+            .flatMapLatest { triggerCount ->
+                repository.getOlaylarTopicsPager(bypassCacheOnFirstPage = triggerCount > 0)
             }
             .cachedIn(viewModelScope)
 
     val leftFramePagingFlow: Flow<PagingData<TopicItem>> =
-        combine(_selectedSection, _refreshTrigger) { section, _ -> section }
-            .flatMapLatest { section ->
-                repository.getLeftFrameTopicsPager(section)
+        combine(_selectedSection, _refreshTrigger) { section, r -> section to r }
+            .flatMapLatest { (section, triggerCount) ->
+                repository.getLeftFrameTopicsPager(
+                    section = section,
+                    bypassCacheOnFirstPage = triggerCount > 0
+                )
             }
             .cachedIn(viewModelScope)
 
@@ -308,26 +338,136 @@ class EksinViewModel @Inject constructor(
      * 1. KANALLAR Paging 3 Akışı (`https://eksisozluk.com/basliklar/kanal/{kanal_slug}?p={page}`).
      */
     val channelTopicsPagingFlow: Flow<PagingData<TopicItem>> =
-        combine(_selectedChannel, _refreshTrigger) { channel, _ -> channel }
-            .flatMapLatest { channel ->
-                repository.getChannelTopicsPager(channel)
+        combine(_selectedChannel, _refreshTrigger) { channel, r -> channel to r }
+            .flatMapLatest { (channel, triggerCount) ->
+                repository.getChannelTopicsPager(
+                    channel = channel,
+                    bypassCacheOnFirstPage = triggerCount > 0
+                )
             }
             .cachedIn(viewModelScope)
 
     val searchTopicsPagingFlow: Flow<PagingData<TopicItem>> =
-        combine(_submittedSearchFilter, _refreshTrigger) { filter, _ -> filter }
-            .flatMapLatest { filter ->
-                repository.getSearchTopicsPager(filter)
+        combine(_submittedSearchFilter, _refreshTrigger) { filter, r -> filter to r }
+            .flatMapLatest { (filter, triggerCount) ->
+                repository.getSearchTopicsPager(
+                    filter = filter,
+                    bypassCacheOnFirstPage = triggerCount > 0
+                )
             }
             .cachedIn(viewModelScope)
 
     init {
+        AppModule.registerViewModelCacheCleaner {
+            clearPageMemoryCache()
+        }
+
         viewModelScope.launch {
             cloudflareManager.challengeEvents.collect { event: CloudflareChallengeEvent ->
                 _pendingCloudflareChallenge.value = event
             }
         }
-        loadDebeAndStats()
+
+        viewModelScope.launch(Dispatchers.IO) {
+            refreshCookieState()
+        }
+
+        loadDebeAndStats(forceRefresh = false)
+
+        // Process Death Sonrası Başlık / Sayfa / Filtre Durumunu Otomatik Geri Yükle
+        val restoredTopic = _selectedTopic.value
+        if (restoredTopic != null) {
+            loadedTopicSessionKey = "${restoredTopic.id}|${restoredTopic.url}"
+            val restoredPage = _currentPage.value.coerceAtLeast(1)
+            goToPage(
+                targetPage = restoredPage,
+                forceRefresh = false,
+                preserveRestoredReadState = false,
+                bypassNetworkCache = false
+            )
+        }
+    }
+
+    private fun getCachedPage(page: Int): TopicPageData? = synchronized(pageCacheLock) {
+        pageMemoryCache.get(page)
+    }
+
+    private fun putCachedPage(page: Int, data: TopicPageData) = synchronized(pageCacheLock) {
+        pageMemoryCache.put(page, data)
+    }
+
+    private fun removeCachedPage(page: Int) = synchronized(pageCacheLock) {
+        pageMemoryCache.remove(page)
+    }
+
+    fun clearPageMemoryCache() = synchronized(pageCacheLock) {
+        pageMemoryCache.evictAll()
+    }
+
+    private fun loadInitialNavDestination(): MainNavDestination {
+        val raw = savedStateHandle.get<String>(KEY_SAVED_NAV_DESTINATION)
+        return MainNavDestination.entries.firstOrNull { it.name == raw } ?: MainNavDestination.GUNDEM
+    }
+
+    private fun loadInitialSection(): LeftFrameSection {
+        val raw = savedStateHandle.get<String>(KEY_SAVED_SECTION)
+        return LeftFrameSection.entries.firstOrNull { it.name == raw } ?: LeftFrameSection.GUNDEM
+    }
+
+    private fun loadInitialChannel(): EksiChannel {
+        val raw = savedStateHandle.get<String>(KEY_SAVED_CHANNEL)
+        return EksiChannel.entries.firstOrNull { it.name == raw } ?: EksiChannel.SPOR
+    }
+
+    private fun loadInitialSelectedTopic(): TopicItem? {
+        val url = savedStateHandle.get<String>(KEY_SAVED_TOPIC_URL)?.takeIf { it.isNotBlank() }
+            ?: return null
+        val title = savedStateHandle.get<String>(KEY_SAVED_TOPIC_TITLE)?.takeIf { it.isNotBlank() }
+            ?: return null
+        val id = savedStateHandle.get<String>(KEY_SAVED_TOPIC_ID).orEmpty().ifBlank { url }
+        val slug = savedStateHandle.get<String>(KEY_SAVED_TOPIC_SLUG).orEmpty()
+        return TopicItem(
+            id = id,
+            title = title,
+            slug = slug,
+            url = url
+        )
+    }
+
+    private fun loadInitialCurrentPage(): Int {
+        return (savedStateHandle.get<Int>(KEY_SAVED_CURRENT_PAGE) ?: 1).coerceAtLeast(1)
+    }
+
+    private fun loadInitialTopicFilterMode(): TopicFilterMode {
+        val raw = savedStateHandle.get<String>(KEY_SAVED_TOPIC_FILTER_MODE)
+        return TopicFilterMode.entries.firstOrNull { it.name == raw } ?: TopicFilterMode.TODAY_POPULAR
+    }
+
+    private fun persistSelectedTopicToSavedState(topic: TopicItem?) {
+        if (topic == null) {
+            savedStateHandle[KEY_SAVED_TOPIC_ID] = null
+            savedStateHandle[KEY_SAVED_TOPIC_TITLE] = null
+            savedStateHandle[KEY_SAVED_TOPIC_SLUG] = null
+            savedStateHandle[KEY_SAVED_TOPIC_URL] = null
+        } else {
+            savedStateHandle[KEY_SAVED_TOPIC_ID] = topic.id
+            savedStateHandle[KEY_SAVED_TOPIC_TITLE] = topic.title
+            savedStateHandle[KEY_SAVED_TOPIC_SLUG] = topic.slug
+            savedStateHandle[KEY_SAVED_TOPIC_URL] = topic.url
+        }
+    }
+
+    private fun persistCurrentPageToSavedState(page: Int) {
+        savedStateHandle[KEY_SAVED_CURRENT_PAGE] = page.coerceAtLeast(1)
+    }
+
+    private fun persistFilterModeToSavedState(mode: TopicFilterMode) {
+        savedStateHandle[KEY_SAVED_TOPIC_FILTER_MODE] = mode.name
+    }
+
+    fun selectNavDestination(destination: MainNavDestination) {
+        _activeNavDestination.value = destination
+        savedStateHandle[KEY_SAVED_NAV_DESTINATION] = destination.name
     }
 
     // 4. TEMA YÖNETİMİ
@@ -348,39 +488,32 @@ class EksinViewModel @Inject constructor(
     // 1. KANALLAR YÖNETİMİ
     fun selectChannel(channel: EksiChannel) {
         _selectedChannel.value = channel
+        savedStateHandle[KEY_SAVED_CHANNEL] = channel.name
     }
 
     // 3. GELİŞMİŞ DEBE & DÖNEMSEL ENLER YÖNETİMİ
     fun selectDebeAndStatsCategory(category: DebeAndStatsCategory) {
         if (_debeAndStatsCategory.value != category) {
             _debeAndStatsCategory.value = category
-            loadDebeAndStats()
+            loadDebeAndStats(forceRefresh = false)
         } else if (_debeAndStatsUiState.value !is DebeAndStatsUiState.Success) {
-            loadDebeAndStats()
+            loadDebeAndStats(forceRefresh = false)
         }
     }
 
-    /**
-     * 4. KURAL: Üst bardaki "DEBE" butonu, üst çipteki "🏆 DEBE & Enler" ve alt bardaki "DEBE"
-     * sekmesi tıklandığında her zaman "Dünün En Beğenilenleri (DEBE)" (`DebeAndStatsCategory.DEBE`)
-     * sekmesini aktif eder ve DEBE listesini yükler.
-     */
     fun openDebeSection(forceReload: Boolean = false) {
         val categoryChanged = _debeAndStatsCategory.value != DebeAndStatsCategory.DEBE
         _debeAndStatsCategory.value = DebeAndStatsCategory.DEBE
         val currentState = _debeAndStatsUiState.value
         val isEmptySuccess = currentState is DebeAndStatsUiState.Success && currentState.items.isEmpty()
         if (forceReload || categoryChanged || currentState !is DebeAndStatsUiState.Success || isEmptySuccess) {
-            loadDebeAndStats()
+            loadDebeAndStats(forceRefresh = forceReload)
         }
     }
 
-    /**
-     * 1. KURAL: Alt veya üst bardaki "Gündem" butonuna tekrar (re-select) basıldığında
-     * Gündem önbelleğini temizler (`clearGundemCache`) ve Gündem başlıklarını baştan çeker.
-     */
     fun forceRefreshGundem() {
         _selectedSection.value = LeftFrameSection.GUNDEM
+        savedStateHandle[KEY_SAVED_SECTION] = LeftFrameSection.GUNDEM.name
         repository.clearGundemCache()
         _gundemRefreshTrigger.value += 1
     }
@@ -388,18 +521,18 @@ class EksinViewModel @Inject constructor(
     fun selectPeriodicTimeRange(period: PeriodicTimeRange) {
         if (_periodicTimeRange.value != period) {
             _periodicTimeRange.value = period
-            loadDebeAndStats()
+            loadDebeAndStats(forceRefresh = false)
         }
     }
 
     fun selectPeriodicRankingTab(tab: PeriodicRankingTab) {
         if (_periodicRankingTab.value != tab) {
             _periodicRankingTab.value = tab
-            loadDebeAndStats()
+            loadDebeAndStats(forceRefresh = false)
         }
     }
 
-    fun loadDebeAndStats() {
+    fun loadDebeAndStats(forceRefresh: Boolean = false) {
         activeDebeStatsJob?.cancel()
         val category = _debeAndStatsCategory.value
         val period = _periodicTimeRange.value
@@ -408,7 +541,7 @@ class EksinViewModel @Inject constructor(
         activeDebeStatsJob = viewModelScope.launch {
             _debeAndStatsUiState.value = DebeAndStatsUiState.Loading
             if (category == DebeAndStatsCategory.DEBE) {
-                val res = repository.fetchDebeItems()
+                val res = repository.fetchDebeItems(bypassCache = forceRefresh)
                 res.fold(
                     onSuccess = { list ->
                         val subtitle = "Dünün En Beğenilen ${list.size} Entry'si (DEBE)"
@@ -429,7 +562,11 @@ class EksinViewModel @Inject constructor(
                     }
                 )
             } else {
-                val res = repository.fetchPeriodicBestItems(period = period, rankingTab = tab)
+                val res = repository.fetchPeriodicBestItems(
+                    period = period,
+                    rankingTab = tab,
+                    bypassCache = forceRefresh
+                )
                 res.fold(
                     onSuccess = { list ->
                         val subtitle = "${period.label} • ${tab.title} (${list.size})"
@@ -456,54 +593,72 @@ class EksinViewModel @Inject constructor(
     }
 
     /**
-     * DEBE veya En Beğenilen Entry'ler ekrana gelir gelmez arka planda `withContext(Dispatchers.IO)`
-     * ve `Semaphore(4)` ile paralel olarak her bir entry'nin detayından `data-favorite-count`
-     * (veya `.favorite-count`) değerini çeker, hafızaya (`entryFavoriteCountCache`) alır ve
-     * UI state'ini anlık olarak (`♥ 342` formatında) günceller.
+     * DEBE veya En Beğenilen Entry'ler ekrana gelir gelmez:
+     * 1. `entryFavoriteCountCache` içinde zaten bulunan öğeleri ağ isteği yapmadan doğrudan atlar.
+     * 2. Yalnızca önbellekte olmayan öğeleri `Semaphore(4)` ile kontrollü paralel partiler halinde
+     *    çeker, `LruCache` içine kaydeder ve UI state'ini anlık olarak (`♥ 342` formatında) günceller.
      */
     private suspend fun enrichItemsWithFavoriteCountsInBackground(
         initialItems: List<RankedTopicOrEntryItem>,
         subtitle: String,
         sortDescendingAfterUpdate: Boolean
     ) {
-        if (initialItems.none { it.favoriteCount <= 0 || it.entryId.isNullOrBlank() }) return
+        val workingArray = initialItems.map { repository.applyCachedFavoriteMetadata(it) }.toMutableList()
+        if (workingArray != initialItems) {
+            val initialSnapshot = if (sortDescendingAfterUpdate) {
+                workingArray
+                    .sortedByDescending { it.favoriteCount }
+                    .distinctBy { it.entryId ?: it.url }
+                    .distinctBy { it.title.trim().lowercase() }
+                    .mapIndexed { idx, it -> it.copy(rank = idx + 1) }
+            } else {
+                workingArray.toList()
+            }
+            _debeAndStatsUiState.value = DebeAndStatsUiState.Success(
+                items = initialSnapshot,
+                subtitle = subtitle
+            )
+        }
 
-        val workingArray = initialItems.toMutableList()
+        val uncachedIndices = workingArray.indices.filter { idx ->
+            !repository.isFavoriteMetadataCached(workingArray[idx])
+        }
+        if (uncachedIndices.isEmpty()) return
+
         val stateMutex = kotlinx.coroutines.sync.Mutex()
         val semaphore = Semaphore(4)
 
         withContext(Dispatchers.IO) {
             coroutineScope {
-                initialItems.forEachIndexed { index, item ->
-                    if (item.favoriteCount <= 0 || item.entryId.isNullOrBlank()) {
-                        launch {
-                            semaphore.withPermit {
-                                val enriched = repository.fetchAndCacheEntryFavoriteCount(item)
-                                if (enriched.favoriteCount != item.favoriteCount ||
-                                    enriched.badgeText != item.badgeText ||
-                                    enriched.author != item.author ||
-                                    enriched.title != item.title ||
-                                    enriched.entryId != item.entryId
-                                ) {
-                                    stateMutex.lock()
-                                    try {
-                                        workingArray[index] = enriched
-                                        val snapshot = if (sortDescendingAfterUpdate) {
-                                            workingArray
-                                                .sortedByDescending { it.favoriteCount }
-                                                .distinctBy { it.entryId ?: it.url }
-                                                .distinctBy { it.title.trim().lowercase() }
-                                                .mapIndexed { idx, it -> it.copy(rank = idx + 1) }
-                                        } else {
-                                            workingArray.toList()
-                                        }
-                                        _debeAndStatsUiState.value = DebeAndStatsUiState.Success(
-                                            items = snapshot,
-                                            subtitle = subtitle
-                                        )
-                                    } finally {
-                                        stateMutex.unlock()
+                for (index in uncachedIndices) {
+                    val item = workingArray[index]
+                    launch {
+                        semaphore.withPermit {
+                            val enriched = repository.fetchAndCacheEntryFavoriteCount(item)
+                            if (enriched.favoriteCount != item.favoriteCount ||
+                                enriched.badgeText != item.badgeText ||
+                                enriched.author != item.author ||
+                                enriched.title != item.title ||
+                                enriched.entryId != item.entryId
+                            ) {
+                                stateMutex.lock()
+                                try {
+                                    workingArray[index] = enriched
+                                    val snapshot = if (sortDescendingAfterUpdate) {
+                                        workingArray
+                                            .sortedByDescending { it.favoriteCount }
+                                            .distinctBy { it.entryId ?: it.url }
+                                            .distinctBy { it.title.trim().lowercase() }
+                                            .mapIndexed { idx, it -> it.copy(rank = idx + 1) }
+                                    } else {
+                                        workingArray.toList()
                                     }
+                                    _debeAndStatsUiState.value = DebeAndStatsUiState.Success(
+                                        items = snapshot,
+                                        subtitle = subtitle
+                                    )
+                                } finally {
+                                    stateMutex.unlock()
                                 }
                             }
                         }
@@ -513,15 +668,6 @@ class EksinViewModel @Inject constructor(
         }
     }
 
-    /**
-     * DEBE / Dönemsel Enler Öğesi Tıklama Aksiyonu:
-     * 1. "En Beğenilen Entry'ler" veya "DEBE" modunda (`isDirectEntry == true` / `entryId != null`):
-     *    Doğrudan `/entry/{gerçek_entry_id}` adresine gider; ekranda sadece o entry ve altında
-     *    "Başlığın Tüm Entry'lerini Gör" butonu gösterilir.
-     * 2. "En Popüler Konular" modunda (`isDirectEntry == false`, `entryId == null`):
-     *    Öğenin kendi gerçek başlık URL'si (`topic.cleanUrl`) doğrudan bağlanır ve ekranda yazan
-     *    başlığın kendi sayfası %100 açılır.
-     */
     fun openRankedItem(item: RankedTopicOrEntryItem) {
         val baseDomain = webViewFetchBridge.getActiveBaseDomain().ifBlank {
             WebViewCookieJar.DEFAULT_BASE_URL
@@ -549,6 +695,7 @@ class EksinViewModel @Inject constructor(
 
     fun selectSection(section: LeftFrameSection) {
         _selectedSection.value = section
+        savedStateHandle[KEY_SAVED_SECTION] = section.name
     }
 
     fun updateSearchQuery(query: String) {
@@ -569,26 +716,20 @@ class EksinViewModel @Inject constructor(
         )
     }
 
-    /**
-     * Başlık İlk Açılış Noktası:
-     * 1. Room veritabanından "kalınan sayfa" (`ReadState`) SADECE başlığa ilk girildiği anda
-     *    tek seferlik (`getSavedTopicReadState`) okunur; sürekli bir Flow dinlenmez.
-     * 2. Bellek önbelleği (`pageMemoryCache`) temizlenir ve hedef başlangıç sayfası
-     *    (`goToPage(startPage, forceRefresh = true, preserveRestoredReadState = true)`) yüklenir.
-     */
     fun openTopic(
         topic: TopicItem,
         preferTodayMode: Boolean = true
     ) {
         activePageLoadJob?.cancel()
         activePrefetchJob?.cancel()
-        pageMemoryCache.clear()
+        clearPageMemoryCache()
 
         _bkzPreviewState.value = BkzPreviewUiState.Hidden
         _activeTopicMetadata.value = null
         _inTopicSearchQuery.value = ""
         _authorFilterInTopic.value = null
         _selectedTopic.value = topic
+        persistSelectedTopicToSavedState(topic)
         loadedTopicSessionKey = "${topic.id}|${topic.url}"
 
         viewModelScope.launch {
@@ -598,11 +739,12 @@ class EksinViewModel @Inject constructor(
             val startPage: Int
             if (preferTodayMode && !isDirectEntry) {
                 _topicFilterMode.value = TopicFilterMode.TODAY_POPULAR
+                persistFilterModeToSavedState(TopicFilterMode.TODAY_POPULAR)
                 _restoredReadState.value = null
                 startPage = 1
             } else {
                 _topicFilterMode.value = TopicFilterMode.ALL
-                // 3. KURAL: Room ReadState SADECE ilk açılışta 1 kez okunur; Flow olarak dinlenmez!
+                persistFilterModeToSavedState(TopicFilterMode.ALL)
                 val savedState = if (isDirectEntry) {
                     null
                 } else {
@@ -616,20 +758,17 @@ class EksinViewModel @Inject constructor(
             }
 
             _currentPage.value = startPage
+            persistCurrentPageToSavedState(startPage)
             _totalPages.value = startPage.coerceAtLeast(1)
             goToPage(
                 targetPage = startPage,
                 forceRefresh = true,
-                preserveRestoredReadState = true
+                preserveRestoredReadState = true,
+                bypassNetworkCache = false
             )
         }
     }
 
-    /**
-     * 2. KURAL: `TopicDetailScreen` içindeki `LaunchedEffect` recomposition olduğunda
-     * veya sayfa değiştiğinde başlığı asla 1. sayfaya sıfırlamaz. Sadece başlık henüz
-     * yüklenmemişse ilk yüklemeyi başlatır.
-     */
     fun ensureTopicInitializedOnce(topic: TopicItem) {
         val key = "${topic.id}|${topic.url}"
         if (loadedTopicSessionKey == key && _topicPageUiState.value !is TopicPageUiState.Idle) {
@@ -638,18 +777,11 @@ class EksinViewModel @Inject constructor(
         openTopic(topic = topic, preferTodayMode = true)
     }
 
-    /**
-     * 1. KURAL: Direct Page State Sayfa Geçişi (`goToPage`):
-     * - Kullanıcının seçtiği `targetPage` (`?p=X`) sayfasını ekranda gösterir.
-     * - Eğer `pageMemoryCache` içinde `targetPage` varsa ve `forceRefresh == false` ise
-     *   anında (0ms) önbellekten ekrana yansıtır.
-     * - Sayfa yüklendikten sonra arka planda SADECE `X + 1` sayfasını sessizce `pageMemoryCache`
-     *   içine indirir (`prefetchNextPage`), ancak ekrandaki sayfayı ASLA kendi kendine değiştirmez.
-     */
     fun goToPage(
         targetPage: Int,
         forceRefresh: Boolean = false,
-        preserveRestoredReadState: Boolean = false
+        preserveRestoredReadState: Boolean = false,
+        bypassNetworkCache: Boolean = false
     ) {
         val currentTopic = _selectedTopic.value ?: return
         val knownMax = _totalPages.value.coerceAtLeast(1)
@@ -670,8 +802,6 @@ class EksinViewModel @Inject constructor(
         val inTopicKeyword = _inTopicSearchQuery.value
         val activeMetadata = _activeTopicMetadata.value
 
-        // Eğer kullanıcı Bugün modundayken veya tekil entry modundayken 2..N sayfasına geçmek isterse
-        // ve mevcut URL `/entry/` içeriyorsa temiz başlık URL'sini baz al
         val baseTopicUrl = if (
             requestedPage > 1 &&
             activeMetadata != null &&
@@ -683,9 +813,10 @@ class EksinViewModel @Inject constructor(
         }
 
         _currentPage.value = requestedPage
+        persistCurrentPageToSavedState(requestedPage)
 
         if (!forceRefresh) {
-            val cachedPage = pageMemoryCache[requestedPage]
+            val cachedPage = getCachedPage(requestedPage)
             if (cachedPage != null) {
                 applyLoadedPageData(cachedPage)
                 prefetchNextPageInBackground(
@@ -706,16 +837,15 @@ class EksinViewModel @Inject constructor(
                 initialTopicUrl = baseTopicUrl,
                 page = requestedPage,
                 filterMode = filterMode,
-                inTopicSearchKeyword = inTopicKeyword
+                inTopicSearchKeyword = inTopicKeyword,
+                bypassCache = bypassNetworkCache
             )
 
             result.fold(
                 onSuccess = { pageData ->
-                    pageMemoryCache[pageData.currentPage] = pageData
+                    putCachedPage(pageData.currentPage, pageData)
                     applyLoadedPageData(pageData)
 
-                    // 1. KURAL (Prefetch): Kullanıcı X sayfasındayken arka planda SADECE X + 1
-                    // sayfasını sessizce Map<Int, TopicPageData> önbelleğine indir.
                     prefetchNextPageInBackground(
                         baseTopicUrl = pageData.cleanTopicUrl.ifBlank { baseTopicUrl },
                         currentPage = pageData.currentPage,
@@ -738,12 +868,15 @@ class EksinViewModel @Inject constructor(
         val resolvedPage = pageData.currentPage.coerceAtLeast(1)
         val resolvedTotal = pageData.pageCount.coerceAtLeast(resolvedPage)
         _currentPage.value = resolvedPage
+        persistCurrentPageToSavedState(resolvedPage)
         _totalPages.value = resolvedTotal
         _activeTopicMetadata.value = pageData
 
         val currentTopic = _selectedTopic.value
         if (currentTopic != null && pageData.topicTitle.isNotBlank() && currentTopic.title != pageData.topicTitle) {
-            _selectedTopic.value = currentTopic.copy(title = pageData.topicTitle)
+            val updated = currentTopic.copy(title = pageData.topicTitle)
+            _selectedTopic.value = updated
+            persistSelectedTopicToSavedState(updated)
         }
 
         val seq = pageLoadSequenceGenerator.incrementAndGet()
@@ -754,11 +887,6 @@ class EksinViewModel @Inject constructor(
         )
     }
 
-    /**
-     * Kullanıcı `currentPage` (X) sayfasındayken SADECE `X + 1` sayfasını sessizce
-     * `pageMemoryCache` içine indirir. Ekrandaki `_currentPage` veya `_topicPageUiState`
-     * değerlerine KESİNLİKLE dokunmaz.
-     */
     private fun prefetchNextPageInBackground(
         baseTopicUrl: String,
         currentPage: Int,
@@ -768,7 +896,7 @@ class EksinViewModel @Inject constructor(
     ) {
         val nextPage = currentPage + 1
         if (nextPage > totalPages) return
-        if (pageMemoryCache.containsKey(nextPage)) return
+        if (getCachedPage(nextPage) != null) return
 
         activePrefetchJob?.cancel()
         activePrefetchJob = viewModelScope.launch {
@@ -776,10 +904,11 @@ class EksinViewModel @Inject constructor(
                 initialTopicUrl = baseTopicUrl,
                 page = nextPage,
                 filterMode = filterMode,
-                inTopicSearchKeyword = inTopicKeyword
+                inTopicSearchKeyword = inTopicKeyword,
+                bypassCache = false
             )
             result.onSuccess { prefetchedData ->
-                pageMemoryCache[nextPage] = prefetchedData
+                putCachedPage(nextPage, prefetchedData)
             }
         }
     }
@@ -790,15 +919,10 @@ class EksinViewModel @Inject constructor(
 
     fun refreshCurrentTopicPage() {
         val page = _currentPage.value.coerceAtLeast(1)
-        pageMemoryCache.remove(page)
-        goToPage(targetPage = page, forceRefresh = true)
+        removeCachedPage(page)
+        goToPage(targetPage = page, forceRefresh = true, bypassNetworkCache = true)
     }
 
-    /**
-     * 2. "TÜMÜNÜ GÖSTER (İlk Entry'den İtibaren Tüm Başlığı Yükle)" Butonu Aksiyonu:
-     * URL'deki `?a=popular` / gün filtresini veya tekil entry yolunu kaldırıp
-     * başlığın 1. sayfasından (`?p=1`) itibaren tüm entry'leri Direct Page State ile yükler.
-     */
     fun showAllTopicEntriesFromFirstPage() {
         val current = _selectedTopic.value ?: return
         val metadata = _activeTopicMetadata.value
@@ -808,26 +932,25 @@ class EksinViewModel @Inject constructor(
 
         activePageLoadJob?.cancel()
         activePrefetchJob?.cancel()
-        pageMemoryCache.clear()
+        clearPageMemoryCache()
 
         _authorFilterInTopic.value = null
         _inTopicSearchQuery.value = ""
         _restoredReadState.value = null
         _topicFilterMode.value = TopicFilterMode.ALL
+        persistFilterModeToSavedState(TopicFilterMode.ALL)
         val updatedTopic = current.copy(
             title = metadata?.topicTitle?.takeIf { it.isNotBlank() } ?: current.title,
             url = resolvedCleanUrl
         )
         _selectedTopic.value = updatedTopic
+        persistSelectedTopicToSavedState(updatedTopic)
         loadedTopicSessionKey = "${updatedTopic.id}|${updatedTopic.url}"
         _currentPage.value = 1
+        persistCurrentPageToSavedState(1)
         goToPage(targetPage = 1, forceRefresh = true)
     }
 
-    /**
-     * Entry içindeki `(bkz: ...)` veya `*` tıklandığında mevcut sayfayı kaybetmeden
-     * `BkzPreviewBottomSheet` açar ve ilgili başlığın en popüler/ilk 5 entry'sini yükler.
-     */
     fun openBkzPreview(bkzQuery: String) {
         val cleaned = bkzQuery.trim()
         if (cleaned.isEmpty()) return
@@ -875,34 +998,32 @@ class EksinViewModel @Inject constructor(
         )
     }
 
-    /**
-     * Entry kartı sola kaydırıldığında (`EndToStart`) yazarın o başlıktaki diğer entry'lerini filtreler.
-     */
     fun filterByAuthorInTopic(author: String) {
         val cleanAuthor = author.trim().removePrefix("@")
         if (cleanAuthor.isEmpty()) return
-        pageMemoryCache.clear()
+        clearPageMemoryCache()
         _restoredReadState.value = null
         _authorFilterInTopic.value = cleanAuthor
         _topicFilterMode.value = TopicFilterMode.SEARCH_IN_TOPIC
+        persistFilterModeToSavedState(TopicFilterMode.SEARCH_IN_TOPIC)
         _inTopicSearchQuery.value = "@$cleanAuthor"
         _currentPage.value = 1
+        persistCurrentPageToSavedState(1)
         goToPage(targetPage = 1, forceRefresh = true)
     }
 
     fun clearAuthorFilterInTopic() {
-        pageMemoryCache.clear()
+        clearPageMemoryCache()
         _restoredReadState.value = null
         _authorFilterInTopic.value = null
         _inTopicSearchQuery.value = ""
         _topicFilterMode.value = TopicFilterMode.ALL
+        persistFilterModeToSavedState(TopicFilterMode.ALL)
         _currentPage.value = 1
+        persistCurrentPageToSavedState(1)
         goToPage(targetPage = 1, forceRefresh = true)
     }
 
-    /**
-     * Entry kartı sağa kaydırıldığında (`StartToEnd`) Şükela / Fav işlemini tetikler.
-     */
     fun toggleSukelaOrFavorite(entry: EntryItem) {
         viewModelScope.launch {
             if (favoritedEntryIds.value.contains(entry.id)) {
@@ -913,10 +1034,6 @@ class EksinViewModel @Inject constructor(
         }
     }
 
-    /**
-     * 3. KURAL: Kullanıcının okuduğu mevcut sayfayı Room'a kaydeder; ancak Room'dan
-     * geri beslemeli hiçbir Flow dinlenmediği için mevcut `currentPage` state'ini ASLA ezmez.
-     */
     fun saveCurrentScrollPosition(
         entry: EntryItem,
         scrollIndex: Int,
@@ -958,14 +1075,16 @@ class EksinViewModel @Inject constructor(
             showAllTopicEntriesFromFirstPage()
             return
         }
-        pageMemoryCache.clear()
+        clearPageMemoryCache()
         _restoredReadState.value = null
         if (mode != TopicFilterMode.SEARCH_IN_TOPIC) {
             _authorFilterInTopic.value = null
             _inTopicSearchQuery.value = ""
         }
         _topicFilterMode.value = mode
+        persistFilterModeToSavedState(mode)
         _currentPage.value = 1
+        persistCurrentPageToSavedState(1)
         goToPage(targetPage = 1, forceRefresh = true)
     }
 
@@ -974,18 +1093,20 @@ class EksinViewModel @Inject constructor(
     }
 
     fun submitInTopicSearch() {
-        pageMemoryCache.clear()
+        clearPageMemoryCache()
         _restoredReadState.value = null
         _currentPage.value = 1
+        persistCurrentPageToSavedState(1)
         goToPage(targetPage = 1, forceRefresh = true)
     }
 
     fun closeTopicDetail() {
         activePageLoadJob?.cancel()
         activePrefetchJob?.cancel()
-        pageMemoryCache.clear()
+        clearPageMemoryCache()
         loadedTopicSessionKey = ""
         _selectedTopic.value = null
+        persistSelectedTopicToSavedState(null)
         _topicPageUiState.value = TopicPageUiState.Idle
     }
 
@@ -1038,7 +1159,7 @@ class EksinViewModel @Inject constructor(
     fun triggerRefresh() {
         refreshCookieState()
         _refreshTrigger.value += 1
-        loadDebeAndStats()
+        loadDebeAndStats(forceRefresh = true)
         if (_selectedTopic.value != null) {
             refreshCurrentTopicPage()
         }
@@ -1118,6 +1239,10 @@ class EksinViewModel @Inject constructor(
         }
     }
 
+    fun dismissGeminiKeyWarning() {
+        geminiHelper.dismissKeyDecryptionWarning()
+    }
+
     fun selectImageModel(model: StudioImageModel) {
         _selectedImageModel.value = model
     }
@@ -1141,19 +1266,35 @@ class EksinViewModel @Inject constructor(
         viewModelScope.launch {
             _aiImageState.value = AiImageState.Loading
             try {
-                val bitmap = geminiHelper.generateImageFromPrompt(
-                    promptText = cleanPrompt,
-                    modelId = chosenModel.modelId
-                )
-                if (bitmap != null) {
-                    _aiImageState.value = AiImageState.Success(
-                        bitmap = bitmap,
-                        modelUsed = chosenModel.displayName,
-                        sizeLabel = chosenSize.label,
-                        aspectRatioLabel = chosenRatio.label
+                when (
+                    val result = geminiHelper.generateImageFromPrompt(
+                        promptText = cleanPrompt,
+                        modelId = chosenModel.modelId,
+                        targetWidth = chosenSize.pixelDimension,
+                        targetHeight = chosenSize.pixelDimension
                     )
-                } else {
-                    _aiImageState.value = AiImageState.Error("Model görsel döndürmedi.")
+                ) {
+                    is GeminiImageGenerationResult.Success -> {
+                        _aiImageState.value = AiImageState.Success(
+                            bitmap = result.bitmap,
+                            modelUsed = chosenModel.displayName,
+                            sizeLabel = chosenSize.label,
+                            aspectRatioLabel = chosenRatio.label
+                        )
+                    }
+
+                    is GeminiImageGenerationResult.LocalFallbackPreview -> {
+                        _aiImageState.value = AiImageState.LocalFallbackPreview(
+                            bitmap = result.bitmap,
+                            reason = result.reason,
+                            sizeLabel = chosenSize.label,
+                            aspectRatioLabel = chosenRatio.label
+                        )
+                    }
+
+                    is GeminiImageGenerationResult.Error -> {
+                        _aiImageState.value = AiImageState.Error(result.reason)
+                    }
                 }
             } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
                 Log.e(TAG, "Görsel üretimi zaman aşımına uğradı", e)
@@ -1173,12 +1314,31 @@ class EksinViewModel @Inject constructor(
 
     companion object {
         private const val TAG = "EksinViewModel"
+        private const val MAX_CACHED_TOPIC_PAGES = 12
+
+        private const val KEY_SAVED_NAV_DESTINATION = "saved_nav_destination"
+        private const val KEY_SAVED_SECTION = "saved_left_frame_section"
+        private const val KEY_SAVED_CHANNEL = "saved_channel"
+        private const val KEY_SAVED_TOPIC_ID = "saved_topic_id"
+        private const val KEY_SAVED_TOPIC_TITLE = "saved_topic_title"
+        private const val KEY_SAVED_TOPIC_SLUG = "saved_topic_slug"
+        private const val KEY_SAVED_TOPIC_URL = "saved_topic_url"
+        private const val KEY_SAVED_CURRENT_PAGE = "saved_current_page"
+        private const val KEY_SAVED_TOPIC_FILTER_MODE = "saved_topic_filter_mode"
 
         fun provideFactory(context: Context): androidx.lifecycle.ViewModelProvider.Factory =
             object : androidx.lifecycle.ViewModelProvider.Factory {
                 @Suppress("UNCHECKED_CAST")
-                override fun <T : ViewModel> create(modelClass: Class<T>): T {
-                    val container = com.example.di.AppModule.getContainer(context)
+                override fun <T : ViewModel> create(
+                    modelClass: Class<T>,
+                    extras: CreationExtras
+                ): T {
+                    val container = AppModule.getContainer(context)
+                    val savedStateHandle = try {
+                        extras.createSavedStateHandle()
+                    } catch (_: Throwable) {
+                        SavedStateHandle()
+                    }
                     return EksinViewModel(
                         appContext = container.appContext,
                         repository = container.repository,
@@ -1186,7 +1346,23 @@ class EksinViewModel @Inject constructor(
                         userAgentProvider = container.userAgentProvider,
                         webViewFetchBridge = container.webViewFetchBridge,
                         cloudflareManager = container.cloudflareManager,
-                        geminiHelper = container.geminiHelper
+                        geminiHelper = container.geminiHelper,
+                        savedStateHandle = savedStateHandle
+                    ) as T
+                }
+
+                @Suppress("UNCHECKED_CAST")
+                override fun <T : ViewModel> create(modelClass: Class<T>): T {
+                    val container = AppModule.getContainer(context)
+                    return EksinViewModel(
+                        appContext = container.appContext,
+                        repository = container.repository,
+                        cookieJar = container.cookieJar,
+                        userAgentProvider = container.userAgentProvider,
+                        webViewFetchBridge = container.webViewFetchBridge,
+                        cloudflareManager = container.cloudflareManager,
+                        geminiHelper = container.geminiHelper,
+                        savedStateHandle = SavedStateHandle()
                     ) as T
                 }
             }

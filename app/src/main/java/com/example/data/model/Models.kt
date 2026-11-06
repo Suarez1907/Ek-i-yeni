@@ -1,10 +1,12 @@
 package com.example.data.model
 
+import androidx.compose.runtime.Immutable
 import androidx.compose.ui.text.AnnotatedString
 
 /**
  * Sol frame (Gündem, Bugün, Debe, Olaylar, Kanallar) ve Arama sonuçlarındaki başlık modeli.
  */
+@Immutable
 data class TopicItem(
     val id: String,
     val title: String,
@@ -30,6 +32,7 @@ data class TopicItem(
  * - [date]: Oluşturulma tarihi
  * - [editDate]: Varsa düzenlenme tarihi (`~` sonrası kısım), yoksa `null`
  */
+@Immutable
 data class EntryItem(
     val id: String,
     val contentHtml: String,
@@ -176,6 +179,7 @@ enum class PeriodicRankingTab(val title: String) {
 /**
  * DEBE veya Dönemsel Enler listesinde gösterilen sıralı entry/başlık öğesi.
  */
+@Immutable
 data class RankedTopicOrEntryItem(
     val rank: Int,
     val id: String,
@@ -215,10 +219,12 @@ data class RankedTopicOrEntryItem(
 
 sealed interface DebeAndStatsUiState {
     data object Loading : DebeAndStatsUiState
+    @Immutable
     data class Success(
         val items: List<RankedTopicOrEntryItem>,
         val subtitle: String
     ) : DebeAndStatsUiState
+    @Immutable
     data class Error(val message: String) : DebeAndStatsUiState
 }
 
@@ -234,6 +240,7 @@ enum class SearchSortOrder(val apiValue: String, val label: String) {
 /**
  * `/basliklar/ara` uç noktası için gelişmiş arama filtresi.
  */
+@Immutable
 data class SearchFilter(
     val keywords: String,
     val author: String = "",
@@ -243,7 +250,9 @@ data class SearchFilter(
 
 /**
  * Bir başlık sayfasının Jsoup ile ayrıştırılmış tam sonucu.
+ * - [isFromWaybackArchive]: Sayfa içeriği Wayback Machine (`web.archive.org`) yedeğinden geldiyse `true`.
  */
+@Immutable
 data class TopicPageData(
     val topicId: String,
     val topicTitle: String,
@@ -254,12 +263,14 @@ data class TopicPageData(
     val entries: List<EntryItem>,
     val usedTrackedFallback: Boolean = false,
     val usedTodayFallback: Boolean = false,
-    val isSingleEntryView: Boolean = false
+    val isSingleEntryView: Boolean = false,
+    val isFromWaybackArchive: Boolean = false
 )
 
 /**
  * Arama sayfasının Jsoup ile ayrıştırılmış tam sonucu.
  */
+@Immutable
 data class SearchPageData(
     val query: String,
     val currentPage: Int,

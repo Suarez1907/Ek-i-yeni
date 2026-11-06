@@ -19,8 +19,6 @@ import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -36,16 +34,12 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.CheckBox
-import androidx.compose.material.icons.filled.CheckBoxOutlineBlank
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Security
-import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -76,7 +70,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -134,7 +127,6 @@ fun AuthWebViewScreen(
     var loadingProgress by remember { mutableFloatStateOf(if (hardwareWebViewSupported) 0.1f else 1f) }
     var isLoading by remember { mutableStateOf(hardwareWebViewSupported) }
     var verificationCompleted by remember { mutableStateOf(false) }
-    var turnstileCheckedInSafeMode by remember { mutableStateOf(true) }
     var statusBannerText by remember {
         mutableStateOf(
             when (mode) {
@@ -151,17 +143,9 @@ fun AuthWebViewScreen(
         verificationCompleted = true
         statusBannerText = "Ekşi Sözlük bağlantısı doğrulandı! Canlı veriler yükleniyor..."
 
-        // Gerçek cihazda CookieManager içindeki orijinal Cloudflare ve Ekşi Sözlük çerezlerini eşitle
-        if (hardwareWebViewSupported) {
-            cookieJar.syncFromWebViewCookieManager(verifiedUrl)
-            cookieJar.flush()
-        } else {
-            cookieJar.setCookieExplicitly(
-                verifiedUrl,
-                "${WebViewCookieJar.CF_CLEARANCE_COOKIE}=verified_${System.currentTimeMillis()}; Path=/; Secure"
-            )
-            cookieJar.flush()
-        }
+        // Yalnızca gerçek WebView CookieManager çerezlerini senkronize et; sahte cf_clearance üretme
+        cookieJar.syncFromWebViewCookieManager(verifiedUrl)
+        cookieJar.flush()
 
         webViewFetchBridge.onInteractiveVerificationSucceeded(
             verifiedUrl = verifiedUrl,

@@ -11,16 +11,21 @@ import android.graphics.RadialGradient
 import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
 import android.util.Base64
 import android.util.Log
-import com.example.BuildConfig
 import com.example.data.model.EntryItem
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
@@ -31,7 +36,15 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import java.nio.charset.StandardCharsets
+import java.security.KeyStore
 import java.util.concurrent.TimeUnit
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.math.cos
@@ -79,18 +92,57 @@ sealed interface GeminiStreamState {
 }
 
 /**
- * Google Services / Firebase gerektirmeden doğrudan Google AI Studio (Free Tier) API anahtarı ve
- * OkHttp istemcisi üzerinden `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key=$apiKey`
- * REST endpoint'ine JSON POST isteği atarak çalışan Gemini yardımcı sınıfı.
+ * AI Görsel Üretim sonucu:
+ * - [Success]: Gerçekten Gemini REST API tarafından döndürülen görsel.
+ * - [LocalFallbackPreview]: API anahtarı yetkisi/kotası nedeniyle REST API görsel döndürmediğinde
+ *   açıkça `"AI değil, yerel önizleme"` olarak işaretlenen yerel konsept önizlemesi ve hata nedeni.
+ * - [Error]: API anahtarı eksikliği veya ağ hatası gibi doğrudan kullanıcıya gösterilecek hata durumu.
+ */
+sealed class GeminiImageGenerationResult {
+    data class Success(
+        val bitmap: Bitmap,
+        val modelUsed: String
+    ) : GeminiImageGenerationResult()
+
+    data class LocalFallbackPreview(
+        val bitmap: Bitmap,
+        val reason: String,
+        val modelLabel: String
+    ) : GeminiImageGenerationResult()
+
+    data class Error(
+        val reason: String
+    ) : GeminiImageGenerationResult()
+}
+
+private data class RestImageAttemptResult(
+    val bitmap: Bitmap?,
+    val failureReason: String?
+)
+
+/**
+ * Google Services / Firebase gerektirmeden doğrudan Google AI Studio API anahtarı ve
+ * OkHttp istemcisi üzerinden çalışan güvenli Gemini yardımcı sınıfı:
  *
- * HTTP 404, 429 veya 503 (yoğunluk) durumunda sırasıyla şu modellere otomatik yedek (fallback) istek yapar:
- * 1) `gemini-3.5-flash-lite`
- * 2) `gemini-flash-lite-latest`
- * 3) `gemini-2.5-flash-lite`
- * 4) `gemini-3.8-flash`
- *
- * Kullanıcının Ayarlar/Profil ekranından veya özetleme alt penceresinden girdiği API anahtarını
- * `SharedPreferences` içinde saklar.
+ * 1. **API Anahtarı Güvenliği**:
+ *    - API anahtarı hiçbir zaman URL içinde (`?key=...`) gönderilmez; yalnızca `x-goog-api-key`
+ *      HTTP header'ı ile iletilir ve loglara yazılmaz.
+ *    - API anahtarı cihazda Android Keystore (`AES/GCM/NoPadding`) ile şifrelenerek
+ *      `eksin_gemini_prefs` içinde Base64 (`ciphertext` + `iv`) olarak saklanır.
+ *    - Eski düz metin (`gemini_api_key`) kaydı varsa ilk okumada otomatik olarak şifreli formata
+ *      taşınır (`migrate`) ve düz metin kaydı silinir.
+ *    - Şifre çözme hatası olursa uygulama çökmez; bozuk kayıt temizlenir ve kullanıcıya anahtarını
+ *      yeniden girmesi gerektiği bildirilir.
+ * 2. **Gerçek SSE Streaming**:
+ *    - `:streamGenerateContent?alt=sse` uç noktasından gelen `data: ` satırlarını gerçek zamanlı
+ *      okuyup anında `Flow` üzerinden UI'a akıtır.
+ *    - 75 saniye toplam zaman aşımı ve ilk byte/chunk için 20 saniye (`FIRST_CHUNK_TIMEOUT_MS`)
+ *      zaman aşımı uygular; kullanıcı ekrandan çıktığında aktif `OkHttp` çağrısını anında iptal eder.
+ * 3. **Otomatik Model Fallback Zinciri (404 / 429 / 503)**:
+ *    1) `gemini-3.5-flash-lite`
+ *    2) `gemini-flash-lite-latest`
+ *    3) `gemini-2.5-flash-lite`
+ *    4) `gemini-3.8-flash`
  */
 @Singleton
 class GeminiHelper @Inject constructor(
@@ -102,6 +154,9 @@ class GeminiHelper @Inject constructor(
         appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     }
 
+    private val _keyDecryptionWarning = MutableStateFlow<String?>(null)
+    val keyDecryptionWarning: StateFlow<String?> = _keyDecryptionWarning.asStateFlow()
+
     /**
      * Ekşi Sözlük özel Cloudflare/User-Agent interceptor'larından etkilenmeyen,
      * doğrudan Google Generative Language REST API için yapılandırılmış OkHttp istemcisi.
@@ -111,40 +166,169 @@ class GeminiHelper @Inject constructor(
             interceptors().clear()
             networkInterceptors().clear()
         }
-        .connectTimeout(25, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
+        .connectTimeout(20, TimeUnit.SECONDS)
+        .readTimeout(65, TimeUnit.SECONDS)
         .writeTimeout(25, TimeUnit.SECONDS)
         .build()
 
+    init {
+        migrateLegacyPlainTextKeyIfNeeded()
+    }
+
     /**
-     * Kullanıcının `SharedPreferences` içine kaydettiği özel API anahtarını döndürür.
+     * Eski sürümde düz metin (`gemini_api_key`) olarak kaydedilmiş bir anahtar varsa,
+     * ilk okumada Android Keystore (`AES/GCM/NoPadding`) ile şifrelenmiş formata taşır
+     * ve düz metin kaydını kalıcı olarak siler.
+     */
+    private fun migrateLegacyPlainTextKeyIfNeeded() {
+        try {
+            val legacyPlain = prefs.getString(KEY_LEGACY_PLAIN_API_KEY, null)?.trim()
+            if (!legacyPlain.isNullOrBlank()) {
+                val encryptedOk = encryptAndStoreApiKey(legacyPlain)
+                if (encryptedOk) {
+                    prefs.edit().remove(KEY_LEGACY_PLAIN_API_KEY).apply()
+                }
+            } else if (prefs.contains(KEY_LEGACY_PLAIN_API_KEY)) {
+                prefs.edit().remove(KEY_LEGACY_PLAIN_API_KEY).apply()
+            }
+        } catch (e: Throwable) {
+            Log.w(TAG, "Eski API anahtarı şifreli formata taşınırken uyarı: ${e.javaClass.simpleName}")
+            prefs.edit().remove(KEY_LEGACY_PLAIN_API_KEY).apply()
+        }
+    }
+
+    private fun getOrCreateAesSecretKey(): SecretKey {
+        val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply {
+            load(null)
+        }
+        val existingEntry = keyStore.getEntry(KEYSTORE_ALIAS, null) as? KeyStore.SecretKeyEntry
+        if (existingEntry != null) {
+            return existingEntry.secretKey
+        }
+
+        val keyGenerator = KeyGenerator.getInstance(
+            KeyProperties.KEY_ALGORITHM_AES,
+            ANDROID_KEYSTORE
+        )
+        val spec = KeyGenParameterSpec.Builder(
+            KEYSTORE_ALIAS,
+            KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
+        )
+            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+            .setKeySize(256)
+            .setRandomizedEncryptionRequired(true)
+            .build()
+
+        keyGenerator.init(spec)
+        return keyGenerator.generateKey()
+    }
+
+    private fun encryptAndStoreApiKey(plainApiKey: String): Boolean {
+        return try {
+            val secretKey = getOrCreateAesSecretKey()
+            val cipher = Cipher.getInstance(AES_GCM_TRANSFORMATION)
+            cipher.init(Cipher.ENCRYPT_MODE, secretKey)
+            val ivBytes = cipher.iv
+            val cipherBytes = cipher.doFinal(plainApiKey.toByteArray(StandardCharsets.UTF_8))
+
+            val encodedCipher = Base64.encodeToString(cipherBytes, Base64.NO_WRAP)
+            val encodedIv = Base64.encodeToString(ivBytes, Base64.NO_WRAP)
+
+            prefs.edit()
+                .putString(KEY_ENCRYPTED_API_KEY_CIPHERTEXT, encodedCipher)
+                .putString(KEY_ENCRYPTED_API_KEY_IV, encodedIv)
+                .remove(KEY_LEGACY_PLAIN_API_KEY)
+                .apply()
+            _keyDecryptionWarning.value = null
+            true
+        } catch (e: Throwable) {
+            Log.w(TAG, "API anahtarı Android Keystore ile şifrelenirken hata: ${e.javaClass.simpleName}")
+            false
+        }
+    }
+
+    /**
+     * Kullanıcının Android Keystore (`AES/GCM/NoPadding`) ile şifrelenerek kaydedilmiş
+     * özel API anahtarını çözer ve döndürür.
+     * Eğer şifre çözme başarısız olursa uygulamayı çökertmez; bozuk kaydı temizler,
+     * anahtarı boş kabul eder ve kullanıcıya uyarı mesajı yayınlar.
      */
     fun getUserSavedApiKey(): String {
-        return prefs.getString(KEY_GEMINI_API_KEY, "")?.trim().orEmpty()
+        migrateLegacyPlainTextKeyIfNeeded()
+
+        val encodedCipher = prefs.getString(KEY_ENCRYPTED_API_KEY_CIPHERTEXT, null)
+        val encodedIv = prefs.getString(KEY_ENCRYPTED_API_KEY_IV, null)
+
+        if (encodedCipher.isNullOrBlank() || encodedIv.isNullOrBlank()) {
+            return ""
+        }
+
+        return try {
+            val cipherBytes = Base64.decode(encodedCipher, Base64.NO_WRAP)
+            val ivBytes = Base64.decode(encodedIv, Base64.NO_WRAP)
+
+            val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
+            val secretKeyEntry = keyStore.getEntry(KEYSTORE_ALIAS, null) as? KeyStore.SecretKeyEntry
+                ?: throw IllegalStateException("Keystore anahtarı bulunamadı.")
+
+            val cipher = Cipher.getInstance(AES_GCM_TRANSFORMATION)
+            val spec = GCMParameterSpec(GCM_TAG_LENGTH_BITS, ivBytes)
+            cipher.init(Cipher.DECRYPT_MODE, secretKeyEntry.secretKey, spec)
+            val decryptedBytes = cipher.doFinal(cipherBytes)
+            String(decryptedBytes, StandardCharsets.UTF_8).trim()
+        } catch (e: Throwable) {
+            Log.w(TAG, "Şifreli Gemini API anahtarı çözülemedi, bozuk kayıt temizleniyor: ${e.javaClass.simpleName}")
+            clearCorruptedEncryptedKeyEntries()
+            _keyDecryptionWarning.value =
+                "Kayıtlı API anahtarının şifresi çözülemediği için güvenlik amacıyla sıfırlandı. Lütfen anahtarınızı tekrar girin."
+            ""
+        }
+    }
+
+    private fun clearCorruptedEncryptedKeyEntries() {
+        try {
+            prefs.edit()
+                .remove(KEY_ENCRYPTED_API_KEY_CIPHERTEXT)
+                .remove(KEY_ENCRYPTED_API_KEY_IV)
+                .remove(KEY_LEGACY_PLAIN_API_KEY)
+                .apply()
+        } catch (_: Throwable) {
+        }
     }
 
     /**
-     * Kullanıcının girdiği ücretsiz Gemini API anahtarını `SharedPreferences` içine kaydeder.
+     * Kullanıcının girdiği ücretsiz Gemini API anahtarını Android Keystore (`AES/GCM/NoPadding`)
+     * ile şifreleyerek `eksin_gemini_prefs` içine kaydeder.
      */
     fun saveUserApiKey(apiKey: String) {
-        prefs.edit()
-            .putString(KEY_GEMINI_API_KEY, apiKey.trim())
-            .apply()
+        val cleaned = apiKey.trim()
+        if (cleaned.isEmpty()) {
+            clearUserApiKey()
+            return
+        }
+        encryptAndStoreApiKey(cleaned)
     }
 
     /**
-     * Kayıtlı Gemini API anahtarını `SharedPreferences` içinden temizler.
+     * Kayıtlı Gemini API anahtarını `eksin_gemini_prefs` içinden temizler.
      */
     fun clearUserApiKey() {
+        _keyDecryptionWarning.value = null
         prefs.edit()
-            .remove(KEY_GEMINI_API_KEY)
+            .remove(KEY_ENCRYPTED_API_KEY_CIPHERTEXT)
+            .remove(KEY_ENCRYPTED_API_KEY_IV)
+            .remove(KEY_LEGACY_PLAIN_API_KEY)
             .apply()
     }
 
+    fun dismissKeyDecryptionWarning() {
+        _keyDecryptionWarning.value = null
+    }
+
     /**
-     * `SharedPreferences` içindeki kullanıcı anahtarını döndürür.
      * Kullanıcı kendi anahtarını girip kaydetmeden otomatik istek atılmaması için yalnızca
-     * `SharedPreferences` içindeki kayıtlı anahtar dikkate alınır.
+     * cihazda şifreli olarak saklanan kullanıcı anahtarı dikkate alınır.
      */
     fun resolveActiveApiKey(): String {
         return getUserSavedApiKey()
@@ -182,9 +366,9 @@ class GeminiHelper @Inject constructor(
 
     /**
      * Seçilen [GeminiAnalysisMode] için prompt oluşturur ve doğrudan `OkHttp` üzerinden
-     * `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key=$apiKey`
-     * REST endpoint'ine (404/429/503 durumunda otomatik fallback zinciriyle) JSON POST isteği atarak
-     * yanıtı canlı akış ([GeminiStreamState]) halinde sunar.
+     * `https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent?alt=sse`
+     * uç noktasına (`x-goog-api-key` header'ı ile, URL'de anahtar olmadan) gerçek zamanlı SSE
+     * isteği atarak gelen `data: ` paketlerini anında [GeminiStreamState.Streaming] olarak yayınlar.
      */
     fun executeStreamingAnalysis(
         mode: GeminiAnalysisMode,
@@ -215,78 +399,7 @@ class GeminiHelper @Inject constructor(
             entries = entries
         )
 
-        try {
-            val generatedText = withTimeout(75_000L) {
-                executeGenerateContentPost(apiKey = apiKey, promptText = promptText)
-            }
-
-            val cleanResult = generatedText.trim()
-            if (cleanResult.isEmpty()) {
-                emit(
-                    GeminiStreamState.Error(
-                        mode = mode,
-                        message = "Gemini boş yanıt döndürdü. Lütfen tekrar deneyin."
-                    )
-                )
-                return@flow
-            }
-
-            // Yanıtı kullanıcıya akıcı bir canlı metin akışı (streaming efekti) ile ilet
-            val accumulated = StringBuilder()
-            val paragraphs = cleanResult.split(Regex("(?<=\\n)"))
-            for (chunk in paragraphs) {
-                accumulated.append(chunk)
-                emit(
-                    GeminiStreamState.Streaming(
-                        mode = mode,
-                        partialText = accumulated.toString(),
-                        latestChunk = chunk
-                    )
-                )
-                delay(18L)
-            }
-
-            emit(
-                GeminiStreamState.Completed(
-                    mode = mode,
-                    fullText = cleanResult
-                )
-            )
-        } catch (e: TimeoutCancellationException) {
-            Log.e(TAG, "Gemini analizi zaman aşımına uğradı", e)
-            emit(
-                GeminiStreamState.Error(
-                    mode = mode,
-                    message = "Yanıt süresi zaman aşımına uğradı. Lütfen tekrar deneyin."
-                )
-            )
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            Log.e(TAG, "Gemini REST API çağrısı sırasında hata oluştu", e)
-            emit(
-                GeminiStreamState.Error(
-                    mode = mode,
-                    message = e.localizedMessage ?: "Gemini API çağrısı sırasında hata oluştu."
-                )
-            )
-        }
-    }.flowOn(Dispatchers.IO)
-
-    /**
-     * Birincil olarak `gemini-3.5-flash-lite` modeline JSON POST isteği gönderir.
-     * Eğer sunucu HTTP 404, 429 veya 503 (yoğunluk) hatası dönerse kullanıcıya hata göstermeden önce
-     * sırasıyla şu modellere otomatik fallback (yedek istek) yapar:
-     * 1) `gemini-3.5-flash-lite`
-     * 2) `gemini-flash-lite-latest`
-     * 3) `gemini-2.5-flash-lite`
-     * 4) `gemini-3.8-flash`
-     */
-    private suspend fun executeGenerateContentPost(
-        apiKey: String,
-        promptText: String
-    ): String = withContext(Dispatchers.IO) {
-        val payload = JSONObject().apply {
+        val payloadString = JSONObject().apply {
             put(
                 "contents",
                 JSONArray().put(
@@ -300,71 +413,196 @@ class GeminiHelper @Inject constructor(
                     }
                 )
             )
-        }
-        val payloadString = payload.toString()
+        }.toString()
 
-        var lastErrorMessage = "Gemini API çağrısı başarısız oldu."
+        try {
+            withTimeout(TOTAL_STREAM_TIMEOUT_MS) {
+                var lastErrorMessage = "Gemini API çağrısı başarısız oldu."
+                var streamCompletedSuccessfully = false
 
-        for ((index, modelName) in FALLBACK_MODELS.withIndex()) {
-            val url = "https://generativelanguage.googleapis.com/v1beta/models/$modelName:generateContent?key=$apiKey"
-            val requestBody = payloadString.toRequestBody(JSON_MEDIA_TYPE)
-            val request = Request.Builder()
-                .url(url)
-                .post(requestBody)
-                .header("Content-Type", "application/json; charset=utf-8")
-                .build()
+                for ((index, modelName) in FALLBACK_MODELS.withIndex()) {
+                    currentCoroutineContext().ensureActive()
 
-            val resultText: String? = geminiHttpClient.newCall(request).execute().use { response ->
-                val rawBody = response.body?.string().orEmpty()
-                if (!response.isSuccessful) {
-                    val code = response.code
-                    val apiErrorMessage = extractApiErrorMessage(rawBody, code, modelName)
-                    lastErrorMessage = apiErrorMessage
+                    val url = "https://generativelanguage.googleapis.com/v1beta/models/$modelName:streamGenerateContent?alt=sse"
+                    val request = Request.Builder()
+                        .url(url)
+                        .post(payloadString.toRequestBody(JSON_MEDIA_TYPE))
+                        .header("x-goog-api-key", apiKey)
+                        .header("Content-Type", "application/json; charset=utf-8")
+                        .header("Accept", "text/event-stream")
+                        .build()
 
-                    val shouldFallback = (code == 404 || code == 429 || code == 503) &&
-                        index < FALLBACK_MODELS.lastIndex
-                    if (shouldFallback) {
-                        Log.w(
-                            TAG,
-                            "Model '$modelName' HTTP $code döndürdü; yedek modele (${FALLBACK_MODELS[index + 1]}) geçiliyor."
-                        )
-                        return@use null
-                    } else {
-                        throw IllegalStateException(apiErrorMessage)
+                    val call = geminiHttpClient.newCall(request)
+                    var shouldFallbackToNextModel = false
+
+                    try {
+                        val response = withTimeout(FIRST_CHUNK_TIMEOUT_MS) {
+                            withContext(Dispatchers.IO) {
+                                call.execute()
+                            }
+                        }
+
+                        response.use { resp ->
+                            if (!resp.isSuccessful) {
+                                val code = resp.code
+                                val errorBody = resp.body?.string().orEmpty()
+                                val apiErrorMessage = extractApiErrorMessage(errorBody, code, modelName)
+                                lastErrorMessage = apiErrorMessage
+
+                                val canFallback = (code == 404 || code == 429 || code == 503) &&
+                                    index < FALLBACK_MODELS.lastIndex
+                                if (canFallback) {
+                                    Log.w(
+                                        TAG,
+                                        "SSE model '$modelName' HTTP $code döndürdü; yedek modele (${FALLBACK_MODELS[index + 1]}) geçiliyor."
+                                    )
+                                    shouldFallbackToNextModel = true
+                                } else {
+                                    throw IllegalStateException(apiErrorMessage)
+                                }
+                            } else {
+                                val body = resp.body
+                                    ?: throw IllegalStateException("Gemini SSE yanıt gövdesi boş döndü ($modelName).")
+
+                                val accumulated = StringBuilder()
+                                var receivedFirstChunk = false
+                                var malformedJsonCount = 0
+
+                                BufferedReader(
+                                    InputStreamReader(body.byteStream(), StandardCharsets.UTF_8)
+                                ).use { reader ->
+                                    while (true) {
+                                        currentCoroutineContext().ensureActive()
+
+                                        val line: String? = if (!receivedFirstChunk) {
+                                            withTimeout(FIRST_CHUNK_TIMEOUT_MS) {
+                                                withContext(Dispatchers.IO) {
+                                                    reader.readLine()
+                                                }
+                                            }
+                                        } else {
+                                            withContext(Dispatchers.IO) {
+                                                reader.readLine()
+                                            }
+                                        }
+
+                                        if (line == null) break
+                                        val trimmed = line.trim()
+                                        if (trimmed.isEmpty() || trimmed.startsWith(":")) continue
+
+                                        if (trimmed.startsWith("data:")) {
+                                            val dataPayload = trimmed.removePrefix("data:").trim()
+                                            if (dataPayload.isEmpty() || dataPayload == "[DONE]") continue
+
+                                            try {
+                                                val chunkText = parseSseChunkText(dataPayload)
+                                                if (chunkText.isNotEmpty()) {
+                                                    receivedFirstChunk = true
+                                                    accumulated.append(chunkText)
+                                                    emit(
+                                                        GeminiStreamState.Streaming(
+                                                            mode = mode,
+                                                            partialText = accumulated.toString(),
+                                                            latestChunk = chunkText
+                                                        )
+                                                    )
+                                                }
+                                            } catch (jsonEx: Exception) {
+                                                malformedJsonCount += 1
+                                                Log.w(
+                                                    TAG,
+                                                    "SSE veri satırı ayrıştırılamadı ($modelName): ${jsonEx.message}"
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+
+                                val finalFullText = accumulated.toString().trim()
+                                if (finalFullText.isNotEmpty()) {
+                                    emit(
+                                        GeminiStreamState.Completed(
+                                            mode = mode,
+                                            fullText = finalFullText
+                                        )
+                                    )
+                                    streamCompletedSuccessfully = true
+                                } else {
+                                    val emptyReason = if (malformedJsonCount > 0) {
+                                        "Gemini SSE akışı bozuk veri döndürdü ($modelName). Lütfen tekrar deneyin."
+                                    } else {
+                                        "Gemini boş yanıt döndürdü ($modelName). Lütfen tekrar deneyin."
+                                    }
+                                    lastErrorMessage = emptyReason
+                                    if (index < FALLBACK_MODELS.lastIndex) {
+                                        Log.w(TAG, "$emptyReason Yedek modele geçiliyor.")
+                                        shouldFallbackToNextModel = true
+                                    } else {
+                                        throw IllegalStateException(emptyReason)
+                                    }
+                                }
+                            }
+                        }
+                    } catch (cancelEx: CancellationException) {
+                        call.cancel()
+                        throw cancelEx
+                    } catch (e: Exception) {
+                        call.cancel()
+                        throw e
+                    }
+
+                    if (streamCompletedSuccessfully) {
+                        break
+                    }
+                    if (!shouldFallbackToNextModel) {
+                        break
                     }
                 }
 
-                parseCandidateTextFromResponse(rawBody)
+                if (!streamCompletedSuccessfully) {
+                    emit(
+                        GeminiStreamState.Error(
+                            mode = mode,
+                            message = lastErrorMessage
+                        )
+                    )
+                }
             }
+        } catch (e: TimeoutCancellationException) {
+            Log.w(TAG, "Gemini SSE analizi zaman aşımına uğradı: ${e.message}")
+            emit(
+                GeminiStreamState.Error(
+                    mode = mode,
+                    message = "Yanıt süresi zaman aşımına uğradı (ilk paket 20 sn / toplam 75 sn sınırı). Lütfen tekrar deneyin."
+                )
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "Gemini SSE çağrısı sırasında hata oluştu: ${e.message}")
+            emit(
+                GeminiStreamState.Error(
+                    mode = mode,
+                    message = e.localizedMessage ?: "Gemini API çağrısı sırasında hata oluştu."
+                )
+            )
+        }
+    }.flowOn(Dispatchers.IO)
 
-            if (resultText != null) {
-                return@withContext resultText
-            }
+    private fun parseSseChunkText(jsonPayload: String): String {
+        val rootJson = JSONObject(jsonPayload)
+        rootJson.optJSONObject("error")?.let { errObj ->
+            val errMsg = errObj.optString("message", "Bilinmeyen Gemini SSE hatası")
+            throw IllegalStateException(errMsg)
         }
 
-        throw IllegalStateException(lastErrorMessage)
-    }
+        val candidates = rootJson.optJSONArray("candidates") ?: return ""
+        if (candidates.length() == 0) return ""
 
-    private fun parseCandidateTextFromResponse(rawBody: String): String {
-        val rootJson = JSONObject(rawBody)
-        val candidates = rootJson.optJSONArray("candidates")
-            ?: throw IllegalStateException("Gemini yanıtında 'candidates' alanı bulunamadı.")
-
-        if (candidates.length() == 0) {
-            throw IllegalStateException("Gemini yanıtı aday metin üretmedi.")
-        }
-
-        val firstCandidate = candidates.getJSONObject(0)
-        val contentObj = firstCandidate.getJSONObject("content")
-        val partsArray = contentObj.getJSONArray("parts")
-        if (partsArray.length() == 0) {
-            throw IllegalStateException("Gemini yanıtında 'parts' alanı boş döndü.")
-        }
-
-        val firstPartText = partsArray.getJSONObject(0).optString("text", "")
-        if (firstPartText.isNotEmpty() && partsArray.length() == 1) {
-            return firstPartText
-        }
+        val firstCandidate = candidates.optJSONObject(0) ?: return ""
+        val contentObj = firstCandidate.optJSONObject("content") ?: return ""
+        val partsArray = contentObj.optJSONArray("parts") ?: return ""
+        if (partsArray.length() == 0) return ""
 
         val builder = StringBuilder()
         for (i in 0 until partsArray.length()) {
@@ -393,28 +631,54 @@ class GeminiHelper @Inject constructor(
     }
 
     /**
-     * Görsel üretim stüdyosu için önce Gemini REST API üzerinden inlineData görsel yanıtı dener,
-     * Free Tier anahtarında görsel modeli aktif değilse veya kota/yetki yoksa
-     * yüksek çözünürlüklü OLED Neon Poster Bitmap'i üretir.
+     * AI Görsel Stüdyosu Şeffaflığı:
+     * 1. API anahtarı girilmemişse yerel çizimi AI gibi sunmaz; doğrudan [GeminiImageGenerationResult.Error] döndürür.
+     * 2. API anahtarı varsa `x-goog-api-key` header'ı ile Gemini REST API'den görsel ister.
+     * 3. Eğer seçilen model görsel (`inlineData`) döndürmezse veya Free Tier kısıtlamasına takılırsa,
+     *    gerçek hata nedenini (`reason`) gizlemeden [GeminiImageGenerationResult.LocalFallbackPreview]
+     *    döndürür ki UI üzerinde açıkça `"AI değil, yerel önizleme"` etiketi ve hata mesajı gösterilsin.
      */
     suspend fun generateImageFromPrompt(
         promptText: String,
         modelId: String = IMAGE_MODEL_DEFAULT,
         targetWidth: Int = 1024,
         targetHeight: Int = 1024
-    ): Bitmap = withContext(Dispatchers.Default) {
+    ): GeminiImageGenerationResult = withContext(Dispatchers.Default) {
         val apiKey = resolveActiveApiKey()
-        if (apiKey.isNotBlank()) {
-            val apiBitmap = tryGenerateImageViaRest(apiKey, promptText, modelId)
-            if (apiBitmap != null) {
-                return@withContext apiBitmap
-            }
+        if (apiKey.isBlank()) {
+            return@withContext GeminiImageGenerationResult.Error(
+                reason = "Gemini API anahtarı girilmedi. Görsel üretmek için önce Profil ekranından Google AI Studio API anahtarınızı kaydedin."
+            )
         }
-        renderOledNeonConceptBitmap(
+
+        val endpointModel = if (modelId.isBlank()) IMAGE_MODEL_DEFAULT else modelId
+        val restAttempt = tryGenerateImageViaRest(
+            apiKey = apiKey,
+            promptText = promptText,
+            modelId = endpointModel
+        )
+
+        if (restAttempt.bitmap != null) {
+            return@withContext GeminiImageGenerationResult.Success(
+                bitmap = restAttempt.bitmap,
+                modelUsed = endpointModel
+            )
+        }
+
+        val failureReason = restAttempt.failureReason
+            ?: "Seçilen model ($endpointModel) görsel verisi (inlineData) döndürmedi."
+
+        val previewBitmap = renderOledNeonConceptBitmap(
             promptText = promptText,
             width = targetWidth.coerceIn(512, 2048),
             height = targetHeight.coerceIn(512, 2048),
-            modelLabel = modelId
+            modelLabel = endpointModel
+        )
+
+        GeminiImageGenerationResult.LocalFallbackPreview(
+            bitmap = previewBitmap,
+            reason = failureReason,
+            modelLabel = endpointModel
         )
     }
 
@@ -422,10 +686,10 @@ class GeminiHelper @Inject constructor(
         apiKey: String,
         promptText: String,
         modelId: String
-    ): Bitmap? = withContext(Dispatchers.IO) {
+    ): RestImageAttemptResult = withContext(Dispatchers.IO) {
         try {
             val endpointModel = if (modelId.isBlank()) IMAGE_MODEL_DEFAULT else modelId
-            val url = "https://generativelanguage.googleapis.com/v1beta/models/$endpointModel:generateContent?key=$apiKey"
+            val url = "https://generativelanguage.googleapis.com/v1beta/models/$endpointModel:generateContent"
             val payload = JSONObject().apply {
                 put(
                     "contents",
@@ -442,17 +706,32 @@ class GeminiHelper @Inject constructor(
             val request = Request.Builder()
                 .url(url)
                 .post(payload.toString().toRequestBody(JSON_MEDIA_TYPE))
+                .header("x-goog-api-key", apiKey)
                 .header("Content-Type", "application/json; charset=utf-8")
                 .build()
 
             geminiHttpClient.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) return@withContext null
                 val bodyStr = response.body?.string().orEmpty()
+                if (!response.isSuccessful) {
+                    val errReason = extractApiErrorMessage(bodyStr, response.code, endpointModel)
+                    Log.w(TAG, "tryGenerateImageViaRest başarısız ($endpointModel): $errReason")
+                    return@withContext RestImageAttemptResult(
+                        bitmap = null,
+                        failureReason = errReason
+                    )
+                }
+
                 val json = JSONObject(bodyStr)
                 val parts = json.optJSONArray("candidates")
                     ?.optJSONObject(0)
                     ?.optJSONObject("content")
-                    ?.optJSONArray("parts") ?: return@withContext null
+                    ?.optJSONArray("parts")
+
+                if (parts == null || parts.length() == 0) {
+                    val msg = "Model ($endpointModel) yanıtında görsel verisi bulunamadı."
+                    Log.w(TAG, msg)
+                    return@withContext RestImageAttemptResult(bitmap = null, failureReason = msg)
+                }
 
                 for (i in 0 until parts.length()) {
                     val inlineData = parts.optJSONObject(i)?.optJSONObject("inlineData")
@@ -460,13 +739,31 @@ class GeminiHelper @Inject constructor(
                     if (b64.isNotBlank()) {
                         val bytes = Base64.decode(b64, Base64.DEFAULT)
                         val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                        if (decoded != null) return@withContext decoded
+                        if (decoded != null) {
+                            return@withContext RestImageAttemptResult(
+                                bitmap = decoded,
+                                failureReason = null
+                            )
+                        }
                     }
                 }
-                null
+
+                val textFallbackNote = "Model ($endpointModel) görsel (inlineData) yerine yalnızca metin döndürdü."
+                Log.w(TAG, textFallbackNote)
+                RestImageAttemptResult(
+                    bitmap = null,
+                    failureReason = textFallbackNote
+                )
             }
-        } catch (_: Exception) {
-            null
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            val reason = "Görsel API isteği başarısız oldu ($modelId): ${e.localizedMessage ?: e.javaClass.simpleName}"
+            Log.w(TAG, reason, e)
+            RestImageAttemptResult(
+                bitmap = null,
+                failureReason = reason
+            )
         }
     }
 
@@ -572,11 +869,11 @@ class GeminiHelper @Inject constructor(
 
         val headerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = android.graphics.Color.rgb(0, 230, 118)
-            textSize = (minDim * 0.032f).coerceIn(22f, 44f)
+            textSize = (minDim * 0.028f).coerceIn(20f, 38f)
             typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
         }
         canvas.drawText(
-            "EKSIN OLED • $modelLabel",
+            "YEREL ÖNİZLEME (AI DEĞİL) • $modelLabel",
             cardRect.left + 28f,
             cardRect.top + 48f,
             headerPaint
@@ -669,7 +966,18 @@ class GeminiHelper @Inject constructor(
     companion object {
         private const val TAG = "GeminiHelper"
         const val PREFS_NAME = "eksin_gemini_prefs"
-        const val KEY_GEMINI_API_KEY = "gemini_api_key"
+        private const val KEY_LEGACY_PLAIN_API_KEY = "gemini_api_key"
+        private const val KEY_ENCRYPTED_API_KEY_CIPHERTEXT = "gemini_api_key_ciphertext"
+        private const val KEY_ENCRYPTED_API_KEY_IV = "gemini_api_key_iv"
+
+        private const val ANDROID_KEYSTORE = "AndroidKeyStore"
+        private const val KEYSTORE_ALIAS = "eksin_gemini_aes_key"
+        private const val AES_GCM_TRANSFORMATION = "AES/GCM/NoPadding"
+        private const val GCM_TAG_LENGTH_BITS = 128
+
+        private const val TOTAL_STREAM_TIMEOUT_MS = 75_000L
+        private const val FIRST_CHUNK_TIMEOUT_MS = 20_000L
+
         const val MODEL_NAME = "gemini-3.5-flash-lite"
         val FALLBACK_MODELS = listOf(
             "gemini-3.5-flash-lite",

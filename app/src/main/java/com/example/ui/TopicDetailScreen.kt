@@ -42,6 +42,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.BrokenImage
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
@@ -113,6 +114,7 @@ import com.example.data.model.EntryItem
 import com.example.data.model.TopicFilterMode
 import com.example.data.model.TopicItem
 import com.example.data.remote.EksiParser
+import com.example.network.ContentSource
 import com.example.ui.components.AuthorMiniAvatar
 import com.example.ui.components.EntryListSkeletonShimmer
 import com.example.ui.components.FloatingPagerCapsuleBar
@@ -175,6 +177,8 @@ fun TopicDetailScreen(
     val geminiStreamState by viewModel.geminiStreamState.collectAsStateWithLifecycle()
     val geminiApiKey by viewModel.geminiApiKey.collectAsStateWithLifecycle()
     val isGeminiKeyConfigured by viewModel.isGeminiKeyConfigured.collectAsStateWithLifecycle()
+    val geminiKeyWarning by viewModel.geminiKeyDecryptionWarning.collectAsStateWithLifecycle()
+    val lastContentSource by viewModel.lastContentSource.collectAsStateWithLifecycle()
     val themeMode by viewModel.themeMode.collectAsStateWithLifecycle()
     val showThemeDialog by viewModel.showThemeDialog.collectAsStateWithLifecycle()
 
@@ -191,6 +195,9 @@ fun TopicDetailScreen(
     val isSingleEntryOrFiltered = activeFilterMode != TopicFilterMode.ALL ||
         metadata?.isSingleEntryView == true ||
         topic.url.contains("/entry/", ignoreCase = true)
+
+    val isWaybackArchiveActive = metadata?.isFromWaybackArchive == true ||
+        lastContentSource == ContentSource.WAYBACK_ARCHIVE
 
     val currentEntries: List<EntryItem> = remember(pageUiState, metadata, authorFilter) {
         val rawEntries = when (val state = pageUiState) {
@@ -279,6 +286,7 @@ fun TopicDetailScreen(
         streamState = geminiStreamState,
         hasSavedApiKey = isGeminiKeyConfigured,
         savedApiKey = geminiApiKey,
+        keyDecryptionWarning = geminiKeyWarning,
         onSelectMode = { mode ->
             viewModel.runGeminiAnalysisStream(
                 mode = mode,
@@ -353,28 +361,54 @@ fun TopicDetailScreen(
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
-                                val subtitle = buildString {
-                                    append("Sayfa $safeCurrentPage / $safeTotalPages")
-                                    val meta = metadata
-                                    if (meta != null) {
-                                        if (activeFilterMode == TopicFilterMode.TODAY_POPULAR && !meta.usedTodayFallback) {
-                                            append(" • Bugün")
-                                        } else if (meta.usedTodayFallback) {
-                                            append(" • Tüm Başlık (Bugün Entry Yok)")
-                                        } else if (meta.usedTrackedFallback) {
-                                            append(" • Takipten")
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    val subtitle = buildString {
+                                        append("Sayfa $safeCurrentPage / $safeTotalPages")
+                                        val meta = metadata
+                                        if (meta != null) {
+                                            if (activeFilterMode == TopicFilterMode.TODAY_POPULAR && !meta.usedTodayFallback) {
+                                                append(" • Bugün")
+                                            } else if (meta.usedTodayFallback) {
+                                                append(" • Tüm Başlık (Bugün Entry Yok)")
+                                            } else if (meta.usedTrackedFallback) {
+                                                append(" • Takipten")
+                                            }
+                                        } else if (pageUiState is TopicPageUiState.Loading) {
+                                            append(" • Yükleniyor...")
                                         }
-                                    } else if (pageUiState is TopicPageUiState.Loading) {
-                                        append(" • Yükleniyor...")
+                                    }
+                                    Text(
+                                        text = subtitle,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = EksiNeonGreen,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    if (isWaybackArchiveActive) {
+                                        Surface(
+                                            color = Color(0xFF2B2108),
+                                            shape = RoundedCornerShape(6.dp),
+                                            modifier = Modifier
+                                                .border(
+                                                    width = 0.6.dp,
+                                                    color = Color(0xFFFFB74D).copy(alpha = 0.7f),
+                                                    shape = RoundedCornerShape(6.dp)
+                                                )
+                                                .testTag("wayback_archive_badge")
+                                        ) {
+                                            Text(
+                                                text = "📦 Arşiv kopyası (Wayback)",
+                                                fontSize = 10.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = Color(0xFFFFB74D),
+                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                            )
+                                        }
                                     }
                                 }
-                                Text(
-                                    text = subtitle,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = EksiNeonGreen,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
                             }
                         },
                         actions = {
@@ -683,7 +717,10 @@ fun TopicDetailScreen(
                         // 2. ÖZELLİK: Başlık ekranının hemen üst kısmında (entry listesinin en başında)
                         // Ekşin tarzı belirgin ve şık "Tümünü Göster (İlk Entry'den İtibaren Tüm Başlığı Yükle)" butonu
                         if (isSingleEntryOrFiltered) {
-                            item(key = "show_all_entries_header_button") {
+                            item(
+                                key = "show_all_entries_header_button",
+                                contentType = "show_all_header_button"
+                            ) {
                                 Surface(
                                     color = OledPillGreenBg,
                                     shape = RoundedCornerShape(14.dp),
@@ -749,7 +786,8 @@ fun TopicDetailScreen(
 
                         itemsIndexed(
                             items = currentEntries,
-                            key = { index, entry -> "${safeCurrentPage}_${index}_${entry.id}" }
+                            key = { index, entry -> "${safeCurrentPage}_${index}_${entry.id}" },
+                            contentType = { _, _ -> "entry_card" }
                         ) { _, entry ->
                             val isFavorited = favoritedIds.contains(entry.id) || entry.isFavorited
 
@@ -815,7 +853,10 @@ fun TopicDetailScreen(
                             topic.url.contains("/entry/", ignoreCase = true) ||
                             topic.url.contains("a=debe", ignoreCase = true)
                         ) {
-                            item(key = "see_all_topic_entries_bottom_button") {
+                            item(
+                                key = "see_all_topic_entries_bottom_button",
+                                contentType = "see_all_bottom_button"
+                            ) {
                                 Button(
                                     onClick = { viewModel.showAllTopicEntriesFromFirstPage() },
                                     colors = ButtonDefaults.buttonColors(
@@ -1226,7 +1267,7 @@ private fun InlineEntryImagePreview(
                 contentScale = ContentScale.FillWidth,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(min = 140.dp, max = 320.dp)
+                    .heightIn(min = 64.dp, max = 320.dp)
                     .clip(RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp)),
                 loading = {
                     Box(
@@ -1235,6 +1276,45 @@ private fun InlineEntryImagePreview(
                             .height(160.dp)
                             .background(shimmerBrush)
                     )
+                },
+                error = {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(OledElevatedCard)
+                            .clickable { onOpenExternal() }
+                            .padding(horizontal = 14.dp, vertical = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.BrokenImage,
+                            contentDescription = "Görsel yüklenemedi",
+                            tint = EksiNeonGreen,
+                            modifier = Modifier.size(22.dp)
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Görsel önizlenemedi • Harici bağlantıyı aç",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = OledTextPrimary
+                            )
+                            Text(
+                                text = imageUrl,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = OledTextSecondary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        Icon(
+                            imageVector = Icons.Default.OpenInNew,
+                            contentDescription = "Bağlantıyı Aç",
+                            tint = EksiNeonGreen,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
                 }
             )
 

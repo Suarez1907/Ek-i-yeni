@@ -1,6 +1,7 @@
 package com.example.data.remote
 
 import android.net.Uri
+import androidx.compose.runtime.Immutable
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
@@ -31,6 +32,7 @@ import javax.inject.Singleton
 /**
  * Tekil bir entry detay sayfasından çekilen beğeni (favori) ve yazar özeti.
  */
+@Immutable
 data class EntryDetailMetadata(
     val entryId: String,
     val favoriteCount: Int,
