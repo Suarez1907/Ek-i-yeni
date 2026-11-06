@@ -1,9 +1,5 @@
 package com.example.ui
 
-import android.app.Activity
-import android.content.Context
-import android.content.ContextWrapper
-import android.os.SystemClock
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -33,6 +29,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
@@ -46,6 +43,7 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.EmojiEvents
+import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Refresh
@@ -97,7 +95,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
@@ -111,7 +108,6 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.paging.LoadState
 import androidx.paging.compose.LazyPagingItems
 import androidx.paging.compose.collectAsLazyPagingItems
-import com.example.EksinApplication
 import com.example.data.local.BookmarkedEntryEntity
 import com.example.data.local.TopicReadStateEntity
 import com.example.data.model.DebeAndStatsCategory
@@ -120,14 +116,15 @@ import com.example.data.model.EksiChannel
 import com.example.data.model.LeftFrameSection
 import com.example.data.model.PeriodicRankingTab
 import com.example.data.model.PeriodicTimeRange
+import com.example.data.model.RankedTopicOrEntryItem
 import com.example.data.model.SearchSortOrder
 import com.example.data.model.TopicItem
-import com.example.network.ContentSource
 import com.example.ui.auth.AuthWebViewScreen
 import com.example.ui.components.ThemeSelectorDialog
 import com.example.ui.components.TopicListSkeletonShimmer
 import com.example.ui.theme.AppThemeMode
 import com.example.ui.theme.EksiNeonGreen
+import com.example.ui.theme.OledCardSurface
 import com.example.ui.theme.OledHairlineDivider
 import com.example.ui.theme.OledOnAccentColor
 import com.example.ui.theme.OledPillGreenBg
@@ -136,14 +133,7 @@ import com.example.ui.theme.OledTextPrimary
 import com.example.ui.theme.OledTextSecondary
 import com.example.ui.theme.OledTopicRead
 import com.example.ui.theme.OledTopicUnread
-import com.example.util.PerfLog
 import kotlinx.coroutines.launch
-
-private tailrec fun Context.findActivity(): Activity? = when (this) {
-    is Activity -> this
-    is ContextWrapper -> baseContext.findActivity()
-    else -> null
-}
 
 /**
  * Tek elle kullanıma uygun Alt Navigasyon Barı sekmeleri:
@@ -171,10 +161,8 @@ fun MainScaffold(
     val pendingCfChallenge by viewModel.pendingCloudflareChallenge.collectAsStateWithLifecycle()
     val selectedTopic by viewModel.selectedTopic.collectAsStateWithLifecycle()
     val selectedSection by viewModel.selectedSection.collectAsStateWithLifecycle()
-    val currentDestination by viewModel.activeNavDestination.collectAsStateWithLifecycle()
     val hasCfClearance by viewModel.hasCfClearance.collectAsStateWithLifecycle()
     val hasUserSession by viewModel.hasUserSession.collectAsStateWithLifecycle()
-    val lastContentSource by viewModel.lastContentSource.collectAsStateWithLifecycle()
     val allReadStates by viewModel.allReadStates.collectAsStateWithLifecycle()
     val themeMode by viewModel.themeMode.collectAsStateWithLifecycle()
     val showThemeDialog by viewModel.showThemeDialog.collectAsStateWithLifecycle()
@@ -183,9 +171,8 @@ fun MainScaffold(
         allReadStates.associateBy { it.topicKey }
     }
 
-    val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
-    var hasReportedFullyDrawn by rememberSaveable { mutableStateOf(false) }
+    var currentDestination by rememberSaveable { mutableStateOf(MainNavDestination.GUNDEM) }
 
     // 2. KURAL: Her sekme için ayrı LazyListState ve ayrı LazyPagingItems en üst seviyede (TopicDetailScreen
     // veya AuthWebViewScreen açıldığında bile silinmeyecek şekilde) tutulur. Böylece bir başlığa tıklayıp
@@ -207,15 +194,6 @@ fun MainScaffold(
         if (gundemPagingItems.itemCount > 0 || bugunPagingItems.itemCount > 0) {
             viewModel.refreshCookieState()
         }
-        if (!hasReportedFullyDrawn && gundemPagingItems.itemCount > 0) {
-            hasReportedFullyDrawn = true
-            try {
-                context.findActivity()?.reportFullyDrawn()
-            } catch (_: Throwable) {
-            }
-            val elapsedSinceStart = SystemClock.elapsedRealtime() - EksinApplication.appLaunchStartRealtimeMs
-            PerfLog.logDuration("FirstGundemListDrawn", elapsedSinceStart)
-        }
     }
 
     val activeScrollListState = when (currentDestination) {
@@ -233,6 +211,9 @@ fun MainScaffold(
     val isHeaderVisible = rememberDirectionalHeaderVisibility(activeScrollListState)
     val isDebeActive = currentDestination == MainNavDestination.DEBE_ENLER
 
+    // 1. KURAL: Alt veya üst bardaki "Gündem" butonuna tıklandığında:
+    // - Başka sekmedeyse Gündem sekmesine geçer.
+    // - Zaten Gündem sekmesindeyse (re-click) Gündem önbelleğini temizler, baştan çeker ve en üste kaydırır.
     val handleGundemClick: () -> Unit = {
         val alreadyOnGundem = currentDestination == MainNavDestination.GUNDEM &&
             selectedSection == LeftFrameSection.GUNDEM
@@ -243,14 +224,16 @@ fun MainScaffold(
                 gundemListState.animateScrollToItem(0)
             }
         } else {
-            viewModel.selectNavDestination(MainNavDestination.GUNDEM)
+            currentDestination = MainNavDestination.GUNDEM
             viewModel.selectSection(LeftFrameSection.GUNDEM)
         }
     }
 
+    // 4. KURAL: Üst bardaki "DEBE", üst çipteki "🏆 DEBE & Enler" ve alt bardaki "DEBE" butonlarının
+    // tamamı aynı DEBE ekranını ve "Dünün En Beğenilenleri (DEBE)" sekmesini açar.
     val handleDebeClick: () -> Unit = {
         val alreadyOnDebe = currentDestination == MainNavDestination.DEBE_ENLER
-        viewModel.selectNavDestination(MainNavDestination.DEBE_ENLER)
+        currentDestination = MainNavDestination.DEBE_ENLER
         viewModel.openDebeSection(forceReload = alreadyOnDebe)
         if (alreadyOnDebe) {
             coroutineScope.launch {
@@ -315,27 +298,6 @@ fun MainScaffold(
                                         letterSpacing = (-0.3).sp,
                                         color = MaterialTheme.colorScheme.onSurface
                                     )
-                                    if (lastContentSource == ContentSource.WAYBACK_ARCHIVE) {
-                                        Surface(
-                                            color = Color(0xFF2B2108),
-                                            shape = RoundedCornerShape(6.dp),
-                                            modifier = Modifier
-                                                .border(
-                                                    width = 0.6.dp,
-                                                    color = Color(0xFFFFB74D).copy(alpha = 0.7f),
-                                                    shape = RoundedCornerShape(6.dp)
-                                                )
-                                                .testTag("main_top_wayback_badge")
-                                        ) {
-                                            Text(
-                                                text = "📦 Arşiv kopyası (Wayback)",
-                                                fontSize = 10.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                color = Color(0xFFFFB74D),
-                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                            )
-                                        }
-                                    }
                                 }
                             },
                             actions = {
@@ -460,7 +422,7 @@ fun MainScaffold(
                                     selected = currentDestination == MainNavDestination.BUGUN,
                                     onClick = {
                                         val alreadyOnBugun = currentDestination == MainNavDestination.BUGUN
-                                        viewModel.selectNavDestination(MainNavDestination.BUGUN)
+                                        currentDestination = MainNavDestination.BUGUN
                                         viewModel.selectSection(LeftFrameSection.BUGUN)
                                         if (alreadyOnBugun) {
                                             bugunPagingItems.refresh()
@@ -474,7 +436,7 @@ fun MainScaffold(
                                     label = "# Kanallar",
                                     selected = currentDestination == MainNavDestination.KANALLAR,
                                     onClick = {
-                                        viewModel.selectNavDestination(MainNavDestination.KANALLAR)
+                                        currentDestination = MainNavDestination.KANALLAR
                                     }
                                 )
                                 TopQuickSectionChip(
@@ -487,7 +449,7 @@ fun MainScaffold(
                                     selected = currentDestination == MainNavDestination.GUNDEM &&
                                         selectedSection == LeftFrameSection.OLAYLAR,
                                     onClick = {
-                                        viewModel.selectNavDestination(MainNavDestination.GUNDEM)
+                                        currentDestination = MainNavDestination.GUNDEM
                                         viewModel.selectSection(LeftFrameSection.OLAYLAR)
                                     }
                                 )
@@ -522,7 +484,7 @@ fun MainScaffold(
                                     MainNavDestination.GUNDEM -> handleGundemClick()
                                     MainNavDestination.BUGUN -> {
                                         val alreadyOnBugun = currentDestination == MainNavDestination.BUGUN
-                                        viewModel.selectNavDestination(MainNavDestination.BUGUN)
+                                        currentDestination = MainNavDestination.BUGUN
                                         viewModel.selectSection(LeftFrameSection.BUGUN)
                                         if (alreadyOnBugun) {
                                             bugunPagingItems.refresh()
@@ -533,7 +495,7 @@ fun MainScaffold(
                                     }
                                     MainNavDestination.KANALLAR -> {
                                         val alreadyOnKanallar = currentDestination == MainNavDestination.KANALLAR
-                                        viewModel.selectNavDestination(MainNavDestination.KANALLAR)
+                                        currentDestination = MainNavDestination.KANALLAR
                                         if (alreadyOnKanallar) {
                                             channelPagingItems.refresh()
                                             coroutineScope.launch {
@@ -543,10 +505,10 @@ fun MainScaffold(
                                     }
                                     MainNavDestination.DEBE_ENLER -> handleDebeClick()
                                     MainNavDestination.ARAMA -> {
-                                        viewModel.selectNavDestination(MainNavDestination.ARAMA)
+                                        currentDestination = MainNavDestination.ARAMA
                                     }
                                     MainNavDestination.PROFIL -> {
-                                        viewModel.selectNavDestination(MainNavDestination.PROFIL)
+                                        currentDestination = MainNavDestination.PROFIL
                                     }
                                 }
                             },
@@ -1070,7 +1032,7 @@ private fun DebeAndPeriodicBestsScreenContent(
                             color = OledTextSecondary
                         )
                         Button(
-                            onClick = { viewModel.loadDebeAndStats(forceRefresh = true) },
+                            onClick = { viewModel.loadDebeAndStats() },
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = EksiNeonGreen,
                                 contentColor = OledOnAccentColor
@@ -1106,7 +1068,7 @@ private fun DebeAndPeriodicBestsScreenContent(
                                 text = "Yenile ↻",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = OledTextSecondary,
-                                modifier = Modifier.clickable { viewModel.loadDebeAndStats(forceRefresh = true) }
+                                modifier = Modifier.clickable { viewModel.loadDebeAndStats() }
                             )
                         }
                     }
@@ -1123,8 +1085,7 @@ private fun DebeAndPeriodicBestsScreenContent(
                     ) {
                         itemsIndexed(
                             items = state.items,
-                            key = { idx, item -> "${idx}_${item.url}" },
-                            contentType = { _, _ -> "ranked_item_row" }
+                            key = { idx, item -> "${idx}_${item.url}" }
                         ) { index, item ->
                             val cleanUrl = item.url.substringBefore('?')
                             val isRead = readStateByUrl.containsKey(cleanUrl)
@@ -1416,102 +1377,101 @@ private fun TopicPagingList(
                     .testTag("topic_paging_list"),
                 contentPadding = PaddingValues(vertical = 2.dp)
             ) {
-                items(
-                    count = pagingItems.itemCount,
-                    key = { index -> "${index}_${pagingItems.peek(index)?.url ?: "topic"}" },
-                    contentType = { "topic_item_row" }
-                ) { index ->
-                    val item = pagingItems[index] ?: return@items
-                    val savedRead = readStateByUrl[item.cleanUrl]
-                    val isRead = savedRead != null
+            items(
+                count = pagingItems.itemCount,
+                key = { index -> "${index}_${pagingItems.peek(index)?.url ?: "topic"}" }
+            ) { index ->
+                val item = pagingItems[index] ?: return@items
+                val savedRead = readStateByUrl[item.cleanUrl]
+                val isRead = savedRead != null
 
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(MaterialTheme.colorScheme.background)
+                        .clickable { onTopicClick(item) }
+                        .padding(horizontal = 16.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
                     Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(MaterialTheme.colorScheme.background)
-                            .clickable { onTopicClick(item) }
-                            .padding(horizontal = 16.dp, vertical = 14.dp),
+                        modifier = Modifier.weight(1f),
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        Row(
-                            modifier = Modifier.weight(1f),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(12.dp)
-                        ) {
-                            if (isDebeMode) {
-                                Surface(
-                                    color = OledPillGreenBg,
-                                    shape = CircleShape,
-                                    modifier = Modifier
-                                        .size(28.dp)
-                                        .border(0.6.dp, EksiNeonGreen.copy(alpha = 0.4f), CircleShape)
-                                ) {
-                                    Box(contentAlignment = Alignment.Center) {
-                                        Text(
-                                            text = "${index + 1}",
-                                            color = EksiNeonGreen,
-                                            fontSize = 11.sp,
-                                            fontWeight = FontWeight.ExtraBold
-                                        )
-                                    }
-                                }
-                            }
-
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = item.title,
-                                    fontSize = 15.sp,
-                                    lineHeight = 21.sp,
-                                    color = if (isRead) OledTopicRead else OledTopicUnread,
-                                    fontWeight = if (isRead) FontWeight.Normal else FontWeight.Medium
-                                )
-                                if (savedRead != null) {
-                                    Spacer(modifier = Modifier.height(3.dp))
+                        if (isDebeMode) {
+                            Surface(
+                                color = OledPillGreenBg,
+                                shape = CircleShape,
+                                modifier = Modifier
+                                    .size(28.dp)
+                                    .border(0.6.dp, EksiNeonGreen.copy(alpha = 0.4f), CircleShape)
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
                                     Text(
-                                        text = "Kalınan: Sayfa ${savedRead.pageNumber} • #${savedRead.entryId}",
-                                        style = MaterialTheme.typography.labelSmall,
+                                        text = "${index + 1}",
+                                        color = EksiNeonGreen,
                                         fontSize = 11.sp,
-                                        color = EksiNeonGreen.copy(alpha = 0.75f)
+                                        fontWeight = FontWeight.ExtraBold
                                     )
                                 }
                             }
                         }
 
-                        val badgeText = when {
-                            isDebeMode && item.favoriteCount > 0 -> "♥ ${item.favoriteCount}"
-                            isDebeMode && item.entryCountText.isNotBlank() -> item.entryCountText
-                            isDebeMode -> "♥ ..."
-                            item.entryCountText.isNotBlank() -> item.entryCountText
-                            item.entryCount > 0 -> item.entryCount.toString()
-                            else -> ""
-                        }
-
-                        if (badgeText.isNotBlank()) {
-                            Spacer(modifier = Modifier.width(12.dp))
-                            Surface(
-                                color = OledPillGreenBg,
-                                shape = RoundedCornerShape(50)
-                            ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = item.title,
+                                fontSize = 15.sp,
+                                lineHeight = 21.sp,
+                                color = if (isRead) OledTopicRead else OledTopicUnread,
+                                fontWeight = if (isRead) FontWeight.Normal else FontWeight.Medium
+                            )
+                            if (savedRead != null) {
+                                Spacer(modifier = Modifier.height(3.dp))
                                 Text(
-                                    text = badgeText,
-                                    color = EksiNeonGreen,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                                    text = "Kalınan: Sayfa ${savedRead.pageNumber} • #${savedRead.entryId}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontSize = 11.sp,
+                                    color = EksiNeonGreen.copy(alpha = 0.75f)
                                 )
                             }
                         }
                     }
 
-                    HorizontalDivider(color = OledHairlineDivider, thickness = 0.5.dp)
-                }
+                    val badgeText = when {
+                        isDebeMode && item.favoriteCount > 0 -> "♥ ${item.favoriteCount}"
+                        isDebeMode && item.entryCountText.isNotBlank() -> item.entryCountText
+                        isDebeMode -> "♥ ..."
+                        item.entryCountText.isNotBlank() -> item.entryCountText
+                        item.entryCount > 0 -> item.entryCount.toString()
+                        else -> ""
+                    }
 
-                if (pagingItems.loadState.append is LoadState.Loading) {
-                    item(key = "append_shimmer_row", contentType = "shimmer_row") {
-                        TopicListSkeletonShimmer(itemCount = 3)
+                    if (badgeText.isNotBlank()) {
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Surface(
+                            color = OledPillGreenBg,
+                            shape = RoundedCornerShape(50)
+                        ) {
+                            Text(
+                                text = badgeText,
+                                color = EksiNeonGreen,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                            )
+                        }
                     }
                 }
+
+                HorizontalDivider(color = OledHairlineDivider, thickness = 0.5.dp)
+            }
+
+            if (pagingItems.loadState.append is LoadState.Loading) {
+                item {
+                    TopicListSkeletonShimmer(itemCount = 3)
+                }
+            }
             }
         }
 
@@ -1598,7 +1558,6 @@ private fun ProfileAndStudioScreenContent(
     val currentTheme by viewModel.themeMode.collectAsStateWithLifecycle()
     val savedGeminiKey by viewModel.geminiApiKey.collectAsStateWithLifecycle()
     val isGeminiKeyConfigured by viewModel.isGeminiKeyConfigured.collectAsStateWithLifecycle()
-    val geminiKeyWarning by viewModel.geminiKeyDecryptionWarning.collectAsStateWithLifecycle()
 
     val selectedModel by viewModel.selectedImageModel.collectAsStateWithLifecycle()
     val selectedSize by viewModel.selectedImageSize.collectAsStateWithLifecycle()
@@ -1757,7 +1716,7 @@ private fun ProfileAndStudioScreenContent(
             }
         }
 
-        // 1.5 Gemini API Anahtarı (Google AI Studio - Android Keystore AES-GCM Şifreli)
+        // 1.5 Gemini API Anahtarı (Google AI Studio - Free Tier & SharedPreferences)
         item {
             Card(
                 shape = RoundedCornerShape(14.dp),
@@ -1803,7 +1762,7 @@ private fun ProfileAndStudioScreenContent(
                             )
                         ) {
                             Text(
-                                text = if (isGeminiKeyConfigured) "Aktif (AES-GCM)" else "Girilmedi",
+                                text = if (isGeminiKeyConfigured) "Aktif" else "Girilmedi",
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = if (isGeminiKeyConfigured) EksiNeonGreen else OledTextSecondary,
@@ -1813,19 +1772,10 @@ private fun ProfileAndStudioScreenContent(
                     }
 
                     Text(
-                        text = "Başlık içi '✨ AI Özet' (gemini-3.5-flash-lite) özelliği için ücretsiz Google AI Studio API anahtarınızı buraya girin. Anahtarınız cihazınızda Android Keystore (AES-GCM) ile şifrelenerek saklanır.",
+                        text = "Başlık içi '✨ AI Özet' (gemini-3.5-flash-lite) özelliği için ücretsiz Google AI Studio API anahtarınızı buraya girin. Anahtarınız yalnızca cihazınızda (SharedPreferences) saklanır.",
                         style = MaterialTheme.typography.bodySmall,
                         color = OledTextSecondary
                     )
-
-                    if (!geminiKeyWarning.isNullOrBlank()) {
-                        Text(
-                            text = geminiKeyWarning.orEmpty(),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.error,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                    }
 
                     OutlinedTextField(
                         value = apiKeyInput,
@@ -1874,7 +1824,7 @@ private fun ProfileAndStudioScreenContent(
                         Button(
                             onClick = {
                                 viewModel.saveGeminiApiKey(apiKeyInput)
-                                apiKeyFeedbackMessage = "Anahtarınız cihazınızda Android Keystore (AES-GCM) ile şifrelenerek saklanır."
+                                apiKeyFeedbackMessage = "Gemini API anahtarı cihazınıza (SharedPreferences) kaydedildi."
                             },
                             enabled = apiKeyInput.isNotBlank(),
                             colors = ButtonDefaults.buttonColors(
@@ -1917,7 +1867,7 @@ private fun ProfileAndStudioScreenContent(
         }
 
         // 2. Okunan Yer Takibi (Room ReadStateDao)
-        item(key = "profile_read_states_header", contentType = "section_header") {
+        item {
             Text(
                 text = "Son Okunan Başlıklar & Kalınan Yer (${readStates.size})",
                 style = MaterialTheme.typography.titleSmall,
@@ -1927,7 +1877,7 @@ private fun ProfileAndStudioScreenContent(
         }
 
         if (readStates.isEmpty()) {
-            item(key = "profile_read_states_empty", contentType = "empty_hint") {
+            item {
                 Text(
                     text = "Henüz okunan başlık kaydı yok. Başlık okurken kaldığınız entryId, pageNumber ve scrollOffset otomatik kaydedilir.",
                     style = MaterialTheme.typography.bodySmall,
@@ -1935,11 +1885,7 @@ private fun ProfileAndStudioScreenContent(
                 )
             }
         } else {
-            itemsIndexed(
-                items = readStates,
-                key = { idx, state -> "${idx}_${state.topicKey}" },
-                contentType = { _, _ -> "read_state_card" }
-            ) { _, state: TopicReadStateEntity ->
+            items(readStates, key = { it.topicKey }) { state: TopicReadStateEntity ->
                 Card(
                     shape = RoundedCornerShape(12.dp),
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
@@ -1985,7 +1931,7 @@ private fun ProfileAndStudioScreenContent(
         }
 
         // 3. Favorilenen / Şükela Entry Arşivi
-        item(key = "profile_bookmarks_header", contentType = "section_header") {
+        item {
             Text(
                 text = "Favorilenen Entry'ler (${bookmarks.size})",
                 style = MaterialTheme.typography.titleSmall,
@@ -1994,11 +1940,7 @@ private fun ProfileAndStudioScreenContent(
             )
         }
 
-        itemsIndexed(
-            items = bookmarks,
-            key = { idx, item -> "${idx}_${item.entryId}" },
-            contentType = { _, _ -> "bookmark_card" }
-        ) { _, item: BookmarkedEntryEntity ->
+        items(bookmarks, key = { it.entryId }) { item: BookmarkedEntryEntity ->
             Card(
                 shape = RoundedCornerShape(12.dp),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
@@ -2176,56 +2118,9 @@ private fun ProfileAndStudioScreenContent(
                             }
                         }
                         is AiImageState.Success -> {
-                            Surface(
-                                color = OledPillGreenBg,
-                                shape = RoundedCornerShape(8.dp)
-                            ) {
-                                Text(
-                                    text = "✨ AI Görsel (${state.modelUsed} • ${state.sizeLabel} • ${state.aspectRatioLabel})",
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = EksiNeonGreen,
-                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
-                                )
-                            }
                             Image(
                                 bitmap = state.bitmap.asImageBitmap(),
                                 contentDescription = "Üretilen Görsel",
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(10.dp)),
-                                contentScale = ContentScale.FillWidth
-                            )
-                        }
-                        is AiImageState.LocalFallbackPreview -> {
-                            Surface(
-                                color = Color(0xFF2B2108),
-                                shape = RoundedCornerShape(8.dp),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .border(0.6.dp, Color(0xFFFFB74D).copy(alpha = 0.7f), RoundedCornerShape(8.dp))
-                                    .testTag("local_fallback_preview_badge")
-                            ) {
-                                Column(
-                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-                                    verticalArrangement = Arrangement.spacedBy(3.dp)
-                                ) {
-                                    Text(
-                                        text = "⚠️ AI değil, yerel önizleme",
-                                        fontSize = 12.sp,
-                                        fontWeight = FontWeight.ExtraBold,
-                                        color = Color(0xFFFFB74D)
-                                    )
-                                    Text(
-                                        text = state.reason,
-                                        fontSize = 11.sp,
-                                        color = OledTextSecondary
-                                    )
-                                }
-                            }
-                            Image(
-                                bitmap = state.bitmap.asImageBitmap(),
-                                contentDescription = "AI değil, yerel önizleme",
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clip(RoundedCornerShape(10.dp)),

@@ -3,14 +3,10 @@ package com.example.network
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Bitmap
-import android.net.ConnectivityManager
-import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
-import android.os.SystemClock
 import android.util.Log
-import android.util.LruCache
 import android.view.View
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
@@ -21,19 +17,12 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import com.example.util.PerfLog
 import dagger.hilt.android.qualifiers.ApplicationContext
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.TimeoutCancellationException
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -48,15 +37,6 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * İçeriğin canlı Ekşi Sözlük sunucusundan mı yoksa Wayback Machine (`web.archive.org`)
- * arşiv yedeğinden mi geldiğini belirtir.
- */
-enum class ContentSource {
-    LIVE,
-    WAYBACK_ARCHIVE
-}
-
-/**
  * JavaScript `fetch()`, `OkHttp` veya `loadUrl` (`document.documentElement.outerHTML`) sonucunu temsil eder.
  */
 data class FetchBridgeResult(
@@ -67,12 +47,6 @@ data class FetchBridgeResult(
     val isCloudflareChallenge: Boolean
 )
 
-private data class CachedHtmlEntry(
-    val html: String,
-    val contentSource: ContentSource,
-    val timestampMs: Long
-)
-
 /**
  * Gerçek zamanlı (Real-Time) Ekşi Sözlük HTML veri çekme köprüsü.
  *
@@ -81,13 +55,14 @@ private data class CachedHtmlEntry(
  *    hızlı doğrudan bağlantıyı ve/veya gerçek Chromium TLS parmak izine sahip arka plan
  *    Singleton `WebView` içinden `fetch(url, { headers: { 'X-Requested-With': 'XMLHttpRequest' }, credentials: 'include' })`
  *    çağrısını çalıştırır.
- * 2. Eşzamanlı aynı URL isteklerini (`inFlightRequests`) tek bir ağ çağrısında birleştirir (deduplication),
- *    başarılı yanıtları 90 saniye TTL önbellekte tutar ve Wayback Machine negatif yanıtlarını 5 dakika
- *    boyunca tekrar denemez.
- * 3. Arka plan `WebView` 5 dakika boyunca kullanılmazsa ana iş parçacığında `destroy()` edilerek
- *    bellekten tamamen temizlenir (hibernation) ve sonraki ihtiyaçta yeniden oluşturulur.
- * 4. Cold start performansını korumak için constructor veya `init` bloğunda `SharedPreferences`,
- *    `CookieManager` veya `WebView` başlatmaz; tamamı ilk erişimde tembel (lazy) olarak yüklenir.
+ * 2. Arka plan `WebView` origin hazırlığında sentetik `data:` URL yerine gerçek Ekşi Sözlük
+ *    sayfasını yükleyerek Cloudflare otomatik JS kontrollerinin ve birinci taraf çerezlerinin
+ *    (`cf_clearance`, `__cf_bm`, `iq`) gerçek zamanlı oluşmasını sağlar.
+ * 3. Mobil User-Agent altında `/basliklar/gundem` veya `/basliklar/bugun` uç noktalarının boş
+ *    dönmesi ihtimaline karşı `/basliklar/m/populer`, `/basliklar/m/bugun` ve `/debe` yedek
+ *    uç noktalarını otomatik dener.
+ * 4. Türkiye'deki erişim engellerine (BTK) karşı `eksisozluk.com`, `eksisozluk111.com` ve
+ *    `eksisozluk1923.com` domainlerini otomatik dener ve çalışan domaini kalıcı olarak hatırlar.
  */
 @Singleton
 class WebViewFetchBridge @Inject constructor(
@@ -119,9 +94,6 @@ class WebViewFetchBridge @Inject constructor(
     private val pendingFetchRequests =
         ConcurrentHashMap<String, CompletableDeferred<FetchBridgeResult>>()
 
-    private val inFlightRequests =
-        ConcurrentHashMap<String, CompletableDeferred<String>>()
-
     @Volatile
     private var pendingPageLoadDeferred: CompletableDeferred<FetchBridgeResult>? = null
 
@@ -135,190 +107,15 @@ class WebViewFetchBridge @Inject constructor(
     private var initializedOriginDomain: String = ""
 
     @Volatile
-    private var activeBaseDomainInternal: String? = null
+    private var activeBaseDomain: String = loadInitialActiveDomain()
 
-    private val domVerifiedState = AtomicBoolean(false)
-    private val domVerifiedInitialized = AtomicBoolean(false)
+    private val domVerifiedState = AtomicBoolean(cookieJar.hasCfClearance(activeBaseDomain))
 
     @Volatile
     private var lastVerifiedHomeHtml: String? = null
 
-    private val _lastContentSource = MutableStateFlow(ContentSource.LIVE)
-    val lastContentSource: StateFlow<ContentSource> = _lastContentSource.asStateFlow()
-
-    private val urlContentSourceLock = Any()
-    private val urlContentSourceMap = object : LruCache<String, ContentSource>(1000) {}
-
-    /**
-     * 90 saniye TTL'li canlı yanıt önbelleği (maksimum ~6 MB karakter verisi).
-     */
-    private val responseTtlCacheLock = Any()
-    private val responseTtlCache = object : LruCache<String, CachedHtmlEntry>(6 * 1024 * 1024) {
-        override fun sizeOf(key: String, value: CachedHtmlEntry): Int {
-            return (value.html.length * 2).coerceAtLeast(1)
-        }
-    }
-
-    /**
-     * 8 MB üst sınırlı (`value.length * 2` bayt) Wayback Machine HTML önbelleği.
-     */
-    private val mirrorCacheLock = Any()
-    private val mirrorHtmlCache = object : LruCache<String, String>(8 * 1024 * 1024) {
-        override fun sizeOf(key: String, value: String): Int {
-            return (value.length * 2).coerceAtLeast(1)
-        }
-    }
-
-    /**
-     * Wayback Machine (`web.archive.org`) üzerinde bulunamayan (`null` dönen) URL'leri
-     * 5 dakika (`WAYBACK_NEGATIVE_TTL_MS`) boyunca tekrar denememek için tutulan negatif önbellek.
-     */
-    private val waybackNegativeLock = Any()
-    private val waybackNegativeCache = LruCache<String, Long>(500)
-
-    @Volatile
-    private var cachedRealGundemHtml: String? = null
-
-    @Volatile
-    private var cachedRealDebeHtml: String? = null
-
-    private val idleWebViewCleanupRunnable = Runnable {
-        if (pendingFetchRequests.isEmpty() && pendingPageLoadDeferred == null) {
-            destroyBackgroundWebViewOnMain()
-        } else {
-            scheduleIdleWebViewHibernation()
-        }
-    }
-
-    private fun scheduleIdleWebViewHibernation() {
-        mainHandler.removeCallbacks(idleWebViewCleanupRunnable)
-        mainHandler.postDelayed(idleWebViewCleanupRunnable, WEBVIEW_IDLE_TIMEOUT_MS)
-    }
-
-    private fun destroyBackgroundWebViewOnMain() {
-        if (Looper.myLooper() == Looper.getMainLooper()) {
-            val view = backgroundWebView
-            backgroundWebView = null
-            initializedOriginDomain = ""
-            if (view != null) {
-                try {
-                    view.stopLoading()
-                    view.loadUrl("about:blank")
-                    view.destroy()
-                } catch (_: Throwable) {
-                }
-            }
-        } else {
-            mainHandler.post { destroyBackgroundWebViewOnMain() }
-        }
-    }
-
-    /**
-     * Sistem `onTrimMemory` bildiriminde tüm bellek içi önbellekleri temizler.
-     */
-    fun clearMemoryCaches() {
-        synchronized(mirrorCacheLock) {
-            mirrorHtmlCache.evictAll()
-        }
-        synchronized(responseTtlCacheLock) {
-            responseTtlCache.evictAll()
-        }
-        synchronized(waybackNegativeLock) {
-            waybackNegativeCache.evictAll()
-        }
-        synchronized(urlContentSourceLock) {
-            urlContentSourceMap.evictAll()
-        }
-        cachedRealGundemHtml = null
-        cachedRealDebeHtml = null
-        lastVerifiedHomeHtml = null
-    }
-
-    private fun normalizeSourceKey(url: String): String {
-        return url.trim()
-            .replace(Regex("([?&])_=\\d+"), "")
-            .trimEnd('?', '&')
-    }
-
-    private fun normalizeRequestCacheKey(rawUrl: String, isAjax: Boolean): String {
-        val canonical = replaceDomain(normalizeSourceKey(rawUrl), PRIMARY_DOMAIN)
-        return "${if (isAjax) "AJAX" else "FULL"}|$canonical"
-    }
-
-    private fun getValidTtlCachedEntry(cacheKey: String): CachedHtmlEntry? {
-        val now = SystemClock.elapsedRealtime()
-        synchronized(responseTtlCacheLock) {
-            val cached = responseTtlCache.get(cacheKey) ?: return null
-            if (now - cached.timestampMs <= RESPONSE_TTL_MS) {
-                return cached
-            }
-            responseTtlCache.remove(cacheKey)
-            return null
-        }
-    }
-
-    private fun putTtlCachedEntry(cacheKey: String, html: String, source: ContentSource) {
-        if (html.isBlank()) return
-        val entry = CachedHtmlEntry(
-            html = html,
-            contentSource = source,
-            timestampMs = SystemClock.elapsedRealtime()
-        )
-        synchronized(responseTtlCacheLock) {
-            responseTtlCache.put(cacheKey, entry)
-        }
-    }
-
-    private fun invalidateTtlCacheForUrl(rawUrl: String) {
-        val ajaxKey = normalizeRequestCacheKey(rawUrl, isAjax = true)
-        val fullKey = normalizeRequestCacheKey(rawUrl, isAjax = false)
-        synchronized(responseTtlCacheLock) {
-            responseTtlCache.remove(ajaxKey)
-            responseTtlCache.remove(fullKey)
-        }
-    }
-
-    private fun recordUrlContentSource(url: String, source: ContentSource) {
-        _lastContentSource.value = source
-        val normalized = normalizeSourceKey(url)
-        synchronized(urlContentSourceLock) {
-            if (normalized.isNotBlank()) {
-                urlContentSourceMap.put(normalized, source)
-            }
-            val pathOnly = try {
-                Uri.parse(url).path.orEmpty()
-            } catch (_: Throwable) {
-                ""
-            }
-            if (pathOnly.isNotBlank()) {
-                urlContentSourceMap.put(pathOnly, source)
-            }
-        }
-    }
-
-    fun isUrlServedFromWayback(url: String): Boolean {
-        val normalized = normalizeSourceKey(url)
-        val pathOnly = try {
-            Uri.parse(url).path.orEmpty()
-        } catch (_: Throwable) {
-            ""
-        }
-        synchronized(urlContentSourceLock) {
-            if (urlContentSourceMap.get(normalized) == ContentSource.WAYBACK_ARCHIVE) {
-                return true
-            }
-            if (pathOnly.isNotBlank() &&
-                urlContentSourceMap.get(pathOnly) == ContentSource.WAYBACK_ARCHIVE
-            ) {
-                return true
-            }
-        }
-        return false
-    }
-
-    private fun resolveActiveBaseDomain(): String {
-        activeBaseDomainInternal?.let { return it }
-        val loaded = try {
+    private fun loadInitialActiveDomain(): String {
+        return try {
             val saved = prefs.getString(KEY_ACTIVE_DOMAIN, null)?.trim()
             if (!saved.isNullOrBlank() && saved.startsWith("https://")) {
                 saved
@@ -328,26 +125,16 @@ class WebViewFetchBridge @Inject constructor(
         } catch (_: Throwable) {
             PRIMARY_DOMAIN
         }
-        activeBaseDomainInternal = loaded
-        return loaded
     }
 
-    fun isDomVerified(): Boolean {
-        val domain = getActiveBaseDomain()
-        if (domVerifiedInitialized.compareAndSet(false, true)) {
-            if (cookieJar.hasCfClearance(domain)) {
-                domVerifiedState.set(true)
-            }
-        }
-        return domVerifiedState.get() || cookieJar.hasCfClearance(domain)
-    }
+    fun isDomVerified(): Boolean = domVerifiedState.get() || cookieJar.hasCfClearance(activeBaseDomain)
 
-    fun getActiveBaseDomain(): String = resolveActiveBaseDomain()
+    fun getActiveBaseDomain(): String = activeBaseDomain
 
     fun setActiveBaseDomain(domain: String) {
         val cleaned = domain.trim().trimEnd('/')
         if (cleaned.startsWith("https://")) {
-            activeBaseDomainInternal = cleaned
+            activeBaseDomain = cleaned
             try {
                 prefs.edit().putString(KEY_ACTIVE_DOMAIN, cleaned).apply()
             } catch (_: Throwable) {
@@ -372,12 +159,10 @@ class WebViewFetchBridge @Inject constructor(
             setActiveBaseDomain("https://$host")
         }
 
-        val currentDomain = getActiveBaseDomain()
-        cookieJar.syncFromWebViewCookieManager(currentDomain)
+        cookieJar.syncFromWebViewCookieManager(activeBaseDomain)
         cookieJar.syncFromWebViewCookieManager(verifiedUrl)
         cookieJar.flush()
         domVerifiedState.set(true)
-        _lastContentSource.value = ContentSource.LIVE
 
         if (!extractedOuterHtml.isNullOrBlank() && hasTopicListElements(extractedOuterHtml)) {
             lastVerifiedHomeHtml = extractedOuterHtml
@@ -385,101 +170,12 @@ class WebViewFetchBridge @Inject constructor(
     }
 
     /**
-     * İstek başlamadan önce `ConnectivityManager` ile aktif internet yeteneğini kontrol eder.
-     */
-    private fun ensureNetworkAvailable() {
-        try {
-            val cm = appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
-                ?: return
-            val activeNetwork = cm.activeNetwork
-                ?: throw IOException("İnternet bağlantısı yok. Lütfen bağlantınızı kontrol edin.")
-            val capabilities = cm.getNetworkCapabilities(activeNetwork)
-            if (capabilities == null ||
-                !capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-            ) {
-                throw IOException("İnternet bağlantısı yok. Lütfen bağlantınızı kontrol edin.")
-            }
-        } catch (e: IOException) {
-            throw e
-        } catch (_: Throwable) {
-            // Güvenlik veya sistem servisi istisnalarında isteği engelleme
-        }
-    }
-
-    /**
      * Verilen URL için gerçek zamanlı (canlı) HTML içeriğini çeker ve `EksiParser` (Jsoup) katmanına döndürür.
-     * - [bypassCache]: `true` ise 90 saniyelik TTL önbelleğini atlar ve taze ağ isteği yapar.
      */
     suspend fun fetchHtml(
         rawUrl: String,
-        isAjax: Boolean = true,
-        bypassCache: Boolean = false
+        isAjax: Boolean = true
     ): String {
-        val startMs = SystemClock.elapsedRealtime()
-        try {
-            val cacheKey = normalizeRequestCacheKey(rawUrl, isAjax)
-
-            if (bypassCache) {
-                invalidateTtlCacheForUrl(rawUrl)
-            } else {
-                getValidTtlCachedEntry(cacheKey)?.let { cached ->
-                    recordUrlContentSource(rawUrl, cached.contentSource)
-                    return cached.html
-                }
-            }
-
-            if (!bypassCache) {
-                inFlightRequests[cacheKey]?.let { existingDeferred ->
-                    return existingDeferred.await()
-                }
-            }
-
-            val createdDeferred = CompletableDeferred<String>()
-            val activeDeferred = if (!bypassCache) {
-                val prior = inFlightRequests.putIfAbsent(cacheKey, createdDeferred)
-                if (prior != null) {
-                    return prior.await()
-                }
-                createdDeferred
-            } else {
-                inFlightRequests[cacheKey] = createdDeferred
-                createdDeferred
-            }
-
-            try {
-                val html = withTimeout(FETCH_HTML_TOTAL_TIMEOUT_MS) {
-                    performNetworkFetchChain(rawUrl = rawUrl, isAjax = isAjax, cacheKey = cacheKey)
-                }
-                activeDeferred.complete(html)
-                return html
-            } catch (timeoutErr: TimeoutCancellationException) {
-                val ioTimeout = IOException(
-                    "Ekşi Sözlük yanıt süresi 30 saniyeyi aştı (zaman aşımı). Lütfen tekrar deneyin.",
-                    timeoutErr
-                )
-                activeDeferred.completeExceptionally(ioTimeout)
-                throw ioTimeout
-            } catch (cancelErr: CancellationException) {
-                activeDeferred.cancel(cancelErr)
-                throw cancelErr
-            } catch (err: Throwable) {
-                activeDeferred.completeExceptionally(err)
-                throw err
-            } finally {
-                inFlightRequests.remove(cacheKey, activeDeferred)
-            }
-        } finally {
-            PerfLog.logDuration("fetchHtml", SystemClock.elapsedRealtime() - startMs)
-        }
-    }
-
-    private suspend fun performNetworkFetchChain(
-        rawUrl: String,
-        isAjax: Boolean,
-        cacheKey: String
-    ): String {
-        ensureNetworkAvailable()
-
         val candidateDomains = buildCandidateDomainsList()
         var lastSawCloudflareChallenge = false
         val hardwareWebViewSupported = WebViewCookieJar.isHardwareWebViewSupported()
@@ -494,8 +190,6 @@ class WebViewFetchBridge @Inject constructor(
         ) {
             lastVerifiedHomeHtml = null
             domVerifiedState.set(true)
-            recordUrlContentSource(rawUrl, ContentSource.LIVE)
-            putTtlCachedEntry(cacheKey, cachedHome, ContentSource.LIVE)
             return cachedHome
         }
 
@@ -520,11 +214,10 @@ class WebViewFetchBridge @Inject constructor(
                         hasRelevantContentForUrl(candidateUrl, directResult.html)
                     ) {
                         onDomainSucceeded(candidateDomain, directResult.finalUrl)
-                        recordUrlContentSource(rawUrl, ContentSource.LIVE)
-                        recordUrlContentSource(candidateUrl, ContentSource.LIVE)
-                        putTtlCachedEntry(cacheKey, directResult.html, ContentSource.LIVE)
                         return directResult.html
                     }
+                    // Eğer ilk uç noktada Cloudflare 403/503 yakalandıysa aynı domainde OkHttp ile
+                    // ikinci varyantı denemek yerine doğrudan Chromium WebView köprüsüne geç
                     if (directResult.isCloudflareChallenge && index == 0) {
                         break
                     }
@@ -533,7 +226,6 @@ class WebViewFetchBridge @Inject constructor(
 
             // AŞAMA 2: Gerçek cihazda Chromium WebView üzerinden JS fetch() ve loadUrl()
             if (hardwareWebViewSupported) {
-                scheduleIdleWebViewHibernation()
                 val originReady = ensureRealOriginLoaded(candidateDomain)
                 if (originReady) {
                     for (candidateUrl in urlsToTryOnDomain) {
@@ -543,7 +235,6 @@ class WebViewFetchBridge @Inject constructor(
                             baseDomain = candidateDomain,
                             isAjax = effectiveAjax
                         )
-                        scheduleIdleWebViewHibernation()
                         if (jsFetchResult != null) {
                             if (jsFetchResult.isCloudflareChallenge) {
                                 lastSawCloudflareChallenge = true
@@ -554,9 +245,6 @@ class WebViewFetchBridge @Inject constructor(
                                 hasRelevantContentForUrl(candidateUrl, jsFetchResult.html)
                             ) {
                                 onDomainSucceeded(candidateDomain, jsFetchResult.finalUrl)
-                                recordUrlContentSource(rawUrl, ContentSource.LIVE)
-                                recordUrlContentSource(candidateUrl, ContentSource.LIVE)
-                                putTtlCachedEntry(cacheKey, jsFetchResult.html, ContentSource.LIVE)
                                 return jsFetchResult.html
                             }
                         }
@@ -571,7 +259,6 @@ class WebViewFetchBridge @Inject constructor(
                         baseDomain = candidateDomain,
                         isAjax = effectiveAjax
                     )
-                    scheduleIdleWebViewHibernation()
                     if (fullPageResult != null) {
                         if (fullPageResult.isCloudflareChallenge) {
                             lastSawCloudflareChallenge = true
@@ -581,9 +268,6 @@ class WebViewFetchBridge @Inject constructor(
                             hasRelevantContentForUrl(candidateUrl, fullPageResult.html)
                         ) {
                             onDomainSucceeded(candidateDomain, fullPageResult.finalUrl)
-                            recordUrlContentSource(rawUrl, ContentSource.LIVE)
-                            recordUrlContentSource(candidateUrl, ContentSource.LIVE)
-                            putTtlCachedEntry(cacheKey, fullPageResult.html, ContentSource.LIVE)
                             return fullPageResult.html
                         }
                     }
@@ -592,12 +276,11 @@ class WebViewFetchBridge @Inject constructor(
         }
 
         // AŞAMA 4: Doğrudan erişim Cloudflare (403/503) veya emülatör kısıtlamasına takıldığında
-        // gerçek Ekşi Sözlük HTML sayfalarını (`2id_` raw identity mirror) çek.
+        // sahte veri üretmek yerine gerçek Ekşi Sözlük HTML sayfalarını (`2id_` raw identity mirror)
+        // doğrudan OkHttp üzerinden çekerek %100 gerçek başlık ve entry'leri döndür.
         val liveMirrorHtml = executeLiveMirrorArchiveFetch(rawUrl)
         if (!liveMirrorHtml.isNullOrBlank()) {
             domVerifiedState.set(true)
-            recordUrlContentSource(rawUrl, ContentSource.WAYBACK_ARCHIVE)
-            putTtlCachedEntry(cacheKey, liveMirrorHtml, ContentSource.WAYBACK_ARCHIVE)
             return liveMirrorHtml
         }
 
@@ -605,7 +288,7 @@ class WebViewFetchBridge @Inject constructor(
             domVerifiedState.set(false)
             cloudflareManager.emitChallenge(
                 CloudflareChallengeEvent(
-                    targetUrl = getActiveBaseDomain(),
+                    targetUrl = activeBaseDomain,
                     statusCode = 403,
                     reason = "Cloudflare güvenlik doğrulaması gerekiyor. Üstteki 'Doğrula' butonuna dokunarak doğrulamayı tamamlayın."
                 )
@@ -666,14 +349,15 @@ class WebViewFetchBridge @Inject constructor(
                 )
             }
         } catch (e: Throwable) {
-            if (e is CancellationException) throw e
-            Log.d(TAG, "executeDirectHttpFetch tamamlanamadı")
+            Log.d(TAG, "executeDirectHttpFetch ($targetUrl) bilgi: ${e.message}")
             null
         }
     }
 
     /**
      * Görünmez WebView'ın gerçek `https://eksisozluk...` origin sayfasında olduğundan emin olur.
+     * Sentetik `loadDataWithBaseURL` yerine gerçek ana sayfayı yükler ki Cloudflare çerezleri
+     * ve same-origin `fetch()` izinleri eksiksiz çalışsın.
      */
     private suspend fun ensureRealOriginLoaded(baseDomain: String): Boolean {
         if (!WebViewCookieJar.isHardwareWebViewSupported()) return false
@@ -797,8 +481,7 @@ class WebViewFetchBridge @Inject constructor(
                 deferred.await()
             }
         } catch (e: Throwable) {
-            if (e is CancellationException) throw e
-            Log.w(TAG, "executeJsFetch uyarısı")
+            Log.w(TAG, "executeJsFetch uyarısı ($targetUrl): ${e.message}")
             null
         } finally {
             pendingFetchRequests.remove(requestId)
@@ -849,6 +532,9 @@ class WebViewFetchBridge @Inject constructor(
                 cookieJar.syncFromWebViewCookieManager(resolvedOrigin)
             }
 
+            // Eğer sol frame AJAX isteği için loadUrl yapıldıysa ancak dönen sayfa tam sayfa olup
+            // içinde .topic-list barındırmıyorsa (örn. mobil ana sayfa yüklendiyse), şimdi gerçek origin
+            // yüklendiği için sayfa içinden JS fetch() ile sol frame verisini çek.
             if (isAjax &&
                 firstResult != null &&
                 !firstResult.isCloudflareChallenge &&
@@ -869,8 +555,7 @@ class WebViewFetchBridge @Inject constructor(
 
             firstResult
         } catch (e: Throwable) {
-            if (e is CancellationException) throw e
-            Log.w(TAG, "loadUrlAndExtractOuterHtml uyarısı")
+            Log.w(TAG, "loadUrlAndExtractOuterHtml uyarısı ($targetUrl): ${e.message}")
             null
         } finally {
             pendingPageLoadDeferred = null
@@ -883,7 +568,6 @@ class WebViewFetchBridge @Inject constructor(
         if (!WebViewCookieJar.isHardwareWebViewSupported()) {
             return null
         }
-        scheduleIdleWebViewHibernation()
         backgroundWebView?.let { return it }
 
         val webView = WebView(appContext).apply {
@@ -902,6 +586,7 @@ class WebViewFetchBridge @Inject constructor(
                 cacheMode = WebSettings.LOAD_DEFAULT
             }
 
+            // Cihazın gerçek Chromium WebView User-Agent değerini koru ve OkHttp ile birebir eşitle
             val nativeWebViewUa = settings.userAgentString?.trim()
             if (!nativeWebViewUa.isNullOrBlank()) {
                 userAgentProvider.updateFromWebView(nativeWebViewUa)
@@ -913,7 +598,8 @@ class WebViewFetchBridge @Inject constructor(
                 val cm = CookieManager.getInstance()
                 cm.setAcceptCookie(true)
                 cm.setAcceptThirdPartyCookies(this, true)
-            } catch (_: Throwable) {
+            } catch (e: Throwable) {
+                Log.w(TAG, "CookieManager yapılandırma uyarısı: ${e.message}")
             }
 
             addJavascriptInterface(JsBridgeCallback(), JS_INTERFACE_NAME)
@@ -970,7 +656,7 @@ class WebViewFetchBridge @Inject constructor(
                     pendingPageLoadDeferred?.complete(
                         FetchBridgeResult(
                             statusCode = 503,
-                            finalUrl = getActiveBaseDomain(),
+                            finalUrl = activeBaseDomain,
                             html = "",
                             hasValidEksiDom = false,
                             isCloudflareChallenge = false
@@ -1046,7 +732,7 @@ class WebViewFetchBridge @Inject constructor(
             deferred.complete(
                 FetchBridgeResult(
                     statusCode = 0,
-                    finalUrl = getActiveBaseDomain(),
+                    finalUrl = activeBaseDomain,
                     html = "",
                     hasValidEksiDom = false,
                     isCloudflareChallenge = false
@@ -1125,6 +811,7 @@ class WebViewFetchBridge @Inject constructor(
         if (html.isBlank()) return false
         if (isLeftFrameOrSearchUrl(url)) {
             if (hasTopicListElements(html)) return true
+            // Olaylar sekmesi giriş yapılmadığında veya boş olduğunda topic-list boş dönebilir
             if (url.contains("/basliklar/olay", ignoreCase = true) && hasEksiDomElements(html)) {
                 return true
             }
@@ -1156,8 +843,7 @@ class WebViewFetchBridge @Inject constructor(
 
     private fun buildCandidateDomainsList(): List<String> {
         val list = mutableListOf<String>()
-        val active = getActiveBaseDomain()
-        list.add(active)
+        list.add(activeBaseDomain)
         for (domain in ALTERNATIVE_DOMAINS) {
             if (!list.contains(domain)) {
                 list.add(domain)
@@ -1166,6 +852,12 @@ class WebViewFetchBridge @Inject constructor(
         return list
     }
 
+    /**
+     * Mobil ve masaüstü Ekşi Sözlük uç noktaları için aday URL listesi üretir.
+     * Örneğin `/basliklar/gundem` boş dönerse `/basliklar/m/populer`,
+     * `/basliklar/bugun` boş dönerse `/basliklar/m/bugun`,
+     * `/basliklar/debe` boş dönerse `/debe` otomatik olarak denenir.
+     */
     private fun buildEndpointVariantsForDomain(rawUrl: String, targetDomain: String): List<String> {
         val primary = replaceDomain(rawUrl, targetDomain)
         val variants = mutableListOf(primary)
@@ -1214,6 +906,10 @@ class WebViewFetchBridge @Inject constructor(
         }
     }
 
+    private fun rewriteToActiveDomain(rawUrl: String): String {
+        return replaceDomain(rawUrl, activeBaseDomain)
+    }
+
     private fun replaceDomain(rawUrl: String, targetDomain: String): String {
         val trimmed = rawUrl.trim()
         if (trimmed.startsWith("/")) {
@@ -1232,36 +928,13 @@ class WebViewFetchBridge @Inject constructor(
         }
     }
 
-    private fun getMirrorCache(key: String): String? {
-        synchronized(mirrorCacheLock) {
-            return mirrorHtmlCache.get(key)
-        }
-    }
+    private val mirrorHtmlCache = ConcurrentHashMap<String, String>()
 
-    private fun putMirrorCache(key: String, html: String) {
-        if (html.isBlank()) return
-        synchronized(mirrorCacheLock) {
-            mirrorHtmlCache.put(key, html)
-        }
-    }
+    @Volatile
+    private var cachedRealGundemHtml: String? = null
 
-    private fun isWaybackNegativelyCached(cleanEksiUrl: String): Boolean {
-        val now = SystemClock.elapsedRealtime()
-        synchronized(waybackNegativeLock) {
-            val failedAt = waybackNegativeCache.get(cleanEksiUrl) ?: return false
-            if (now - failedAt < WAYBACK_NEGATIVE_TTL_MS) {
-                return true
-            }
-            waybackNegativeCache.remove(cleanEksiUrl)
-            return false
-        }
-    }
-
-    private fun markWaybackNegative(cleanEksiUrl: String) {
-        synchronized(waybackNegativeLock) {
-            waybackNegativeCache.put(cleanEksiUrl, SystemClock.elapsedRealtime())
-        }
-    }
+    @Volatile
+    private var cachedRealDebeHtml: String? = null
 
     /**
      * Doğrudan bağlantı Cloudflare 403/503 engeline takıldığında veya bulut emülatöründe
@@ -1336,7 +1009,6 @@ class WebViewFetchBridge @Inject constructor(
                     }
                     val html = fetchRawWaybackHtml(fullTopicUrl)
                     if (!html.isNullOrBlank() && hasEntryListElements(html)) {
-                        recordUrlContentSource(fullTopicUrl, ContentSource.WAYBACK_ARCHIVE)
                         return@withContext html
                     }
                 }
@@ -1358,15 +1030,14 @@ class WebViewFetchBridge @Inject constructor(
                     hasEntryListElements(pagedHtml) &&
                     pagedHtml.contains("data-currentpage=\"$requestedPage\"", ignoreCase = true)
                 ) {
-                    recordUrlContentSource(cleanTopicUrl, ContentSource.WAYBACK_ARCHIVE)
                     return@withContext pagedHtml
                 }
+                // Arşivde 2. sayfa ayrı olarak yoksa 1. sayfanın tekrarlanmasını önlemek için boş döndür
                 return@withContext EMPTY_TOPIC_ENTRIES_HTML
             }
 
             val topicHtml = fetchRawWaybackHtml(cleanTopicUrl)
             if (!topicHtml.isNullOrBlank() && hasEntryListElements(topicHtml)) {
-                recordUrlContentSource(cleanTopicUrl, ContentSource.WAYBACK_ARCHIVE)
                 return@withContext topicHtml
             }
 
@@ -1378,18 +1049,13 @@ class WebViewFetchBridge @Inject constructor(
             }
             null
         } catch (e: Throwable) {
-            if (e is CancellationException) throw e
-            Log.w(TAG, "executeLiveMirrorArchiveFetch uyarısı")
+            Log.w(TAG, "executeLiveMirrorArchiveFetch uyarısı ($rawUrl): ${e.message}")
             null
         }
     }
 
     private fun fetchRawWaybackHtml(cleanEksiUrl: String): String? {
-        getMirrorCache(cleanEksiUrl)?.let { return it }
-        if (isWaybackNegativelyCached(cleanEksiUrl)) {
-            return null
-        }
-
+        mirrorHtmlCache[cleanEksiUrl]?.let { return it }
         val archiveUrl = "https://web.archive.org/web/2id_/$cleanEksiUrl"
         return try {
             val req = Request.Builder()
@@ -1407,15 +1073,14 @@ class WebViewFetchBridge @Inject constructor(
                 if (resp.code in 200..299) {
                     val body = resp.body?.string().orEmpty()
                     if (body.isNotBlank() && hasEksiDomElements(body)) {
-                        putMirrorCache(cleanEksiUrl, body)
+                        mirrorHtmlCache[cleanEksiUrl] = body
                         return body
                     }
                 }
-                markWaybackNegative(cleanEksiUrl)
                 null
             }
-        } catch (_: Throwable) {
-            markWaybackNegative(cleanEksiUrl)
+        } catch (e: Throwable) {
+            Log.d(TAG, "fetchRawWaybackHtml bilgi ($cleanEksiUrl): ${e.message}")
             null
         }
     }
@@ -1492,11 +1157,6 @@ class WebViewFetchBridge @Inject constructor(
             "https://eksisozluk111.com",
             "https://eksisozluk1923.com"
         )
-
-        private const val FETCH_HTML_TOTAL_TIMEOUT_MS = 30_000L
-        private const val RESPONSE_TTL_MS = 90_000L
-        private const val WAYBACK_NEGATIVE_TTL_MS = 5 * 60_000L
-        private const val WEBVIEW_IDLE_TIMEOUT_MS = 5 * 60_000L
 
         private const val JS_FETCH_TIMEOUT_MS = 8_500L
         private const val FULL_PAGE_LOAD_TIMEOUT_MS = 10_000L

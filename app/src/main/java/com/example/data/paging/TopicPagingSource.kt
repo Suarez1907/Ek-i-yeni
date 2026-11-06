@@ -7,9 +7,7 @@ import com.example.data.model.EntryItem
 import com.example.data.model.TopicFilterMode
 import com.example.data.model.TopicPageData
 import com.example.data.remote.EksiParser
-import com.example.network.ContentSource
 import com.example.network.WebViewFetchBridge
-import kotlinx.coroutines.CancellationException
 
 /**
  * Bir başlığın sayfalarını Paging 3 ile çeken, kullanıcı mevcut sayfayı okurken bir sonraki
@@ -92,7 +90,6 @@ class TopicPagingSource(
                 nextKey = nextKey
             )
         } catch (e: Throwable) {
-            if (e is CancellationException) throw e
             LoadResult.Error(e)
         }
     }
@@ -128,9 +125,6 @@ class TopicPagingSource(
             fallbackPage = page,
             usedTrackedFallback = trackedFallbackTriggered,
             usedTodayFallback = todayFallbackTriggered
-        ).copy(
-            isFromWaybackArchive = webViewFetchBridge.isUrlServedFromWayback(targetUrl) ||
-                webViewFetchBridge.lastContentSource.value == ContentSource.WAYBACK_ARCHIVE
         )
 
         // 1. Olaylar (?a=tracked) sekmesinde okunan başlığa tekrar tıklandığında boş gelme hatası kontrolü
@@ -153,9 +147,6 @@ class TopicPagingSource(
                 fallbackPage = page,
                 usedTrackedFallback = true,
                 usedTodayFallback = todayFallbackTriggered
-            ).copy(
-                isFromWaybackArchive = webViewFetchBridge.isUrlServedFromWayback(cleanFallbackUrl) ||
-                    webViewFetchBridge.lastContentSource.value == ContentSource.WAYBACK_ARCHIVE
             )
         }
 
@@ -181,9 +172,6 @@ class TopicPagingSource(
                 fallbackPage = page,
                 usedTrackedFallback = trackedFallbackTriggered,
                 usedTodayFallback = true
-            ).copy(
-                isFromWaybackArchive = webViewFetchBridge.isUrlServedFromWayback(allEntriesFallbackUrl) ||
-                    webViewFetchBridge.lastContentSource.value == ContentSource.WAYBACK_ARCHIVE
             )
         }
 
