@@ -7,7 +7,6 @@ import okhttp3.Cookie
 import okhttp3.CookieJar
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
-import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
@@ -306,44 +305,15 @@ class WebViewCookieJar @Inject constructor() : CookieJar {
         const val CF_CLEARANCE_COOKIE = "cf_clearance"
 
         /**
-         * Gerçek fiziksel Android telefon ve tabletlerde her zaman `true` döner.
-         * Bulut/sanal x86_64 emülatörlerde ise yalnızca `/dev/dri/renderD128` mevcut ve okunabilirse `true`,
-         * aksi halde Chromium `Failed to open rendernode` hatasını önlemek için `false` döner.
+         * Gerçek Android cihazlarda (ARM / x86 fark etmeksizin) her zaman `true` döner.
+         * Yalnızca yerel JVM birim testlerinde (Robolectric) native WebView motoru bulunmadığından `false` döner.
          */
         fun isHardwareWebViewSupported(): Boolean {
             return try {
-                val primaryAbi = Build.SUPPORTED_ABIS?.firstOrNull()?.lowercase().orEmpty()
-                val fingerprint = Build.FINGERPRINT.lowercase()
-                val hardware = Build.HARDWARE.lowercase()
-                val product = Build.PRODUCT.lowercase()
-                val model = Build.MODEL.lowercase()
-                val brand = Build.BRAND.lowercase()
-
-                val isEmulatorOrVirtual = primaryAbi.startsWith("x86") ||
-                    fingerprint.contains("generic") ||
-                    fingerprint.contains("sdk_gphone") ||
-                    fingerprint.contains("emulator") ||
-                    fingerprint.contains("test-keys") ||
-                    fingerprint.contains("robolectric") ||
-                    hardware.contains("ranchu") ||
-                    hardware.contains("goldfish") ||
-                    hardware.contains("cutf") ||
-                    hardware.contains("vsoc") ||
-                    product.contains("sdk") ||
-                    product.contains("emulator") ||
-                    product.contains("aosp") ||
-                    model.contains("sdk") ||
-                    model.contains("emulator") ||
-                    brand.contains("generic")
-
-                if (isEmulatorOrVirtual) {
-                    val renderNode = File("/dev/dri/renderD128")
-                    return renderNode.exists() && renderNode.canRead()
-                }
-
-                true
+                val fingerprint = Build.FINGERPRINT?.lowercase().orEmpty()
+                !fingerprint.contains("robolectric")
             } catch (_: Throwable) {
-                false
+                true
             }
         }
     }

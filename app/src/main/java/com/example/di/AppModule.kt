@@ -32,12 +32,33 @@ object AppModule {
     @Volatile
     private var singletonContainer: EksinServiceContainer? = null
 
+    @Volatile
+    private var viewModelCacheCleaner: (() -> Unit)? = null
+
     fun getContainer(context: Context): EksinServiceContainer {
         return singletonContainer ?: synchronized(this) {
             singletonContainer ?: createContainer(context.applicationContext).also {
                 singletonContainer = it
             }
         }
+    }
+
+    fun registerViewModelCacheCleaner(cleaner: () -> Unit) {
+        viewModelCacheCleaner = cleaner
+    }
+
+    /**
+     * `EksinApplication.onTrimMemory` tarafından çağrılır.
+     * Eğer `singletonContainer` henüz oluşturulmadıysa zorla başlatmaz; yalnızca başlatılmışsa
+     * bellek içi önbellekleri (`EksiRepository`, `WebViewFetchBridge`, `EksinViewModel`) temizler.
+     */
+    fun clearMemoryCachesIfInitialized() {
+        val current = singletonContainer
+        if (current != null) {
+            current.repository.clearMemoryCaches()
+            current.webViewFetchBridge.clearMemoryCaches()
+        }
+        viewModelCacheCleaner?.invoke()
     }
 
     private fun createContainer(appContext: Context): EksinServiceContainer {
@@ -112,6 +133,9 @@ object AppModule {
             } else {
                 HttpLoggingInterceptor.Level.NONE
             }
+            redactHeader("x-goog-api-key")
+            redactHeader("Cookie")
+            redactHeader("Set-Cookie")
         }
 
         return OkHttpClient.Builder()
@@ -136,7 +160,9 @@ object AppModule {
             context,
             AppDatabase::class.java,
             "eksin_oled.db"
-        ).fallbackToDestructiveMigration(dropAllTables = true).build()
+        )
+            .addMigrations(AppDatabase.MIGRATION_1_2)
+            .build()
     }
 
     @Provides

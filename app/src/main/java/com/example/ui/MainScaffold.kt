@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
@@ -164,6 +165,7 @@ fun MainScaffold(
     val hasCfClearance by viewModel.hasCfClearance.collectAsStateWithLifecycle()
     val hasUserSession by viewModel.hasUserSession.collectAsStateWithLifecycle()
     val allReadStates by viewModel.allReadStates.collectAsStateWithLifecycle()
+    val lastSeenEntryCounts by viewModel.lastSeenEntryCounts.collectAsStateWithLifecycle()
     val themeMode by viewModel.themeMode.collectAsStateWithLifecycle()
     val showThemeDialog by viewModel.showThemeDialog.collectAsStateWithLifecycle()
 
@@ -605,6 +607,7 @@ fun MainScaffold(
                                 listState = activeState,
                                 isDebeMode = false,
                                 readStateByUrl = readStateByUrl,
+                                lastSeenEntryCounts = lastSeenEntryCounts,
                                 onTopicClick = { topic ->
                                     viewModel.openTopic(
                                         topic = topic,
@@ -622,6 +625,7 @@ fun MainScaffold(
                                 listState = bugunListState,
                                 isDebeMode = false,
                                 readStateByUrl = readStateByUrl,
+                                lastSeenEntryCounts = lastSeenEntryCounts,
                                 onTopicClick = { topic ->
                                     viewModel.openTopic(
                                         topic = topic,
@@ -639,6 +643,7 @@ fun MainScaffold(
                                 channelPagingItems = channelPagingItems,
                                 listState = kanallarListState,
                                 readStateByUrl = readStateByUrl,
+                                lastSeenEntryCounts = lastSeenEntryCounts,
                                 onTopicClick = { topic ->
                                     viewModel.openTopic(topic = topic, preferTodayMode = true)
                                 },
@@ -650,7 +655,8 @@ fun MainScaffold(
                             DebeAndPeriodicBestsScreenContent(
                                 viewModel = viewModel,
                                 listState = debeListState,
-                                readStateByUrl = readStateByUrl
+                                readStateByUrl = readStateByUrl,
+                                lastSeenEntryCounts = lastSeenEntryCounts
                             )
                         }
 
@@ -660,6 +666,7 @@ fun MainScaffold(
                                 searchPagingItems = searchPagingItems,
                                 searchListState = searchListState,
                                 readStateByUrl = readStateByUrl,
+                                lastSeenEntryCounts = lastSeenEntryCounts,
                                 onTopicClick = { viewModel.openTopic(it, preferTodayMode = false) },
                                 onOpenCloudflare = { viewModel.openCloudflareVerification() }
                             )
@@ -763,6 +770,7 @@ private fun ChannelsScreenContent(
     channelPagingItems: LazyPagingItems<TopicItem>,
     listState: LazyListState,
     readStateByUrl: Map<String, TopicReadStateEntity>,
+    lastSeenEntryCounts: Map<String, Int>,
     onTopicClick: (TopicItem) -> Unit,
     onOpenCloudflare: () -> Unit
 ) {
@@ -857,6 +865,7 @@ private fun ChannelsScreenContent(
             listState = listState,
             isDebeMode = false,
             readStateByUrl = readStateByUrl,
+            lastSeenEntryCounts = lastSeenEntryCounts,
             onTopicClick = onTopicClick,
             onOpenCloudflare = onOpenCloudflare,
             emptyMessage = "${selectedChannel.hashtag} kanalında güncel başlık bulunamadı."
@@ -874,7 +883,8 @@ private fun ChannelsScreenContent(
 private fun DebeAndPeriodicBestsScreenContent(
     viewModel: EksinViewModel,
     listState: LazyListState,
-    readStateByUrl: Map<String, TopicReadStateEntity>
+    readStateByUrl: Map<String, TopicReadStateEntity>,
+    lastSeenEntryCounts: Map<String, Int>
 ) {
     val activeCategory by viewModel.debeAndStatsCategory.collectAsStateWithLifecycle()
     val activePeriod by viewModel.periodicTimeRange.collectAsStateWithLifecycle()
@@ -1087,8 +1097,16 @@ private fun DebeAndPeriodicBestsScreenContent(
                             items = state.items,
                             key = { idx, item -> "${idx}_${item.url}" }
                         ) { index, item ->
-                            val cleanUrl = item.url.substringBefore('?')
-                            val isRead = readStateByUrl.containsKey(cleanUrl)
+                            val cleanUrl = item.url.substringBefore('?').trim().lowercase()
+                            val titleKey = "title:${item.title.trim().lowercase()}"
+                            val lastSeenCount = lastSeenEntryCounts[cleanUrl]
+                                ?: lastSeenEntryCounts[titleKey]
+                                ?: if (readStateByUrl.containsKey(item.url.substringBefore('?'))) 0 else null
+                            val currentCount = item.badgeText.filter { it.isDigit() }.toIntOrNull() ?: 0
+                            val hasNewEntriesAfterRead = lastSeenCount != null &&
+                                lastSeenCount > 0 &&
+                                currentCount > lastSeenCount
+                            val isRead = lastSeenCount != null && !hasNewEntriesAfterRead
 
                             Row(
                                 modifier = Modifier
@@ -1215,18 +1233,23 @@ private fun rememberDirectionalHeaderVisibility(listState: LazyListState): Boole
     }.value
 }
 
+/**
+ * 3. ÖZELLİK: ANLIK ARAMA ÖNERİLERİ (AUTOCOMPLETE - BAŞLIKLAR VE @YAZARLAR) + SAYFALAMALI ARAMA.
+ */
 @Composable
 private fun SearchScreenContent(
     viewModel: EksinViewModel,
     searchPagingItems: LazyPagingItems<TopicItem>,
     searchListState: LazyListState,
     readStateByUrl: Map<String, TopicReadStateEntity>,
+    lastSeenEntryCounts: Map<String, Int>,
     onTopicClick: (TopicItem) -> Unit,
     onOpenCloudflare: () -> Unit
 ) {
     val query by viewModel.searchQuery.collectAsStateWithLifecycle()
     val sortOrder by viewModel.searchSortOrder.collectAsStateWithLifecycle()
     val submittedFilter by viewModel.submittedSearchFilter.collectAsStateWithLifecycle()
+    val autocompleteState by viewModel.autocompleteState.collectAsStateWithLifecycle()
     val focusManager = LocalFocusManager.current
 
     Column(
@@ -1243,7 +1266,7 @@ private fun SearchScreenContent(
                 .testTag("search_input_field"),
             placeholder = {
                 Text(
-                    text = "Başlık ara (p=1, 2, 3... kesintisiz sayfalama)",
+                    text = "Başlık veya @yazar ara (anlık öneri + p=1,2..)",
                     color = OledTextMuted
                 )
             },
@@ -1255,13 +1278,24 @@ private fun SearchScreenContent(
                 )
             },
             trailingIcon = {
-                if (query.isNotEmpty()) {
-                    IconButton(onClick = { viewModel.updateSearchQuery("") }) {
-                        Icon(
-                            imageVector = Icons.Default.Clear,
-                            contentDescription = "Temizle",
-                            tint = OledTextSecondary
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (autocompleteState.isLoading) {
+                        CircularProgressIndicator(
+                            color = EksiNeonGreen,
+                            strokeWidth = 2.dp,
+                            modifier = Modifier
+                                .size(18.dp)
+                                .padding(end = 4.dp)
                         )
+                    }
+                    if (query.isNotEmpty()) {
+                        IconButton(onClick = { viewModel.updateSearchQuery("") }) {
+                            Icon(
+                                imageVector = Icons.Default.Clear,
+                                contentDescription = "Temizle",
+                                tint = OledTextSecondary
+                            )
+                        }
                     }
                 }
             },
@@ -1283,6 +1317,174 @@ private fun SearchScreenContent(
             ),
             shape = RoundedCornerShape(14.dp)
         )
+
+        // Anlık Arama Önerileri (Autocomplete) Açılır Kartı / Listesi:
+        // Kullanıcı en az 2 harf yazdığında ve öneri varsa arama kutusunun hemen altında belirir.
+        AnimatedVisibility(
+            visible = query.trim().length >= 2 && autocompleteState.hasAnySuggestion
+        ) {
+            Card(
+                shape = RoundedCornerShape(14.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 4.dp)
+                    .border(
+                        width = 0.8.dp,
+                        color = EksiNeonGreen.copy(alpha = 0.45f),
+                        shape = RoundedCornerShape(14.dp)
+                    )
+                    .testTag("autocomplete_suggestions_card")
+            ) {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(OledPillGreenBg)
+                            .padding(horizontal = 14.dp, vertical = 7.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "Anlık Öneriler (\"${autocompleteState.query}\")",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = EksiNeonGreen
+                        )
+                        Text(
+                            text = "Kapat ✕",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = OledTextSecondary,
+                            modifier = Modifier.clickable { viewModel.dismissAutocomplete() }
+                        )
+                    }
+
+                    HorizontalDivider(color = OledHairlineDivider, thickness = 0.5.dp)
+
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 300.dp)
+                            .testTag("autocomplete_suggestions_list")
+                    ) {
+                        // 1) Başlık Önerileri (Titles)
+                        itemsIndexed(
+                            items = autocompleteState.titleSuggestions,
+                            key = { idx, item -> "ac_title_${idx}_${item.title}" }
+                        ) { _, suggestion ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        focusManager.clearFocus()
+                                        viewModel.dismissAutocomplete()
+                                        onTopicClick(suggestion)
+                                    }
+                                    .padding(horizontal = 14.dp, vertical = 11.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Row(
+                                    modifier = Modifier.weight(1f),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Search,
+                                        contentDescription = null,
+                                        tint = EksiNeonGreen,
+                                        modifier = Modifier.size(17.dp)
+                                    )
+                                    Text(
+                                        text = suggestion.title,
+                                        fontSize = 14.sp,
+                                        color = OledTextPrimary,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                }
+
+                                if (suggestion.entryCountText.isNotBlank() || suggestion.entryCount > 0) {
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Surface(
+                                        color = OledPillGreenBg,
+                                        shape = RoundedCornerShape(50)
+                                    ) {
+                                        Text(
+                                            text = suggestion.entryCountText.ifBlank {
+                                                suggestion.entryCount.toString()
+                                            },
+                                            color = EksiNeonGreen,
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                }
+                            }
+                            HorizontalDivider(color = OledHairlineDivider, thickness = 0.5.dp)
+                        }
+
+                        // 2) Yazar Önerileri (Nicks)
+                        itemsIndexed(
+                            items = autocompleteState.nickSuggestions,
+                            key = { idx, nick -> "ac_nick_${idx}_$nick" }
+                        ) { _, nick ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        focusManager.clearFocus()
+                                        viewModel.openAuthorSuggestion(nick)
+                                    }
+                                    .padding(horizontal = 14.dp, vertical = 11.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Row(
+                                    modifier = Modifier.weight(1f),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Person,
+                                        contentDescription = null,
+                                        tint = EksiNeonGreen,
+                                        modifier = Modifier.size(17.dp)
+                                    )
+                                    Text(
+                                        text = "@$nick",
+                                        fontSize = 14.sp,
+                                        color = EksiNeonGreen,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+
+                                Surface(
+                                    color = OledPillGreenBg,
+                                    shape = RoundedCornerShape(50),
+                                    modifier = Modifier.border(
+                                        width = 0.6.dp,
+                                        color = EksiNeonGreen.copy(alpha = 0.45f),
+                                        shape = RoundedCornerShape(50)
+                                    )
+                                ) {
+                                    Text(
+                                        text = "@yazar",
+                                        color = EksiNeonGreen,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                                    )
+                                }
+                            }
+                            HorizontalDivider(color = OledHairlineDivider, thickness = 0.5.dp)
+                        }
+                    }
+                }
+            }
+        }
 
         Row(
             modifier = Modifier
@@ -1317,7 +1519,7 @@ private fun SearchScreenContent(
                 contentAlignment = Alignment.Center
             ) {
                 Text(
-                    text = "Aramak istediğiniz başlığı yazıp klavyeden Ara tuşuna basın.",
+                    text = "Aramak istediğiniz başlığı veya @yazarı yazın; anlık önerilerden seçin ya da klavyeden Ara tuşuna basın.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = OledTextSecondary
                 )
@@ -1328,6 +1530,7 @@ private fun SearchScreenContent(
                 listState = searchListState,
                 isDebeMode = false,
                 readStateByUrl = readStateByUrl,
+                lastSeenEntryCounts = lastSeenEntryCounts,
                 onTopicClick = onTopicClick,
                 onOpenCloudflare = onOpenCloudflare,
                 emptyMessage = "\"${submittedFilter.keywords}\" için başlık sonucu bulunamadı."
@@ -1336,12 +1539,20 @@ private fun SearchScreenContent(
     }
 }
 
+/**
+ * 1. ÖZELLİK: AKILLI OKUNDU TAKİBİ (OKUNAN BAŞLIĞA YENİ ENTRY GİRİLDİĞİNDE SOLUKLUĞUN KALKMASI).
+ * - Hiç tıklanmadıysa (`lastSeenCount == null`): Parlak (Okunmamış - `OledTopicUnread`)
+ * - Daha önce tıklandıysa ve `güncelEntrySayısı <= lastSeenEntryCount` ise: Soluk (Okundu - `OledTopicRead`)
+ * - Daha önce tıklandıysa AMA `güncelEntrySayısı > lastSeenEntryCount` ise (yeni entry girildiyse):
+ *   Solukluk kalkar ve yeniden Parlak (Okunmamış - `OledTopicUnread`) gösterilir!
+ */
 @Composable
 private fun TopicPagingList(
     pagingItems: LazyPagingItems<TopicItem>,
     listState: LazyListState,
     isDebeMode: Boolean,
     readStateByUrl: Map<String, TopicReadStateEntity>,
+    lastSeenEntryCounts: Map<String, Int>,
     onTopicClick: (TopicItem) -> Unit,
     onOpenCloudflare: () -> Unit,
     emptyMessage: String
@@ -1377,101 +1588,126 @@ private fun TopicPagingList(
                     .testTag("topic_paging_list"),
                 contentPadding = PaddingValues(vertical = 2.dp)
             ) {
-            items(
-                count = pagingItems.itemCount,
-                key = { index -> "${index}_${pagingItems.peek(index)?.url ?: "topic"}" }
-            ) { index ->
-                val item = pagingItems[index] ?: return@items
-                val savedRead = readStateByUrl[item.cleanUrl]
-                val isRead = savedRead != null
+                items(
+                    count = pagingItems.itemCount,
+                    key = { index -> "${index}_${pagingItems.peek(index)?.url ?: "topic"}" }
+                ) { index ->
+                    val item = pagingItems[index] ?: return@items
+                    val savedRead = readStateByUrl[item.cleanUrl]
+                    val normalizedUrlKey = item.cleanUrl.trim().lowercase()
+                    val titleKey = "title:${item.title.trim().lowercase()}"
 
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(MaterialTheme.colorScheme.background)
-                        .clickable { onTopicClick(item) }
-                        .padding(horizontal = 16.dp, vertical = 14.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
+                    val lastSeenCount: Int? = lastSeenEntryCounts[normalizedUrlKey]
+                        ?: lastSeenEntryCounts[titleKey]
+                        ?: if (savedRead != null) 0 else null
+
+                    val hasNewEntriesAfterRead = lastSeenCount != null &&
+                        lastSeenCount > 0 &&
+                        item.entryCount > lastSeenCount
+
+                    val isRead = lastSeenCount != null && !hasNewEntriesAfterRead
+
                     Row(
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(MaterialTheme.colorScheme.background)
+                            .clickable { onTopicClick(item) }
+                            .padding(horizontal = 16.dp, vertical = 14.dp),
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        if (isDebeMode) {
-                            Surface(
-                                color = OledPillGreenBg,
-                                shape = CircleShape,
-                                modifier = Modifier
-                                    .size(28.dp)
-                                    .border(0.6.dp, EksiNeonGreen.copy(alpha = 0.4f), CircleShape)
-                            ) {
-                                Box(contentAlignment = Alignment.Center) {
+                        Row(
+                            modifier = Modifier.weight(1f),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            if (isDebeMode) {
+                                Surface(
+                                    color = OledPillGreenBg,
+                                    shape = CircleShape,
+                                    modifier = Modifier
+                                        .size(28.dp)
+                                        .border(0.6.dp, EksiNeonGreen.copy(alpha = 0.4f), CircleShape)
+                                ) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        Text(
+                                            text = "${index + 1}",
+                                            color = EksiNeonGreen,
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.ExtraBold
+                                        )
+                                    }
+                                }
+                            }
+
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = item.title,
+                                    fontSize = 15.sp,
+                                    lineHeight = 21.sp,
+                                    color = if (isRead) OledTopicRead else OledTopicUnread,
+                                    fontWeight = when {
+                                        hasNewEntriesAfterRead -> FontWeight.SemiBold
+                                        isRead -> FontWeight.Normal
+                                        else -> FontWeight.Medium
+                                    }
+                                )
+                                if (hasNewEntriesAfterRead && lastSeenCount != null) {
+                                    val addedCount = (item.entryCount - lastSeenCount).coerceAtLeast(1)
+                                    Spacer(modifier = Modifier.height(3.dp))
                                     Text(
-                                        text = "${index + 1}",
-                                        color = EksiNeonGreen,
+                                        text = "+$addedCount yeni entry" + (savedRead?.let { " • Kalınan: Sayfa ${it.pageNumber}" } ?: ""),
+                                        style = MaterialTheme.typography.labelSmall,
                                         fontSize = 11.sp,
-                                        fontWeight = FontWeight.ExtraBold
+                                        fontWeight = FontWeight.Bold,
+                                        color = EksiNeonGreen
+                                    )
+                                } else if (savedRead != null) {
+                                    Spacer(modifier = Modifier.height(3.dp))
+                                    Text(
+                                        text = "Kalınan: Sayfa ${savedRead.pageNumber} • #${savedRead.entryId}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontSize = 11.sp,
+                                        color = EksiNeonGreen.copy(alpha = 0.75f)
                                     )
                                 }
                             }
                         }
 
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = item.title,
-                                fontSize = 15.sp,
-                                lineHeight = 21.sp,
-                                color = if (isRead) OledTopicRead else OledTopicUnread,
-                                fontWeight = if (isRead) FontWeight.Normal else FontWeight.Medium
-                            )
-                            if (savedRead != null) {
-                                Spacer(modifier = Modifier.height(3.dp))
+                        val badgeText = when {
+                            isDebeMode && item.favoriteCount > 0 -> "♥ ${item.favoriteCount}"
+                            isDebeMode && item.entryCountText.isNotBlank() -> item.entryCountText
+                            isDebeMode -> "♥ ..."
+                            item.entryCountText.isNotBlank() -> item.entryCountText
+                            item.entryCount > 0 -> item.entryCount.toString()
+                            else -> ""
+                        }
+
+                        if (badgeText.isNotBlank()) {
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Surface(
+                                color = if (hasNewEntriesAfterRead) EksiNeonGreen else OledPillGreenBg,
+                                shape = RoundedCornerShape(50)
+                            ) {
                                 Text(
-                                    text = "Kalınan: Sayfa ${savedRead.pageNumber} • #${savedRead.entryId}",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    fontSize = 11.sp,
-                                    color = EksiNeonGreen.copy(alpha = 0.75f)
+                                    text = badgeText,
+                                    color = if (hasNewEntriesAfterRead) OledOnAccentColor else EksiNeonGreen,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
                                 )
                             }
                         }
                     }
 
-                    val badgeText = when {
-                        isDebeMode && item.favoriteCount > 0 -> "♥ ${item.favoriteCount}"
-                        isDebeMode && item.entryCountText.isNotBlank() -> item.entryCountText
-                        isDebeMode -> "♥ ..."
-                        item.entryCountText.isNotBlank() -> item.entryCountText
-                        item.entryCount > 0 -> item.entryCount.toString()
-                        else -> ""
-                    }
-
-                    if (badgeText.isNotBlank()) {
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Surface(
-                            color = OledPillGreenBg,
-                            shape = RoundedCornerShape(50)
-                        ) {
-                            Text(
-                                text = badgeText,
-                                color = EksiNeonGreen,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
-                            )
-                        }
-                    }
+                    HorizontalDivider(color = OledHairlineDivider, thickness = 0.5.dp)
                 }
 
-                HorizontalDivider(color = OledHairlineDivider, thickness = 0.5.dp)
-            }
-
-            if (pagingItems.loadState.append is LoadState.Loading) {
-                item {
-                    TopicListSkeletonShimmer(itemCount = 3)
+                if (pagingItems.loadState.append is LoadState.Loading) {
+                    item {
+                        TopicListSkeletonShimmer(itemCount = 3)
+                    }
                 }
-            }
             }
         }
 

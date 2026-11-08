@@ -52,7 +52,7 @@ data class EntryItem(
 
 /**
  * Başlık içi filtreleme modları:
- * - [TODAY_POPULAR]: Sadece Bugün (son 24 saatte yazılan entry'ler -> `?a=popular`, boşsa tümüne fallback)
+ * - [TODAY_POPULAR]: Sadece Bugün (son 24 saatte yazılan entry'ler -> `?a=popular` veya `?day=YYYY-MM-DD`, boşsa tümüne fallback)
  * - [ALL]: Tüm entry'ler (1. sayfadan itibaren tüm başlık -> `?p=1`)
  * - [SUKELA_ALL]: Şükela (Tümü) -> `?a=nice`
  * - [SUKELA_TODAY]: Şükela (Bugün) -> `?a=dailynice`
@@ -242,19 +242,38 @@ data class SearchFilter(
 )
 
 /**
+ * Arama kutusuna yazmaya başlandığında (en az 2 karakter) anlık gösterilen
+ * canlı başlık (`Titles`) ve yazar (`@Nicks`) önerileri durumu.
+ */
+data class AutocompleteSuggestionState(
+    val query: String = "",
+    val isLoading: Boolean = false,
+    val titleSuggestions: List<TopicItem> = emptyList(),
+    val nickSuggestions: List<String> = emptyList()
+) {
+    val hasAnySuggestion: Boolean
+        get() = titleSuggestions.isNotEmpty() || nickSuggestions.isNotEmpty()
+}
+
+/**
  * Bir başlık sayfasının Jsoup ile ayrıştırılmış tam sonucu.
+ * - [cleanTopicUrl]: Sorgu parametrelerinden arındırılmış kanonik başlık URL'si (`https://eksisozluk.com/baslik--123`)
+ * - [activeFilterQueryUrl]: Aktif filtre parametresini (`?a=popular`, `?day=YYYY-MM-DD`, `?a=dailynice`, `?a=nice`)
+ *   koruyan URL; böylece 2..N sayfalarına geçildiğinde aktif filtre asla kaybolmaz.
  */
 data class TopicPageData(
     val topicId: String,
     val topicTitle: String,
     val topicSlug: String,
     val cleanTopicUrl: String,
+    val activeFilterQueryUrl: String = cleanTopicUrl,
     val currentPage: Int,
     val pageCount: Int,
     val entries: List<EntryItem>,
     val usedTrackedFallback: Boolean = false,
     val usedTodayFallback: Boolean = false,
-    val isSingleEntryView: Boolean = false
+    val isSingleEntryView: Boolean = false,
+    val isFromWaybackArchive: Boolean = false
 )
 
 /**

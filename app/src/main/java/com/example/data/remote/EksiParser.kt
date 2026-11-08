@@ -20,6 +20,7 @@ import com.example.data.model.TopicPageData
 import com.example.network.WebViewCookieJar
 import com.example.ui.theme.ActiveThemeState
 import com.example.ui.theme.AppThemeMode
+import org.json.JSONObject
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
@@ -40,19 +41,19 @@ data class EntryDetailMetadata(
 )
 
 /**
- * Ekşi Sözlük gerçek zamanlı HTML yanıtlarını (Masaüstü ve Mobil DOM) Jsoup ile ayrıştıran sınıf.
+ * Ekşi Sözlük gerçek zamanlı HTML ve JSON yanıtlarını (Masaüstü ve Mobil DOM) Jsoup ve JSONObject ile ayrıştıran sınıf.
  *
  * Özellikler:
  * 1. Sol frame (`ul.topic-list.partial li`, `ul.topic-list li`) ve Kanallar (`/basliklar/kanal/{slug}?p={page}`)
  *    içerisinden reklamları filtreleyerek başlık adı, URL, slug ve entry sayısını (`small`) ayrıştırır.
  * 2. "Olaylar" sekmesinde okunan başlığa tekrar tıklandığında `?a=tracked` yüzünden boş dönme hatasını
- *    ve "Sadece Bugün" (`?a=popular`) modunda bugün hiç entry girilmemişse tüm entry'lere fallback yapılmasını yönetir.
+ *    ve "Sadece Bugün" (`?a=popular` / `?day=`) modunda 2..N sayfalarında filtrenin korunmasını yönetir.
  * 3. Başlık sayfasındaki (`#entry-item-list li`) tüm entry'leri, yazar, tarih, düzenleme tarihi (`editDate`),
  *    fav sayısı ve toplam sayfa sayısını (`div.pager` -> `data-pagecount`) ayrıştırır.
  * 4. DEBE (`/debe` - dünün en beğenilen 50 entry'si) ve Dönemsel Enler (`/istatistik/...`) listelerini ayrıştırır.
  * 5. Entry içindeki `(bkz: ...)`, gizli bkz `*` ve harici URL'leri aktif temaya duyarlı Compose [AnnotatedString] yapısına dönüştürür.
- * 6. Arama sonuçlarını (`/basliklar/ara?SearchForm.Keywords=...&SearchForm.SortOrder=Count&p=N`) sayfalama hatası
- *    olmadan oluşturur ve ayrıştırır.
+ * 6. Arama sonuçlarını (`/basliklar/ara?SearchForm.Keywords=...&SearchForm.SortOrder=Count&p=N`) ve
+ *    anlık arama önerilerini (`/autocomplete/query?q=...` -> `{"Titles":[...],"Nicks":[...]}`) ayrıştırır.
  */
 @Singleton
 class EksiParser @Inject constructor() {
@@ -407,16 +408,6 @@ class EksiParser @Inject constructor() {
      * Dönemsel Enler (`/istatistik/gecen-haftanin-en-begenilen-entryleri`,
      * `/istatistik/gecen-ayin-en-begenilen-entryleri`, vb.) tam sayfa (`isAjax = false`)
      * istatistik HTML yanıtını ayrıştırır.
-     *
-     * ÖNEMLİ KORUMALAR:
-     * 1. Eğer Ekşi Sözlük `/istatistik/...` isteğini ana sayfaya (`/`) veya giriş sayfasına (`/giris`)
-     *    yönlendirmişse (sayfada `#entry-item-list` veya `div.topic-item` rastgele 10 yıllık entry akışı varsa),
-     *    ana sayfadaki rastgele eski entry'leri istatistik sanmamak için derhal `emptyList()` döner.
-     * 2. Asla sentetik entry ID üretmez veya `?a=nice` (tüm zamanlar) parametresi eklemez.
-     * 3. `isEntriesMode == true` iken sadece gerçek `<a href="/entry/{gerçek_id}">` bağlantılarını ve
-     *    karşısındaki başlık adlarını birebir eşleştirir.
-     * 4. `isEntriesMode == false` ("En Popüler Konular") iken sadece gerçek başlık URL'lerini (`topic.url`)
-     *    `isDirectEntry = false`, `entryId = null` olarak bağlar.
      */
     fun parsePeriodicStatsList(
         html: String,
@@ -426,13 +417,10 @@ class EksiParser @Inject constructor() {
         if (html.isBlank()) return emptyList()
         val fullDoc: Document = Jsoup.parse(html, BASE_URL)
 
-        // Giriş sayfasına (/giris) yönlendirilmişse boş dön
         if (fullDoc.selectFirst("form#login-form-container, input#Password, #login-form") != null) {
             return emptyList()
         }
 
-        // Ana sayfaya (/) veya normal bir başlık sayfasına (#entry-item-list / div.topic-item) yönlendirilmişse
-        // 10 yıllık rastgele ana sayfa entry'lerini Dönemsel Enler listesine karıştırmamak için boş dön!
         if (fullDoc.select("#entry-item-list li[data-id], div.topic-item").isNotEmpty()) {
             return emptyList()
         }
@@ -457,7 +445,6 @@ class EksiParser @Inject constructor() {
             if (row.tagName().equals("tr", ignoreCase = true) && row.select("th").isNotEmpty()) continue
 
             if (isEntriesMode) {
-                // "En Beğenilen Entry'ler": Sadece gerçek `/entry/{digits}` linki olan satırları kabul et
                 val entryAnchor = row.selectFirst("a[href*='/entry/']") ?: continue
                 val rawEntryHref = entryAnchor.attr("href").trim()
                 val normalizedEntryUrl = normalizeUrl(rawEntryHref).substringBefore('?')
@@ -466,7 +453,6 @@ class EksiParser @Inject constructor() {
                     .filter { it.isDigit() }
                 if (realEntryId.isBlank()) continue
 
-                // Satırda ayrıca başlık linki varsa veya caption varsa başlık adını al
                 val topicAnchor = row.select("a[href]").firstOrNull { a ->
                     val h = a.attr("href").trim()
                     h.isNotBlank() &&
@@ -520,7 +506,6 @@ class EksiParser @Inject constructor() {
                 )
                 rank++
             } else {
-                // "En Popüler Konular": Sadece gerçek başlık URL'si olan satırları kabul et (`entryId = null`, `isDirectEntry = false`)
                 val topicAnchor = row.select("a[href]").firstOrNull { a ->
                     val h = a.attr("href").trim()
                     h.isNotBlank() &&
@@ -627,42 +612,66 @@ class EksiParser @Inject constructor() {
         return normalized.substringBefore('?')
     }
 
+    /**
+     * URL içinde `?day=YYYY-MM-DD` parametresi varsa değerini döndürür.
+     */
+    fun extractDayParameter(url: String): String? {
+        return runCatching {
+            Uri.parse(normalizeUrl(url)).getQueryParameter("day")?.takeIf { it.isNotBlank() }
+        }.getOrNull()
+    }
+
+    /**
+     * Başlık içi sayfalama URL'sini oluşturur:
+     * - Seçili olan filtre modunu (`Bugün`, `Tümü`, `Şükela Bugün`, `Şükela Tümü`, `Başlıkta Ara`)
+     *   ve varsa `day=YYYY-MM-DD` parametresini 2..N sayfalarında da KESİNLİKLE KORUR.
+     * - `Uri.parse(cleanPathUrl).buildUpon()` kullanarak `?a=popular&p=2` veya `?day=YYYY-MM-DD&p=2`
+     *   üretir; asla `?a=popular?p=2` gibi çift soru işareti hatası oluşturmaz.
+     */
     fun buildTopicPageUrl(
         baseOrRawUrl: String,
         page: Int,
         filterMode: TopicFilterMode = TopicFilterMode.ALL,
         searchKeywordInTopic: String = "",
-        forceStripTracked: Boolean = false
+        forceStripTracked: Boolean = false,
+        forceAllEntriesFallback: Boolean = false
     ): String {
         val normalized = normalizeUrl(baseOrRawUrl)
         val cleanPathUrl = normalized.substringBefore('?')
+        val safePage = page.coerceAtLeast(1)
 
         // Eğer DEBE veya doğrudan tekil `/entry/{id}` linkine tıklandıysa ve ilk sayfadaysak:
-        if (page == 1 && isDirectSingleEntryUrl(cleanPathUrl) && !forceStripTracked) {
+        if (safePage == 1 && isDirectSingleEntryUrl(cleanPathUrl) && !forceStripTracked && !forceAllEntriesFallback) {
             return cleanPathUrl
         }
 
         // Olaylar sekmesinden gelen `?a=tracked` URL'si 1. sayfada korunur (boş dönerse fallback yapılır)
-        if (page == 1 &&
+        if (safePage == 1 &&
             (filterMode == TopicFilterMode.ALL || filterMode == TopicFilterMode.TODAY_POPULAR) &&
             searchKeywordInTopic.isBlank() &&
             !forceStripTracked &&
+            !forceAllEntriesFallback &&
             containsTrackedParam(normalized)
         ) {
             return normalized
         }
 
+        val existingDayParam = extractDayParameter(normalized)
         val uriBuilder = Uri.parse(cleanPathUrl).buildUpon()
 
         when (filterMode) {
             TopicFilterMode.TODAY_POPULAR -> {
-                if (!forceStripTracked) {
-                    uriBuilder.appendQueryParameter("a", "popular")
+                if (!forceAllEntriesFallback) {
+                    if (!existingDayParam.isNullOrBlank()) {
+                        uriBuilder.appendQueryParameter("day", existingDayParam)
+                    } else {
+                        uriBuilder.appendQueryParameter("a", "popular")
+                    }
                 }
             }
             TopicFilterMode.ALL,
             TopicFilterMode.LINKS_ONLY -> {
-                // Ekstra `a=` parametresi yok (1. sayfadan itibaren tüm entry'ler)
+                // "Tümü" veya "Tümünü Göster" seçildiğinde `a=` ve `day=` filtre parametreleri eklenmez
             }
             TopicFilterMode.SUKELA_ALL -> {
                 uriBuilder.appendQueryParameter("a", "nice")
@@ -678,8 +687,8 @@ class EksiParser @Inject constructor() {
             }
         }
 
-        if (page > 1) {
-            uriBuilder.appendQueryParameter("p", page.toString())
+        if (safePage > 1) {
+            uriBuilder.appendQueryParameter("p", safePage.toString())
         }
 
         return uriBuilder.build().toString()
@@ -689,6 +698,10 @@ class EksiParser @Inject constructor() {
      * 3. Başlık sayfasındaki (`#entry-item-list li`) tüm entry'leri, yazar adını, tarihini,
      * düzenleme tarihini (`editDate`), fav sayısını, fav durumunu ve toplam sayfa sayısını
      * (`div.pager` -> `data-pagecount`) ayrıştırır.
+     *
+     * ÖNEMLİ: Kullanıcı "Bugün" (`?a=popular` veya `?day=YYYY-MM-DD`) ya da Şükela modundayken
+     * HTML içindeki parametresiz canonical URL'nin aktif filtreyi ezmesine izin vermez;
+     * `activeFilterQueryUrl` içinde aktif filtre sorgusunu korur.
      */
     fun parseTopicPage(
         html: String,
@@ -721,20 +734,19 @@ class EksiParser @Inject constructor() {
             ?.takeIf { it.isNotBlank() }
             ?: extractSlug(canonicalUrl)
 
-        // Eğer `?a=popular` veya `?a=tracked` isteği o başlıkta bugün entry olmadığı için Ekşi Sözlük tarafından
-        // ana sayfaya (çoklu `div.topic-item` veya farklı bir `topicId`) yönlendirildiyse boş liste döndür ki
-        // Repository otomatik olarak başlığın kendi parametresiz URL'sine (`TopicFilterMode.ALL`) fallback yapsın!
         val requestedTopicId = if (!isDirectSingleEntryUrl(requestedUrl)) extractTopicId(requestedUrl) else ""
         val isRedirectedToDifferentTopic = (containsTodayPopularParam(requestedUrl) || containsTrackedParam(requestedUrl)) &&
             (doc.select("div.topic-item").size > 1 ||
                 (requestedTopicId.isNotBlank() && topicId.isNotBlank() && requestedTopicId != topicId))
 
         if (isRedirectedToDifferentTopic) {
+            val cleanReq = stripTrackedParameters(requestedUrl)
             return TopicPageData(
                 topicId = requestedTopicId.ifBlank { topicId },
                 topicTitle = extractReadableTitleFromUrl(requestedUrl),
                 topicSlug = extractSlug(requestedUrl),
-                cleanTopicUrl = stripTrackedParameters(requestedUrl),
+                cleanTopicUrl = cleanReq,
+                activeFilterQueryUrl = cleanReq,
                 currentPage = fallbackPage,
                 pageCount = 1,
                 entries = emptyList(),
@@ -807,11 +819,20 @@ class EksiParser @Inject constructor() {
             it.isNotBlank() && !isDirectSingleEntryUrl(it)
         } ?: canonicalUrl
 
+        // Aktif filtre sorgu URL'si: Eğer istek `?a=popular` veya `?day=YYYY-MM-DD` (veya `?a=dailynice`, `?a=nice`)
+        // ile yapıldıysa ve tümüne fallback yapılmadıysa, kanonik URL üzerinde bu sorgu parametresini koru!
+        val activeFilterQueryUrl = buildPreservedFilterUrl(
+            cleanCanonicalUrl = resolvedCanonicalUrl,
+            requestedUrl = requestedUrl,
+            usedTodayFallback = usedTodayFallback
+        )
+
         return TopicPageData(
             topicId = topicId,
             topicTitle = resolvedTopicTitle,
             topicSlug = topicSlug,
             cleanTopicUrl = resolvedCanonicalUrl,
+            activeFilterQueryUrl = activeFilterQueryUrl,
             currentPage = if (isSingleEntry) 1 else currentPage,
             pageCount = if (isSingleEntry) 1 else pageCount,
             entries = entries,
@@ -819,6 +840,35 @@ class EksiParser @Inject constructor() {
             usedTodayFallback = usedTodayFallback,
             isSingleEntryView = isSingleEntry
         )
+    }
+
+    private fun buildPreservedFilterUrl(
+        cleanCanonicalUrl: String,
+        requestedUrl: String,
+        usedTodayFallback: Boolean
+    ): String {
+        val cleanBase = stripTrackedParameters(cleanCanonicalUrl)
+        if (usedTodayFallback || isDirectSingleEntryUrl(cleanBase)) {
+            return cleanBase
+        }
+        return runCatching {
+            val reqUri = Uri.parse(normalizeUrl(requestedUrl))
+            val dayParam = reqUri.getQueryParameter("day")
+            val aParam = reqUri.getQueryParameter("a")
+            val keywordsParam = reqUri.getQueryParameter("keywords")
+            val builder = Uri.parse(cleanBase).buildUpon()
+            when {
+                !dayParam.isNullOrBlank() -> builder.appendQueryParameter("day", dayParam)
+                aParam.equals("popular", ignoreCase = true) -> builder.appendQueryParameter("a", "popular")
+                aParam.equals("dailynice", ignoreCase = true) -> builder.appendQueryParameter("a", "dailynice")
+                aParam.equals("nice", ignoreCase = true) -> builder.appendQueryParameter("a", "nice")
+                aParam.equals("search", ignoreCase = true) && !keywordsParam.isNullOrBlank() -> {
+                    builder.appendQueryParameter("a", "search")
+                    builder.appendQueryParameter("keywords", keywordsParam)
+                }
+            }
+            builder.build().toString()
+        }.getOrDefault(cleanBase)
     }
 
     private fun parseEntryElement(
@@ -1114,6 +1164,89 @@ class EksiParser @Inject constructor() {
             pageCount = pageCount,
             topics = topics
         )
+    }
+
+    /**
+     * 6. ANLIK ARAMA ÖNERİLERİ (AUTOCOMPLETE):
+     * `https://eksisozluk.com/autocomplete/query?q={query}` yanıtındaki JSON (`{"Titles":[...], "Nicks":[...]}`)
+     * verisini `org.json.JSONObject` ile ayrıştırır.
+     * - Eğer yanıt HTML içine sarılı gelirse Jsoup `.text()` ile içindeki JSON nesnesini çıkarır.
+     * - Eğer yanıt doğrudan HTML arama listesi ise `parseLeftFrameTopics` ile başlıkları çıkarır.
+     */
+    fun parseAutocompleteResponse(
+        rawResponse: String,
+        baseDomain: String = BASE_URL
+    ): Pair<List<TopicItem>, List<String>> {
+        if (rawResponse.isBlank()) return emptyList<TopicItem>() to emptyList()
+        val safeDomain = baseDomain.ifBlank { BASE_URL }.trimEnd('/')
+
+        val trimmed = rawResponse.trim()
+        val candidateJsonText = when {
+            trimmed.startsWith("{") && trimmed.endsWith("}") -> trimmed
+            trimmed.contains("\"Titles\"") || trimmed.contains("\"Nicks\"") -> {
+                val extracted = if (trimmed.startsWith("<")) {
+                    Jsoup.parse(trimmed).text().trim()
+                } else {
+                    trimmed
+                }
+                val firstBrace = extracted.indexOf('{')
+                val lastBrace = extracted.lastIndexOf('}')
+                if (firstBrace >= 0 && lastBrace > firstBrace) {
+                    extracted.substring(firstBrace, lastBrace + 1)
+                } else {
+                    ""
+                }
+            }
+            else -> ""
+        }
+
+        if (candidateJsonText.isNotBlank()) {
+            try {
+                val jsonObject = JSONObject(candidateJsonText)
+                val titles = mutableListOf<TopicItem>()
+                val nicks = mutableListOf<String>()
+
+                val titlesArray = jsonObject.optJSONArray("Titles")
+                    ?: jsonObject.optJSONArray("titles")
+                if (titlesArray != null) {
+                    for (i in 0 until titlesArray.length()) {
+                        val rawTitle = titlesArray.optString(i).trim()
+                        if (rawTitle.isNotBlank()) {
+                            val slug = rawTitle.lowercase().replace(" ", "-")
+                            val url = "$safeDomain/?q=${Uri.encode(rawTitle)}"
+                            titles.add(
+                                TopicItem(
+                                    id = "auto_title_${slug}_$i",
+                                    title = rawTitle,
+                                    slug = slug,
+                                    url = url
+                                )
+                            )
+                        }
+                    }
+                }
+
+                val nicksArray = jsonObject.optJSONArray("Nicks")
+                    ?: jsonObject.optJSONArray("nicks")
+                if (nicksArray != null) {
+                    for (i in 0 until nicksArray.length()) {
+                        val rawNick = nicksArray.optString(i).trim().removePrefix("@")
+                        if (rawNick.isNotBlank()) {
+                            nicks.add(rawNick)
+                        }
+                    }
+                }
+
+                if (titles.isNotEmpty() || nicks.isNotEmpty()) {
+                    return titles.distinctBy { it.title.lowercase() } to nicks.distinctBy { it.lowercase() }
+                }
+            } catch (_: Throwable) {
+                // JSON parse hatası olursa HTML fallback'e geç
+            }
+        }
+
+        val fallbackTopics = parseLeftFrameTopics(html = rawResponse, isTrackedSection = false)
+        return fallbackTopics to emptyList()
     }
 
     /**

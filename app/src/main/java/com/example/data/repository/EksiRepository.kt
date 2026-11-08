@@ -1,5 +1,7 @@
 package com.example.data.repository
 
+import android.net.Uri
+import android.webkit.CookieManager
 import androidx.paging.Pager
 import androidx.paging.PagingConfig
 import androidx.paging.PagingData
@@ -22,29 +24,45 @@ import com.example.data.model.TopicPageData
 import com.example.data.remote.EksiParser
 import com.example.network.WebViewCookieJar
 import com.example.network.WebViewFetchBridge
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
+ * "Bugün" sekmesi sayfa önbellek girdisi:
+ * - [isComplete] `false` iken paralel isteklerden İLK tamamlananın (1 sn içinde) hızlı sonucunu tutar.
+ * - [isComplete] `true` olduğunda ikinci paralel isteğin birleştirilmiş nihai sonucunu tutar.
+ */
+data class BugunPageCacheEntry(
+    val items: List<TopicItem>,
+    val isComplete: Boolean,
+    val timestampMs: Long = System.currentTimeMillis()
+)
+
+/**
  * Ekşi+ veri katmanı:
- * - Tüm HTML veri çekme işlemlerini [WebViewFetchBridge] üzerinden gerçekleştirir.
- * - Sol Frame (Gündem, Bugün, Debe, Olaylar), Kanallar (`/basliklar/kanal/{kanal_slug}?p={page}`),
- *   DEBE 50 (`/debe`) ve Dönemsel Enler (`/istatistik/...`) rotalarını ayrıştırır.
- * - DEBE ve Dönemsel Enler öğelerinin beğeni (`data-favorite-count` / `.favorite-count`) sayılarını
- *   hafızada (`entryFavoriteCountCache`) tutar ve paralel `Semaphore(4)` ile arka planda tamamlar.
- * - Başlık detay ekranında Paging 3'ün `prevKey` sonsuz geri sarma döngüsünü önlemek için
- *   doğrudan tekil sayfa çekme ([fetchSingleTopicPage]) ve `X + 1` arka plan önbellekleme mimarisini destekler.
- * - Başlığa ilk girildiğinde kalınan yeri tek seferlik ([getSavedTopicReadState]) okur ve
- *   kaydırma sırasında [ReadStateDao] üzerinden Room veritabanına kaydeder.
+ * - Tüm HTML ve JSON veri çekme işlemlerini [WebViewFetchBridge] üzerinden gerçekleştirir.
+ * - "Bugün" sekmesini sıfır sıralı (sequential) bekleme, paralel maksimum 2 hızlı kaynak (`isAjax = true`),
+ *   anında ekrana basma (Progressive Loading) ve Gündem yüklendikten 500ms sonra arka planda
+ *   ön yükleme (`prefetchBugunTopics`) ile 0ms gecikmeli olarak sunar.
  */
 @Singleton
 class EksiRepository @Inject constructor(
@@ -53,6 +71,8 @@ class EksiRepository @Inject constructor(
     private val readStateDao: ReadStateDao,
     private val eksinDao: EksinDao
 ) {
+
+    private val repositoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /**
      * DEBE ve Dönemsel Enler entry'lerinin beğeni (`data-favorite-count`) ve yazar bilgilerini
@@ -64,13 +84,460 @@ class EksiRepository @Inject constructor(
     private val entryTopicTitleCache = ConcurrentHashMap<String, String>()
 
     /**
-     * Gündem 1. sayfasındaki başlık URL'lerini tutar; böylece "Bugün" sekmesi anonim oturumda
-     * Gündem ile aynı listeyi döndürdüğünde tekrarlanan başlıkları ayıklayıp taze başlıkları sunar.
+     * Hafızadaki Gündem 1. sayfa başlıkları (`gundemTopics`) ve hızlı URL seti (`gundemPage1UrlCache`).
+     * "Bugün" sekmesi yenilenirken Gündem 1. sayfası ASLA ağdan tekrar çekilmez; doğrudan bu
+     * bellek içi listeyle karşılaştırılıp mükerrer başlıklar filtrelenir.
      */
     private val gundemPage1UrlCache: MutableSet<String> = ConcurrentHashMap.newKeySet()
+    private val _gundemTopics = MutableStateFlow<List<TopicItem>>(emptyList())
+    val gundemTopics: StateFlow<List<TopicItem>> = _gundemTopics.asStateFlow()
+
+    /**
+     * "Bugün" sekmesi için anında ekrana basılan (Progressive Loading) ve sekme geçişlerinde
+     * korunan bellek içi başlık durumu (`bugunTopics`), yükleme göstergesi (`isBugunLoading`)
+     * ve sayfa bazlı önbellek (`bugunPageCache`).
+     */
+    private val bugunPageCache = ConcurrentHashMap<Int, BugunPageCacheEntry>()
+    private val inFlightBugunPageJobs = ConcurrentHashMap<Int, Job>()
+    private val _bugunTopics = MutableStateFlow<List<TopicItem>>(emptyList())
+    val bugunTopics: StateFlow<List<TopicItem>> = _bugunTopics.asStateFlow()
+
+    private val _isBugunLoading = MutableStateFlow(false)
+    val isBugunLoading: StateFlow<Boolean> = _isBugunLoading.asStateFlow()
+
+    @Volatile
+    private var activeBugunPagingSource: BugunTopicsPagingSource? = null
+
+    @Volatile
+    private var gundemFirstPageLoadedListener: (() -> Unit)? = null
+
+    @Volatile
+    private var explicitUserLoggedInFlag: Boolean? = null
+
+    /**
+     * Gündem, Bugün, Kanallar ve Olaylar sekmelerinden yüklenen başlıkların bellek içi önbelleği.
+     * Arama kutusuna yazmaya başlandığında 0 milisaniye gecikmeyle anlık başlık önerisi üretmek için kullanılır.
+     */
+    private val cachedKnownTopics = ConcurrentHashMap<String, TopicItem>()
+
+    /**
+     * Gündem 1. sayfası yüklendiğinde ViewModel'in 500ms sonra arka planda `prefetchBugunTopics()`
+     * başlatabilmesi için dinleyici kaydeder.
+     */
+    fun setOnGundemFirstPageLoadedListener(listener: () -> Unit) {
+        gundemFirstPageLoadedListener = listener
+        if (_gundemTopics.value.isNotEmpty()) {
+            listener.invoke()
+        }
+    }
+
+    fun setUserLoggedInState(isLoggedIn: Boolean) {
+        explicitUserLoggedInFlag = isLoggedIn
+    }
+
+    /**
+     * Kullanıcının Ekşi Sözlük oturumu açıp açmadığını kontrol eder.
+     * Giriş yapılmışsa `/basliklar/bugun?p={page}` tek istekle (`isAjax = true`) çekilir.
+     */
+    fun isUserLoggedIn(baseDomain: String): Boolean {
+        explicitUserLoggedInFlag?.let { if (it) return true }
+        return try {
+            if (!WebViewCookieJar.isHardwareWebViewSupported()) return false
+            val rawCookie = CookieManager.getInstance().getCookie(baseDomain).orEmpty()
+            if (rawCookie.isBlank()) return false
+            rawCookie.split(";").any { segment ->
+                val name = segment.substringBefore('=').trim()
+                val value = segment.substringAfter('=', "").trim()
+                value.isNotEmpty() && (
+                    name.equals("a", ignoreCase = true) ||
+                        name.equals(".ASPXAUTH", ignoreCase = true) ||
+                        name.equals("iq", ignoreCase = true)
+                    )
+            }
+        } catch (_: Throwable) {
+            false
+        }
+    }
 
     fun clearGundemCache() {
         gundemPage1UrlCache.clear()
+        _gundemTopics.value = emptyList()
+    }
+
+    /**
+     * Kullanıcı özellikle "Yenile" veya "Pull-to-Refresh" yaptığında "Bugün" önbelleğini temizler.
+     * Normal sekme geçişlerinde bu metot ÇAĞRILMAZ; böylece hafızadaki "Bugün" listesi 0ms'de açılır.
+     */
+    fun clearBugunCache() {
+        inFlightBugunPageJobs.values.forEach { it.cancel() }
+        inFlightBugunPageJobs.clear()
+        bugunPageCache.clear()
+        _bugunTopics.value = emptyList()
+    }
+
+    /**
+     * `EksinApplication.onTrimMemory` çağrıldığında bellek içi önbellekleri güvenli şekilde temizler.
+     */
+    fun clearMemoryCaches() {
+        entryFavoriteCountCache.clear()
+        entryAuthorCache.clear()
+        entryResolvedIdCache.clear()
+        entryTopicTitleCache.clear()
+        cachedKnownTopics.clear()
+    }
+
+    fun getCachedBugunPage(page: Int): BugunPageCacheEntry? {
+        return bugunPageCache[page]
+    }
+
+    fun hasCachedBugunTopics(): Boolean {
+        return bugunPageCache[1]?.items?.isNotEmpty() == true || _bugunTopics.value.isNotEmpty()
+    }
+
+    internal fun registerActiveBugunPagingSource(source: BugunTopicsPagingSource) {
+        activeBugunPagingSource = source
+    }
+
+    /**
+     * 3. ÖZELLİK: ARKA PLANDA ÖN YÜKLEME (PREFETCH) VE ÖNBELLEK:
+     * Uygulama ilk açıldığında Gündem yüklendikten hemen 500ms sonra arka planda sessizce
+     * "Bugün" listesini hazırlar. Kullanıcı "Bugün" sekmesine tıkladığında 0ms bekleme süresiyle
+     * anında hazır listeyi görür.
+     */
+    suspend fun prefetchBugunTopics(forceRefresh: Boolean = false): List<TopicItem> =
+        withContext(Dispatchers.IO) {
+            if (!forceRefresh) {
+                val existing = bugunPageCache[1]
+                if (existing != null && existing.items.isNotEmpty()) {
+                    if (_bugunTopics.value.isEmpty()) {
+                        _bugunTopics.value = existing.items
+                    }
+                    return@withContext existing.items
+                }
+            } else {
+                clearBugunCache()
+            }
+
+            loadBugunPageProgressive(
+                page = 1,
+                forceRefresh = forceRefresh
+            )
+        }
+
+    /**
+     * 1 & 2. ÖZELLİK: "BUGÜN" SEKMESİ PARALEL HIZLANDIRMA VE ANINDA EKRANA BASMA (PROGRESSIVE LOADING):
+     * - Sıralı (sequential) çoklu istekleri tamamen kaldırır.
+     * - Tüm isteklerde hafif AJAX modunu (`isAjax = true`) kullanır.
+     * - Zaten hafızada (`gundemTopics` / `gundemPage1UrlCache`) var olan Gündem 1. sayfa başlıklarını
+     *   tekrar ağdan ÇEKMEZ; doğrudan hafızadaki listeyle karşılaştırıp mükerrerleri filtreler.
+     * - Kullanıcı giriş yapmışsa tek bir istekle `https://eksisozluk.com/basliklar/bugun?p={page}` çeker.
+     * - Anonim modda 4-5 kanalı sırayla beklemek yerine `coroutineScope` ve `async` ile EN FAZLA 2
+     *   hızlı kaynağı (Gündem'in `page + 1` sayfası `/basliklar/gundem?p=2` ve aktif ana kanal
+     *   `/basliklar/kanal/spor` veya `/basliklar/kanal/siyaset`) TAMAMEN PARALEL çeker.
+     * - Paralel isteklerden İLK hangisi tamamlanırsa hiç beklemeden `bugunTopics` state'ini ve
+     *   `bugunPageCache` önbelleğini günceller, `isBugunLoading`'i kapatır ve ilk listeyi anında döndürür.
+     * - İkinci paralel istek tamamlandığında listeyi arka planda sessizce zenginleştirir.
+     */
+    suspend fun loadBugunPageProgressive(
+        page: Int,
+        forceRefresh: Boolean = false
+    ): List<TopicItem> = withContext(Dispatchers.IO) {
+        val safePage = page.coerceAtLeast(1)
+
+        if (!forceRefresh) {
+            val cached = bugunPageCache[safePage]
+            if (cached != null && cached.items.isNotEmpty()) {
+                if (safePage == 1 && _bugunTopics.value.isEmpty()) {
+                    _bugunTopics.value = cached.items
+                }
+                return@withContext cached.items
+            }
+        }
+
+        if (safePage == 1) {
+            _isBugunLoading.value = true
+        }
+
+        val baseDomain = webViewFetchBridge.getActiveBaseDomain().ifBlank {
+            WebViewCookieJar.DEFAULT_BASE_URL
+        }.trimEnd('/')
+
+        try {
+            // 1b) Kullanıcı giriş yapmışsa doğrudan TEK BİR İSTEKLE `/basliklar/bugun?p={page}` (`isAjax = true`) çek
+            if (isUserLoggedIn(baseDomain)) {
+                val bugunUrl = "$baseDomain/basliklar/bugun?p=$safePage&_=${System.currentTimeMillis()}"
+                val bugunHtml = runCatching {
+                    webViewFetchBridge.fetchHtml(rawUrl = bugunUrl, isAjax = true)
+                }.getOrDefault("")
+                val parsedBugun = withContext(Dispatchers.Default) {
+                    eksiParser.parseLeftFrameTopics(bugunHtml, isTrackedSection = false)
+                }
+                val filteredBugun = filterAgainstInMemoryGundem(parsedBugun)
+                if (filteredBugun.isNotEmpty()) {
+                    cacheKnownTopics(filteredBugun)
+                    bugunPageCache[safePage] = BugunPageCacheEntry(
+                        items = filteredBugun,
+                        isComplete = true
+                    )
+                    if (safePage == 1) {
+                        _bugunTopics.value = filteredBugun
+                        _isBugunLoading.value = false
+                    }
+                    return@withContext filteredBugun
+                }
+            }
+
+            // 1c & 2) Anonim modda (veya `/basliklar/bugun` Gündem ile aynı döndüğünde):
+            // EN FAZLA 2 hızlı kaynağı (`isAjax = true`) TAMAMEN PARALEL başlat.
+            // İlk tamamlanan kaynağı ANINDA ekrana bas, ikinci tamamlandığında sessizce zenginleştir!
+            val firstReadyDeferred = CompletableDeferred<List<TopicItem>>()
+
+            val primaryFastChannel = when ((safePage - 1) % 4) {
+                0 -> EksiChannel.SPOR
+                1 -> EksiChannel.SIYASET
+                2 -> EksiChannel.EKONOMI
+                else -> EksiChannel.TEKNOLOJI
+            }
+            val channelPage = ((safePage - 1) / 4) + 1
+            val deeperAgendaPage = (safePage + 1).coerceAtMost(15)
+
+            val enrichmentJob = repositoryScope.launch {
+                val resultChannel = Channel<List<TopicItem>>(capacity = 2)
+
+                // Paralel Kaynak 1: Gündem'in bir sonraki sayfası (`/basliklar/gundem?p=2` vb., `isAjax = true`)
+                val sourceADeferred = async(Dispatchers.IO) {
+                    val deeperUrl = "$baseDomain/basliklar/gundem?p=$deeperAgendaPage&_=${System.currentTimeMillis()}"
+                    val html = runCatching {
+                        webViewFetchBridge.fetchHtml(rawUrl = deeperUrl, isAjax = true)
+                    }.getOrDefault("")
+                    val parsed = withContext(Dispatchers.Default) {
+                        eksiParser.parseLeftFrameTopics(html, isTrackedSection = false)
+                    }
+                    val filtered = filterAgainstInMemoryGundem(parsed)
+                    resultChannel.trySend(filtered)
+                    filtered
+                }
+
+                // Paralel Kaynak 2: Aktif ana kanal (`/basliklar/kanal/spor` veya `/basliklar/kanal/siyaset`, `isAjax = true`)
+                val sourceBDeferred = async(Dispatchers.IO) {
+                    val channelUrl = eksiParser.buildChannelTopicsUrl(
+                        baseDomain = baseDomain,
+                        channel = primaryFastChannel,
+                        page = channelPage,
+                        useRawTurkishSlug = false
+                    )
+                    val html = runCatching {
+                        webViewFetchBridge.fetchHtml(rawUrl = channelUrl, isAjax = true)
+                    }.getOrDefault("")
+                    val parsed = withContext(Dispatchers.Default) {
+                        eksiParser.parseChannelTopics(html)
+                    }
+                    val filtered = filterAgainstInMemoryGundem(parsed)
+                    resultChannel.trySend(filtered)
+                    filtered
+                }
+
+                // 2. KURAL (ANINDA EKRANA BASMA - PROGRESSIVE LOADING):
+                // Paralel 2 istekten İLK hangisi tamamlanırsa hiç beklemeden UI state'ini güncelle!
+                val firstBatch = resultChannel.receive()
+                if (firstBatch.isNotEmpty()) {
+                    cacheKnownTopics(firstBatch)
+                    bugunPageCache[safePage] = BugunPageCacheEntry(
+                        items = firstBatch,
+                        isComplete = false
+                    )
+                    if (safePage == 1) {
+                        _bugunTopics.value = firstBatch
+                        _isBugunLoading.value = false
+                    }
+                    if (!firstReadyDeferred.isCompleted) {
+                        firstReadyDeferred.complete(firstBatch)
+                    }
+                }
+
+                // İkinci paralel istek tamamlandığında listeyi sessizce zenginleştir
+                val secondBatch = resultChannel.receive()
+                val mergedItems = mergeAndDeduplicateBugunTopics(
+                    batchA = sourceADeferred.await(),
+                    batchB = sourceBDeferred.await()
+                )
+
+                if (mergedItems.isNotEmpty()) {
+                    cacheKnownTopics(mergedItems)
+                    val hadInitialEmission = firstReadyDeferred.isCompleted && firstBatch.isNotEmpty()
+                    bugunPageCache[safePage] = BugunPageCacheEntry(
+                        items = mergedItems,
+                        isComplete = true
+                    )
+                    if (safePage == 1) {
+                        _bugunTopics.value = mergedItems
+                        _isBugunLoading.value = false
+                    }
+
+                    if (!firstReadyDeferred.isCompleted) {
+                        firstReadyDeferred.complete(mergedItems)
+                    } else if (hadInitialEmission && mergedItems.size > firstBatch.size) {
+                        // İlk parti zaten ekrana basılmıştı; şimdi zenginleştirilmiş tam listeyi
+                        // bellekten (0ms) göstermek için PagingSource'u tek seferlik sessizce yenile
+                        activeBugunPagingSource?.invalidate()
+                    }
+                } else {
+                    if (safePage == 1) {
+                        _isBugunLoading.value = false
+                    }
+                    if (!firstReadyDeferred.isCompleted) {
+                        firstReadyDeferred.complete(emptyList())
+                    }
+                }
+            }
+
+            inFlightBugunPageJobs[safePage] = enrichmentJob
+            enrichmentJob.invokeOnCompletion {
+                inFlightBugunPageJobs.remove(safePage, enrichmentJob)
+            }
+
+            firstReadyDeferred.await()
+        } catch (e: Throwable) {
+            if (safePage == 1) {
+                _isBugunLoading.value = false
+            }
+            bugunPageCache[safePage]?.items ?: emptyList()
+        }
+    }
+
+    /**
+     * 1d) Zaten hafızada (`gundemTopics` / `gundemPage1UrlCache`) var olan Gündem 1. sayfa
+     * başlıklarını ağdan tekrar çekmeden doğrudan hafızadaki listeyle karşılaştırıp mükerrerleri ayıklar.
+     */
+    private fun filterAgainstInMemoryGundem(candidates: List<TopicItem>): List<TopicItem> {
+        if (candidates.isEmpty()) return emptyList()
+        val inMemoryGundemUrls = gundemPage1UrlCache
+        val inMemoryGundemTitles = _gundemTopics.value
+            .mapTo(HashSet()) { it.title.trim().lowercase() }
+
+        val filtered = candidates.filterNot { item ->
+            val cleanUrlKey = item.cleanUrl.trim().lowercase()
+            val titleKey = item.title.trim().lowercase()
+            inMemoryGundemUrls.contains(cleanUrlKey) || inMemoryGundemTitles.contains(titleKey)
+        }
+            .distinctBy { it.cleanUrl.trim().lowercase() }
+            .distinctBy { it.title.trim().lowercase() }
+
+        return filtered.ifEmpty {
+            candidates
+                .distinctBy { it.cleanUrl.trim().lowercase() }
+                .distinctBy { it.title.trim().lowercase() }
+        }
+    }
+
+    private fun mergeAndDeduplicateBugunTopics(
+        batchA: List<TopicItem>,
+        batchB: List<TopicItem>
+    ): List<TopicItem> {
+        if (batchA.isEmpty()) return batchB
+        if (batchB.isEmpty()) return batchA
+
+        val interleaved = ArrayList<TopicItem>(batchA.size + batchB.size)
+        val maxLen = maxOf(batchA.size, batchB.size)
+        for (i in 0 until maxLen) {
+            if (i < batchB.size) interleaved.add(batchB[i])
+            if (i < batchA.size) interleaved.add(batchA[i])
+        }
+
+        return filterAgainstInMemoryGundem(interleaved)
+    }
+
+    fun cacheKnownTopics(topics: List<TopicItem>) {
+        for (topic in topics) {
+            val key = topic.title.trim().lowercase()
+            if (key.isNotBlank()) {
+                val existing = cachedKnownTopics[key]
+                if (existing == null || topic.entryCount >= existing.entryCount) {
+                    cachedKnownTopics[key] = topic
+                }
+            }
+        }
+    }
+
+    /**
+     * Arama kutusuna yazmaya başlandığında (en az 2 karakter) hafızadaki mevcut Gündem/Bugün/Kanal
+     * başlıkları içinden eşleşenleri 0 milisaniye gecikmeyle döndürür.
+     */
+    fun getInstantLocalTopicMatches(query: String): List<TopicItem> {
+        val cleanQuery = query.trim().lowercase()
+        if (cleanQuery.length < 2) return emptyList()
+        return cachedKnownTopics.values
+            .filter { it.title.lowercase().contains(cleanQuery) }
+            .sortedWith(
+                compareByDescending<TopicItem> { it.title.lowercase().startsWith(cleanQuery) }
+                    .thenByDescending { it.entryCount }
+            )
+            .distinctBy { it.title.trim().lowercase() }
+            .take(8)
+    }
+
+    /**
+     * `https://eksisozluk.com/autocomplete/query?q=${Uri.encode(query)}` adresinden canlı
+     * `Titles` (Başlık) ve `Nicks` (`@yazar`) önerilerini çeker; hata veya boş yanıt durumunda
+     * `/basliklar/ara?SearchForm.Keywords=${Uri.encode(query)}` sonuçlarına fallback yapar.
+     */
+    suspend fun fetchAutocompleteSuggestions(
+        query: String
+    ): Pair<List<TopicItem>, List<String>> = withContext(Dispatchers.IO) {
+        val cleanQuery = query.trim()
+        if (cleanQuery.length < 2) return@withContext emptyList<TopicItem>() to emptyList()
+
+        val baseDomain = webViewFetchBridge.getActiveBaseDomain().ifBlank {
+            WebViewCookieJar.DEFAULT_BASE_URL
+        }.trimEnd('/')
+
+        val localMatches = getInstantLocalTopicMatches(cleanQuery)
+
+        try {
+            val autocompleteUrl = "$baseDomain/autocomplete/query?q=${Uri.encode(cleanQuery)}&_=${System.currentTimeMillis()}"
+            val rawResponse = runCatching {
+                webViewFetchBridge.fetchHtml(rawUrl = autocompleteUrl, isAjax = true)
+            }.getOrDefault("")
+
+            var (parsedTitles, parsedNicks) = withContext(Dispatchers.Default) {
+                eksiParser.parseAutocompleteResponse(
+                    rawResponse = rawResponse,
+                    baseDomain = baseDomain
+                )
+            }
+
+            if (parsedTitles.isEmpty() && parsedNicks.isEmpty()) {
+                val searchFallbackUrl = eksiParser.buildSearchUrl(
+                    filter = SearchFilter(keywords = cleanQuery),
+                    page = 1
+                )
+                val searchHtml = runCatching {
+                    webViewFetchBridge.fetchHtml(rawUrl = searchFallbackUrl, isAjax = true)
+                }.getOrDefault("")
+                val searchParsed = withContext(Dispatchers.Default) {
+                    eksiParser.parseSearchResults(
+                        html = searchHtml,
+                        query = cleanQuery,
+                        requestedPage = 1
+                    )
+                }
+                parsedTitles = searchParsed.topics
+            }
+
+            val enrichedRemoteTitles = parsedTitles.map { remoteTopic ->
+                val cached = cachedKnownTopics[remoteTopic.title.trim().lowercase()]
+                cached ?: remoteTopic
+            }
+
+            val mergedTitles = (localMatches + enrichedRemoteTitles)
+                .distinctBy { it.title.trim().lowercase() }
+                .take(12)
+
+            cacheKnownTopics(mergedTitles)
+            mergedTitles to parsedNicks.take(8)
+        } catch (_: Throwable) {
+            localMatches to emptyList()
+        }
     }
 
     fun observeBookmarks(): Flow<List<BookmarkedEntryEntity>> =
@@ -85,7 +552,6 @@ class EksiRepository @Inject constructor(
     /**
      * Başlığa İLK girildiğinde tek seferlik (`suspend` / `firstOrNull` mantığıyla)
      * kalınan sayfa (`pageNumber`) ve entry (`entryId`, `scrollOffset`) bilgisini getirir.
-     * Sürekli bir Flow olarak dinlenmediği için kullanıcının manuel sayfa geçişlerini asla ezmez.
      */
     suspend fun getSavedTopicReadState(
         rawOrCleanTopicUrl: String,
@@ -172,6 +638,8 @@ class EksiRepository @Inject constructor(
 
     /**
      * Gündem başlıklarını (`https://eksisozluk.com/basliklar/gundem?p={page}`) bağımsız Pager ile çeker.
+     * Gündem 1. sayfası yüklendiği anda hafızadaki `gundemTopics` güncellenir ve
+     * 500ms sonra arka planda "Bugün" ön yüklemesi (`prefetchBugunTopics`) tetiklenir.
      */
     fun getGundemTopicsPager(): Flow<PagingData<TopicItem>> {
         return Pager(
@@ -186,15 +654,22 @@ class EksiRepository @Inject constructor(
                     section = LeftFrameSection.GUNDEM,
                     webViewFetchBridge = webViewFetchBridge,
                     eksiParser = eksiParser,
-                    gundemPage1UrlCache = gundemPage1UrlCache
+                    gundemPage1UrlCache = gundemPage1UrlCache,
+                    onTopicsLoaded = { items, page ->
+                        cacheKnownTopics(items)
+                        if (page == 1 && items.isNotEmpty()) {
+                            _gundemTopics.value = items
+                            gundemFirstPageLoadedListener?.invoke()
+                        }
+                    }
                 )
             }
         ).flow
     }
 
     /**
-     * Bugün / Son Başlıklar sekmesini (`https://eksisozluk.com/basliklar/bugun?p={page}` ve aktif
-     * kanal/taze başlık akışlarını) Gündem'den tamamen bağımsız bir Pager ile çeker.
+     * Bugün sekmesini (`BugunTopicsPagingSource`) Gündem'den bağımsız ve
+     * önbellek + paralel Progressive Loading destekli Pager ile sunar.
      */
     fun getBugunTopicsPager(): Flow<PagingData<TopicItem>> {
         return Pager(
@@ -206,10 +681,10 @@ class EksiRepository @Inject constructor(
             ),
             pagingSourceFactory = {
                 BugunTopicsPagingSource(
-                    webViewFetchBridge = webViewFetchBridge,
-                    eksiParser = eksiParser,
-                    gundemPage1UrlCache = gundemPage1UrlCache
-                )
+                    repository = this
+                ).also { source ->
+                    registerActiveBugunPagingSource(source)
+                }
             }
         ).flow
     }
@@ -230,7 +705,8 @@ class EksiRepository @Inject constructor(
                     section = LeftFrameSection.OLAYLAR,
                     webViewFetchBridge = webViewFetchBridge,
                     eksiParser = eksiParser,
-                    gundemPage1UrlCache = gundemPage1UrlCache
+                    gundemPage1UrlCache = gundemPage1UrlCache,
+                    onTopicsLoaded = { items, _ -> cacheKnownTopics(items) }
                 )
             }
         ).flow
@@ -256,7 +732,8 @@ class EksiRepository @Inject constructor(
                         section = section,
                         webViewFetchBridge = webViewFetchBridge,
                         eksiParser = eksiParser,
-                        gundemPage1UrlCache = gundemPage1UrlCache
+                        gundemPage1UrlCache = gundemPage1UrlCache,
+                        onTopicsLoaded = { items, _ -> cacheKnownTopics(items) }
                     )
                 }
             ).flow
@@ -280,7 +757,8 @@ class EksiRepository @Inject constructor(
                 ChannelTopicsPagingSource(
                     channel = channel,
                     webViewFetchBridge = webViewFetchBridge,
-                    eksiParser = eksiParser
+                    eksiParser = eksiParser,
+                    onTopicsLoaded = { cacheKnownTopics(it) }
                 )
             }
         ).flow
@@ -437,8 +915,6 @@ class EksiRepository @Inject constructor(
     /**
      * 3a. GELİŞMİŞ DEBE:
      * Sadece `https://eksisozluk.com/debe` (ve `/basliklar/debe`) gerçek listesini çeker.
-     * Hem tam sayfa (`isAjax = false`) hem de AJAX sol frame (`isAjax = true`) sorgularını destekler.
-     * Varsa hafızadaki (`entryFavoriteCountCache`) beğeni sayılarını ve gerçek başlık adlarını anında uygular.
      */
     suspend fun fetchDebeItems(): Result<List<RankedTopicOrEntryItem>> = withContext(Dispatchers.IO) {
         try {
@@ -446,7 +922,6 @@ class EksiRepository @Inject constructor(
                 WebViewCookieJar.DEFAULT_BASE_URL
             }.trimEnd('/')
 
-            // 1. Önce tam sayfa `/debe` (isAjax = false) ve AJAX `/debe` (isAjax = true) kaynaklarını kontrol et
             val fullPageUrl = "$baseDomain/debe?_=${System.currentTimeMillis()}"
             val fullPageHtml = runCatching {
                 webViewFetchBridge.fetchHtml(rawUrl = fullPageUrl, isAjax = false)
@@ -463,7 +938,6 @@ class EksiRepository @Inject constructor(
                 eksiParser.parseDebeEntriesList(ajaxHtml)
             }
 
-            // Doğrudan `/entry/{id}` içeren veya daha fazla öğeye sahip olan listeyi tercih et
             val fullEntryCount = parsedFull.count { !it.entryId.isNullOrBlank() }
             val ajaxEntryCount = parsedAjax.count { !it.entryId.isNullOrBlank() }
 
@@ -494,18 +968,6 @@ class EksiRepository @Inject constructor(
 
     /**
      * 3b. DÖNEMSEL ENLER (Önceki Gün / Önceki Hafta / Önceki Ay):
-     * - **Önceki Gün -> En Beğenilen Entry'ler**: `/debe` listesini ve gündem başlıklarının son 24 saatlik
-     *   şükela (`?a=dailynice`) filtresini kullanır.
-     * - **Önceki Hafta / Ay -> En Beğenilen Entry'ler**: Önce `/istatistik/gecen-haftanin-en-begenilen-entryleri`
-     *   ve `/istatistik/gecen-ayin-en-begenilen-entryleri` sayfalarındaki gerçek `<a href="/entry/...">`
-     *   linklerini ve karşısındaki başlık adlarını birebir eşleştirerek çeker.
-     *   Eğer istatistik sayfası boş döner ve gündem/kanal başlıklarından derleme yapılırsa:
-     *   1) ASLA `?a=nice` (tüm zamanlar şükelası) kullanmaz (`?a=dailynice` / `?a=popular` kullanır).
-     *   2) Her başlıktan SADECE EN ÇOK FAVORİ ALAN 1 TEK ENTRY alır (aynı başlık asla tekrar etmez).
-     *   3) Sadece `.entry-date` tarihi 2026 yılına ait güncel entry'leri kabul eder; 2010-2025 arası eski
-     *      entry'leri kesinlikle listeye almaz.
-     * - **En Popüler Konular**: Her bir öğenin kendi gerçek başlık URL'si (`topic.cleanUrl`) doğrudan
-     *   bağlanır (`isDirectEntry = false`, `entryId = null`).
      */
     suspend fun fetchPeriodicBestItems(
         period: PeriodicTimeRange,
@@ -518,7 +980,6 @@ class EksiRepository @Inject constructor(
 
             val isEntriesMode = (rankingTab == PeriodicRankingTab.TOP_ENTRIES)
 
-            // Önceki Gün -> En Beğenilen Entry'ler için doğrudan DEBE + son 24 saat (?a=dailynice) derlemesini kullan
             if (isEntriesMode && period == PeriodicTimeRange.YESTERDAY) {
                 val yesterdayEntries = compileTopLikedEntriesFallback(
                     baseDomain = baseDomain,
@@ -530,7 +991,6 @@ class EksiRepository @Inject constructor(
             val statsPath = if (isEntriesMode) period.entriesStatsPath else period.topicsStatsPath
             val statsUrl = "$baseDomain$statsPath"
 
-            // a) Tam sayfa HTML (isAjax = false) olarak istatistik sayfasını çek
             val statsHtml = webViewFetchBridge.fetchHtml(rawUrl = statsUrl, isAjax = false)
             val parsedStats = withContext(Dispatchers.Default) {
                 eksiParser.parsePeriodicStatsList(
@@ -553,7 +1013,6 @@ class EksiRepository @Inject constructor(
                 return@withContext Result.success(enriched)
             }
 
-            // b) İstatistik sayfası boş döndüyse:
             if (isEntriesMode) {
                 val compiledTopEntries = compileTopLikedEntriesFallback(
                     baseDomain = baseDomain,
@@ -572,16 +1031,6 @@ class EksiRepository @Inject constructor(
         }
     }
 
-    /**
-     * İstatistik sayfası boş döndüğünde veya "Önceki Gün -> En Beğenilen Entry'ler" seçildiğinde:
-     * 1. ASLA `?a=nice` (Tüm zamanların şükelası) KULLANMAZ (`?a=dailynice` veya `?a=popular` kullanır).
-     * 2. Her başlıktan SADECE EN ÇOK FAVORİ ALAN 1 TEK ENTRY (`maxByOrNull { it.favoriteCount }`) alır;
-     *    böylece aynı başlık alt alta tekrar etmez.
-     * 3. Sadece `.entry-date` tarihi içinde bulunduğumuz yıla (`2026`) ait olan güncel entry'leri kabul eder;
-     *    eski yıllara (`2010-2025`) ait entry'leri kesinlikle listeye almaz.
-     * 4. Her kartın `title` alanı doğrudan o `entryId`'nin ait olduğu gerçek başlık (`#topic h1#title`) olur
-     *    ve `url` doğrudan `/entry/{gerçek_entry_id}` olarak bağlanır.
-     */
     private suspend fun compileTopLikedEntriesFallback(
         baseDomain: String,
         period: PeriodicTimeRange
@@ -589,7 +1038,6 @@ class EksiRepository @Inject constructor(
         val semaphore = Semaphore(4)
         val collectedByEntryId = ConcurrentHashMap<String, RankedTopicOrEntryItem>()
 
-        // 1. DEBE (`/debe`) gerçek listesini çek
         val debeDeferred = async(Dispatchers.IO) {
             runCatching {
                 val debeHtml = webViewFetchBridge.fetchHtml(
@@ -600,7 +1048,6 @@ class EksiRepository @Inject constructor(
             }.getOrDefault(emptyList())
         }
 
-        // 2. Döneme göre gündem ve kanal başlıklarını çek
         val gundemPagesToFetch = when (period) {
             PeriodicTimeRange.YESTERDAY -> listOf(1)
             PeriodicTimeRange.LAST_WEEK -> listOf(1, 2)
@@ -627,12 +1074,16 @@ class EksiRepository @Inject constructor(
 
         val gundemTopicsDeferred = gundemPagesToFetch.map { pageNum ->
             async(Dispatchers.IO) {
-                semaphore.withPermit {
-                    runCatching {
-                        val url = "$baseDomain/basliklar/gundem?p=$pageNum&_=${System.currentTimeMillis()}"
-                        val html = webViewFetchBridge.fetchHtml(rawUrl = url, isAjax = true)
-                        eksiParser.parseLeftFrameTopics(html = html, isTrackedSection = false)
-                    }.getOrDefault(emptyList())
+                if (pageNum == 1 && _gundemTopics.value.isNotEmpty()) {
+                    _gundemTopics.value
+                } else {
+                    semaphore.withPermit {
+                        runCatching {
+                            val url = "$baseDomain/basliklar/gundem?p=$pageNum&_=${System.currentTimeMillis()}"
+                            val html = webViewFetchBridge.fetchHtml(rawUrl = url, isAjax = true)
+                            eksiParser.parseLeftFrameTopics(html = html, isTrackedSection = false)
+                        }.getOrDefault(emptyList())
+                    }
                 }
             }
         }
@@ -660,8 +1111,6 @@ class EksiRepository @Inject constructor(
             .sortedByDescending { it.entryCount }
             .take(if (period == PeriodicTimeRange.YESTERDAY) 8 else 14)
 
-        // 3. Seçilen her başlık için ASLA `?a=nice` kullanmadan, sadece `?a=dailynice` (veya `?a=popular`)
-        // ile 2026 yılına ait EN ÇOK FAVORİ ALAN 1 TEK ENTRY'yi al!
         val singleBestEntryPerTopic = allCandidateTopics.map { topic ->
             async(Dispatchers.IO) {
                 semaphore.withPermit {
@@ -683,7 +1132,6 @@ class EksiRepository @Inject constructor(
                         }
                         var resolvedPageTitle = parsedDailyPage.topicTitle
 
-                        // Eğer `?a=dailynice` boş döndüyse sadece güncel `?a=popular` sayfasına bak (ASLA `?a=nice` kullanma!)
                         if (recent2026Entries.isEmpty()) {
                             val popularUrl = "$cleanUrl?a=popular"
                             val popularHtml = webViewFetchBridge.fetchHtml(rawUrl = popularUrl, isAjax = false)
@@ -701,7 +1149,6 @@ class EksiRepository @Inject constructor(
                             }
                         }
 
-                        // Her başlıktan SADECE EN ÇOK FAVORİ ALAN 1 TEK ENTRY seç!
                         val bestEntry = recent2026Entries.maxByOrNull { it.favoriteCount }
                         if (bestEntry != null) {
                             val actualTitle = bestEntry.topicTitle
@@ -740,12 +1187,11 @@ class EksiRepository @Inject constructor(
             collectedByEntryId[entry.id] = item
         }
 
-        // 4. DEBE öğelerini de gerçek entryId ve gerçek başlık adlarıyla (`fetchAndCacheEntryFavoriteCount`) zenginleştirerek ekle
         val debeList = debeDeferred.await()
         val debeSubset = when (period) {
             PeriodicTimeRange.YESTERDAY -> debeList.take(35)
             PeriodicTimeRange.LAST_WEEK -> debeList.take(20)
-            PeriodicTimeRange.LAST_MONTH -> debeList.drop(5).take(20)
+            PeriodicTimeRange.LAST_MONTH -> debeList.take(15)
         }
 
         val enrichedDebeItems = debeSubset.map { debeItem ->
@@ -776,8 +1222,6 @@ class EksiRepository @Inject constructor(
             }
         }
 
-        // 5. Tüm derlenen entry'leri beğeni (favori) sayısına göre çoktan aza sırala ve
-        // aynı başlığın birden fazla kez tekrar etmesini (`distinctBy { it.title.trim().lowercase() }`) kesin olarak engelle!
         collectedByEntryId.values
             .sortedWith(
                 compareByDescending<RankedTopicOrEntryItem> { it.favoriteCount }
@@ -795,11 +1239,6 @@ class EksiRepository @Inject constructor(
             }
     }
 
-    /**
-     * "En Popüler Konular" (`PeriodicRankingTab.TOP_TOPICS`) için:
-     * Her bir öğenin kendi gerçek başlık URL'si (`topic.cleanUrl`) doğrudan bağlanır (`isDirectEntry = false`, `entryId = null`).
-     * Tıklandığında ekranda hangi başlık yazıyorsa %100 o başlığın sayfası açılır.
-     */
     private suspend fun compileTopPopularTopicsFallback(
         baseDomain: String,
         period: PeriodicTimeRange
@@ -812,12 +1251,16 @@ class EksiRepository @Inject constructor(
         val semaphore = Semaphore(4)
         val topics = pages.map { p ->
             async(Dispatchers.IO) {
-                semaphore.withPermit {
-                    runCatching {
-                        val url = "$baseDomain/basliklar/gundem?p=$p&_=${System.currentTimeMillis()}"
-                        val html = webViewFetchBridge.fetchHtml(rawUrl = url, isAjax = true)
-                        eksiParser.parseLeftFrameTopics(html = html, isTrackedSection = false)
-                    }.getOrDefault(emptyList())
+                if (p == 1 && _gundemTopics.value.isNotEmpty()) {
+                    _gundemTopics.value
+                } else {
+                    semaphore.withPermit {
+                        runCatching {
+                            val url = "$baseDomain/basliklar/gundem?p=$p&_=${System.currentTimeMillis()}"
+                            val html = webViewFetchBridge.fetchHtml(rawUrl = url, isAjax = true)
+                            eksiParser.parseLeftFrameTopics(html = html, isTrackedSection = false)
+                        }.getOrDefault(emptyList())
+                    }
                 }
             }
         }.awaitAll()
@@ -825,6 +1268,8 @@ class EksiRepository @Inject constructor(
             .filter { it.cleanUrl.isNotBlank() && !eksiParser.isDirectSingleEntryUrl(it.cleanUrl) }
             .distinctBy { it.cleanUrl }
             .distinctBy { it.title.trim().lowercase() }
+
+        cacheKnownTopics(topics)
 
         topics
             .sortedByDescending { it.entryCount }
@@ -863,7 +1308,8 @@ class EksiRepository @Inject constructor(
                 SearchTopicsPagingSource(
                     filter = filter,
                     webViewFetchBridge = webViewFetchBridge,
-                    eksiParser = eksiParser
+                    eksiParser = eksiParser,
+                    onTopicsLoaded = { cacheKnownTopics(it) }
                 )
             }
         ).flow
@@ -872,8 +1318,6 @@ class EksiRepository @Inject constructor(
     /**
      * Direct Page State Mimarisi:
      * Başlığın SADECE istenen `page` (`?p=X`) sayfasını çeker ve ayrıştırır.
-     * - Olaylar (`?a=tracked`) boş dönerse parametresiz ana başlığa fallback yapar.
-     * - Sadece Bugün (`?a=popular`) boş dönerse 1. sayfadan itibaren tüm entry'lere fallback yapar.
      */
     suspend fun fetchSingleTopicPage(
         initialTopicUrl: String,
@@ -901,7 +1345,8 @@ class EksiRepository @Inject constructor(
                 page = safePage,
                 filterMode = effectiveFilterMode,
                 searchKeywordInTopic = inTopicSearchKeyword,
-                forceStripTracked = trackedFallbackAlreadyActive || (safePage > 1)
+                forceStripTracked = trackedFallbackAlreadyActive || (safePage > 1),
+                forceAllEntriesFallback = todayFallbackAlreadyActive
             )
 
             val primaryHtml = webViewFetchBridge.fetchHtml(
@@ -918,14 +1363,14 @@ class EksiRepository @Inject constructor(
                 )
             }
 
-            // 1. Olaylar (?a=tracked) sekmesinde okunan başlığa tekrar tıklandığında boş gelme hatası kontrolü
             if (resultPageData.entries.isEmpty() && eksiParser.containsTrackedParam(targetUrl)) {
                 val cleanFallbackUrl = eksiParser.buildTopicPageUrl(
                     baseOrRawUrl = eksiParser.stripTrackedParameters(initialTopicUrl),
                     page = safePage,
                     filterMode = TopicFilterMode.ALL,
                     searchKeywordInTopic = inTopicSearchKeyword,
-                    forceStripTracked = true
+                    forceStripTracked = true,
+                    forceAllEntriesFallback = true
                 )
                 val fallbackHtml = webViewFetchBridge.fetchHtml(
                     rawUrl = cleanFallbackUrl,
@@ -942,16 +1387,17 @@ class EksiRepository @Inject constructor(
                 }
             }
 
-            // 2. "Sadece Bugün" (?a=popular) modunda bugün hiç entry girilmemişse otomatik tüm entry'lere fallback
-            if (resultPageData.entries.isEmpty() &&
+            if (safePage == 1 &&
+                resultPageData.entries.isEmpty() &&
                 (effectiveFilterMode == TopicFilterMode.TODAY_POPULAR || eksiParser.containsTodayPopularParam(targetUrl))
             ) {
                 val allEntriesFallbackUrl = eksiParser.buildTopicPageUrl(
                     baseOrRawUrl = eksiParser.stripTrackedParameters(baseForRequest),
-                    page = safePage,
+                    page = 1,
                     filterMode = TopicFilterMode.ALL,
                     searchKeywordInTopic = inTopicSearchKeyword,
-                    forceStripTracked = true
+                    forceStripTracked = true,
+                    forceAllEntriesFallback = true
                 )
                 val fallbackHtml = webViewFetchBridge.fetchHtml(
                     rawUrl = allEntriesFallbackUrl,
@@ -961,7 +1407,7 @@ class EksiRepository @Inject constructor(
                     eksiParser.parseTopicPage(
                         html = fallbackHtml,
                         requestedUrl = allEntriesFallbackUrl,
-                        fallbackPage = safePage,
+                        fallbackPage = 1,
                         usedTrackedFallback = resultPageData.usedTrackedFallback,
                         usedTodayFallback = true
                     )
@@ -976,7 +1422,6 @@ class EksiRepository @Inject constructor(
                 entry.copy(pageNumber = safePage)
             }
 
-            // Çekilen sayfadaki entry'lerin favori sayılarını da önbelleğe kaydet
             for (entry in finalEntries) {
                 if (entry.id.isNotBlank() && entry.favoriteCount >= 0) {
                     entryFavoriteCountCache["entry:${entry.id}"] = entry.favoriteCount
@@ -1006,7 +1451,7 @@ class EksiRepository @Inject constructor(
     suspend fun fetchBkzPreview(bkzQuery: String): Result<TopicPageData> = withContext(Dispatchers.IO) {
         try {
             val cleanQuery = bkzQuery.trim()
-            val encoded = android.net.Uri.encode(cleanQuery)
+            val encoded = Uri.encode(cleanQuery)
             val baseDomain = webViewFetchBridge.getActiveBaseDomain()
             val niceUrl = "$baseDomain/?q=$encoded&a=nice"
             val fallbackUrl = "$baseDomain/?q=$encoded"
@@ -1043,7 +1488,8 @@ class LeftFramePagingSource(
     private val section: LeftFrameSection,
     private val webViewFetchBridge: WebViewFetchBridge,
     private val eksiParser: EksiParser,
-    private val gundemPage1UrlCache: MutableSet<String>
+    private val gundemPage1UrlCache: MutableSet<String>,
+    private val onTopicsLoaded: (List<TopicItem>, Int) -> Unit = { _, _ -> }
 ) : PagingSource<Int, TopicItem>() {
 
     override fun getRefreshKey(state: PagingState<Int, TopicItem>): Int? {
@@ -1093,8 +1539,12 @@ class LeftFramePagingSource(
             if (section == LeftFrameSection.GUNDEM && page == 1 && items.isNotEmpty()) {
                 gundemPage1UrlCache.clear()
                 items.forEach { topic ->
-                    gundemPage1UrlCache.add(topic.cleanUrl.lowercase())
+                    gundemPage1UrlCache.add(topic.cleanUrl.trim().lowercase())
                 }
+            }
+
+            if (items.isNotEmpty()) {
+                onTopicsLoaded(items, page)
             }
 
             val canPaginate = (section == LeftFrameSection.GUNDEM || section == LeftFrameSection.BUGUN)
@@ -1112,18 +1562,14 @@ class LeftFramePagingSource(
 }
 
 /**
- * 3. "BUGÜN" VE "GÜNDEM" SEKMELERİNİN AYNI LİSTEYİ GÖSTERME HATASI ÇÖZÜMÜ:
- * - Önce `https://eksisozluk.com/basliklar/bugun?p={page}` (ve `/basliklar/bugun/{page}`) rotasını çeker.
- * - Ekşi Sözlük anonim oturumda `/basliklar/bugun` isteğine `/basliklar/gundem` ile birebir aynı
- *   popüler başlık listesini döndürdüğünde bunu otomatik tespit eder; Gündem 1. sayfasındaki başlıkları
- *   (`gundemPage1UrlCache`) filtreler ve o sayfaya karşılık gelen aktif kanallardan (`#siyaset`, `#ekonomi`,
- *   `#spor`, `#teknoloji`, `#sinema`, `#oyun`, `#bilim`, `#iliskiler`, `#saglik`, `#müzik`, `#tarih`, vb.)
- *   taze başlıkları çekip harmanlayarak Gündem'den %100 farklı, güncel bir "Bugün / Son Başlıklar" akışı üretir.
+ * Hızlandırılmış "Bugün" PagingSource:
+ * 1. Sayfa önbellekte (`bugunPageCache`) hazırsa (ör. Gündem'den 500ms sonra arka planda
+ *    `prefetchBugunTopics()` ile hazırlanmışsa veya sekme değiştirilmişse) 0ms'de ağa çıkmadan döndürür.
+ * 2. Önbellekte yoksa [EksiRepository.loadBugunPageProgressive] ile paralel 2 hızlı kaynaktan
+ *    ilk tamamlananı anında ekrana basar, ikinci tamamlandığında sessizce zenginleştirir.
  */
 class BugunTopicsPagingSource(
-    private val webViewFetchBridge: WebViewFetchBridge,
-    private val eksiParser: EksiParser,
-    private val gundemPage1UrlCache: MutableSet<String>
+    private val repository: EksiRepository
 ) : PagingSource<Int, TopicItem>() {
 
     override fun getRefreshKey(state: PagingState<Int, TopicItem>): Int? {
@@ -1136,114 +1582,21 @@ class BugunTopicsPagingSource(
     override suspend fun load(params: LoadParams<Int>): LoadResult<Int, TopicItem> {
         val page = params.key ?: 1
         return try {
-            val baseDomain = webViewFetchBridge.getActiveBaseDomain().ifBlank {
-                WebViewCookieJar.DEFAULT_BASE_URL
-            }.trimEnd('/')
-
-            // Gündem 1. sayfası henüz önbellekte yoksa karşılaştırma için bir kez çek
-            if (gundemPage1UrlCache.isEmpty()) {
-                runCatching {
-                    val gundemHtml = webViewFetchBridge.fetchHtml(
-                        rawUrl = "$baseDomain/basliklar/gundem?_=${System.currentTimeMillis()}",
-                        isAjax = true
-                    )
-                    val gundemItems = withContext(Dispatchers.Default) {
-                        eksiParser.parseLeftFrameTopics(gundemHtml, isTrackedSection = false)
-                    }
-                    gundemItems.forEach { gundemPage1UrlCache.add(it.cleanUrl.lowercase()) }
-                }
-            }
-
-            // 1. `/basliklar/bugun?p={page}` isteğini dene
-            val bugunUrl = "$baseDomain/basliklar/bugun?p=$page&_=${System.currentTimeMillis()}"
-            val bugunHtml = runCatching {
-                webViewFetchBridge.fetchHtml(rawUrl = bugunUrl, isAjax = true)
-            }.getOrDefault("")
-            val rawBugunItems = withContext(Dispatchers.Default) {
-                eksiParser.parseLeftFrameTopics(bugunHtml, isTrackedSection = false)
-            }
-
-            // 2. Gelen listenin Gündem 1. sayfası ile aynı olup olmadığını kontrol et
-            val overlapCount = rawBugunItems.count { gundemPage1UrlCache.contains(it.cleanUrl.lowercase()) }
-            val isDuplicateOfGundem = rawBugunItems.isEmpty() ||
-                (gundemPage1UrlCache.isNotEmpty() && overlapCount * 2 >= rawBugunItems.size)
-
-            val finalItems: List<TopicItem> = if (!isDuplicateOfGundem) {
-                rawBugunItems.filterNot { gundemPage1UrlCache.contains(it.cleanUrl.lowercase()) }
-                    .ifEmpty { rawBugunItems }
+            // 3. KURAL: Önbellekte hazır "Bugün" sayfası varsa 0 milisaniye bekleme ile anında döndür!
+            val cachedEntry = repository.getCachedBugunPage(page)
+            val items = if (cachedEntry != null && cachedEntry.items.isNotEmpty()) {
+                cachedEntry.items
             } else {
-                // Anonim oturumda `/basliklar/bugun` Gündem ile aynı döndüyse,
-                // Gündem 1. sayfasında OLMAYAN güncel kanal başlıklarını ve sonraki gündem sayfalarını derle
-                coroutineScope {
-                    val semaphore = Semaphore(3)
-                    val allChannels = EksiChannel.entries
-                    val channelIndexA = ((page - 1) * 3) % allChannels.size
-                    val channelIndexB = ((page - 1) * 3 + 1) % allChannels.size
-                    val channelIndexC = ((page - 1) * 3 + 2) % allChannels.size
-                    val selectedChannels = listOf(
-                        allChannels[channelIndexA],
-                        allChannels[channelIndexB],
-                        allChannels[channelIndexC]
-                    ).distinct()
-
-                    val channelDeferreds = selectedChannels.map { channel ->
-                        async(Dispatchers.IO) {
-                            semaphore.withPermit {
-                                runCatching {
-                                    val channelPage = ((page - 1) / 5) + 1
-                                    val url = eksiParser.buildChannelTopicsUrl(
-                                        baseDomain = baseDomain,
-                                        channel = channel,
-                                        page = channelPage,
-                                        useRawTurkishSlug = false
-                                    )
-                                    val html = webViewFetchBridge.fetchHtml(rawUrl = url, isAjax = true)
-                                    withContext(Dispatchers.Default) {
-                                        eksiParser.parseChannelTopics(html)
-                                    }
-                                }.getOrDefault(emptyList())
-                            }
-                        }
-                    }
-
-                    // Ayrıca Gündem'in ilerleyen sayfalarından (page + 1) Gündem 1. sayfasında olmayan taze başlıkları al
-                    val deeperAgendaDeferred = async(Dispatchers.IO) {
-                        semaphore.withPermit {
-                            runCatching {
-                                val deeperPage = (page + 1).coerceAtMost(15)
-                                val url = "$baseDomain/basliklar/gundem?p=$deeperPage&_=${System.currentTimeMillis()}"
-                                val html = webViewFetchBridge.fetchHtml(rawUrl = url, isAjax = true)
-                                withContext(Dispatchers.Default) {
-                                    eksiParser.parseLeftFrameTopics(html, isTrackedSection = false)
-                                }
-                            }.getOrDefault(emptyList())
-                        }
-                    }
-
-                    val channelLists = channelDeferreds.awaitAll()
-                    val deeperList = deeperAgendaDeferred.await()
-
-                    // Kanal listelerini sırayla (interleave) birleştir ve Gündem 1. sayfasında olanları çıkar
-                    val interleaved = mutableListOf<TopicItem>()
-                    val maxLen = (channelLists.map { it.size } + listOf(deeperList.size)).maxOrNull() ?: 0
-                    for (i in 0 until maxLen) {
-                        for (cList in channelLists) {
-                            if (i < cList.size) interleaved.add(cList[i])
-                        }
-                        if (i < deeperList.size) interleaved.add(deeperList[i])
-                    }
-
-                    interleaved
-                        .filterNot { gundemPage1UrlCache.contains(it.cleanUrl.lowercase()) }
-                        .distinctBy { it.cleanUrl.lowercase() }
-                        .distinctBy { it.title.trim().lowercase() }
-                }
+                repository.loadBugunPageProgressive(
+                    page = page,
+                    forceRefresh = false
+                )
             }
 
-            val nextKey = if (finalItems.isEmpty() || page >= 15) null else page + 1
+            val nextKey = if (items.isEmpty() || page >= 15) null else page + 1
 
             LoadResult.Page(
-                data = finalItems,
+                data = items,
                 prevKey = if (page == 1) null else page - 1,
                 nextKey = nextKey
             )
@@ -1260,7 +1613,8 @@ class BugunTopicsPagingSource(
 class ChannelTopicsPagingSource(
     private val channel: EksiChannel,
     private val webViewFetchBridge: WebViewFetchBridge,
-    private val eksiParser: EksiParser
+    private val eksiParser: EksiParser,
+    private val onTopicsLoaded: (List<TopicItem>) -> Unit = {}
 ) : PagingSource<Int, TopicItem>() {
 
     override fun getRefreshKey(state: PagingState<Int, TopicItem>): Int? {
@@ -1322,6 +1676,10 @@ class ChannelTopicsPagingSource(
                 }
             }
 
+            if (items.isNotEmpty()) {
+                onTopicsLoaded(items)
+            }
+
             val nextKey = if (items.isEmpty() || page >= 15) null else page + 1
 
             LoadResult.Page(
@@ -1338,7 +1696,8 @@ class ChannelTopicsPagingSource(
 class SearchTopicsPagingSource(
     private val filter: SearchFilter,
     private val webViewFetchBridge: WebViewFetchBridge,
-    private val eksiParser: EksiParser
+    private val eksiParser: EksiParser,
+    private val onTopicsLoaded: (List<TopicItem>) -> Unit = {}
 ) : PagingSource<Int, TopicItem>() {
 
     override fun getRefreshKey(state: PagingState<Int, TopicItem>): Int? {
@@ -1367,6 +1726,10 @@ class SearchTopicsPagingSource(
                     query = filter.keywords,
                     requestedPage = page
                 )
+            }
+
+            if (parsedPage.topics.isNotEmpty()) {
+                onTopicsLoaded(parsedPage.topics)
             }
 
             val nextKey = if (parsedPage.topics.isEmpty() || page >= parsedPage.pageCount) {

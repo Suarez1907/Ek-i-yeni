@@ -71,11 +71,11 @@ import com.example.ui.theme.OledTextSecondary
  * `✨ AI Özet` çipine basıldığında açılan ve başlığın:
  * a) "Başlığı 5 Maddede Özetle"
  * b) "Fikir Ayrılıklarını ve Baskın Görüşü Çıkar"
- * analizlerini doğrudan OkHttp ile `gemini-3.5-flash-lite` (ve otomatik fallback zinciri) REST API üzerinden gösteren alt pencere.
+ * analizlerini doğrudan OkHttp SSE (`:streamGenerateContent?alt=sse`) ile `gemini-3.5-flash-lite`
+ * (ve otomatik fallback zinciri) üzerinden gösteren alt pencere.
  *
- * Eğer `SharedPreferences` içinde kayıtlı bir Gemini API anahtarı yoksa, otomatik API çağrısı
- * yapılmaz ve kırmızı hata mesajı gösterilmez; sadece "Google AI Studio API Anahtarınızı Girin"
- * `OutlinedTextField` alanı ve "Kaydet ve Özetle" butonu gösterilir.
+ * API anahtarı cihazda Android Keystore (`AES/GCM/NoPadding`) ile şifrelenerek saklanır ve
+ * yalnızca `x-goog-api-key` HTTP header'ı üzerinden gönderilir.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -84,6 +84,7 @@ fun GeminiSummaryBottomSheet(
     streamState: GeminiStreamState,
     hasSavedApiKey: Boolean = true,
     savedApiKey: String = "",
+    keyDecryptionWarning: String? = null,
     onSelectMode: (GeminiAnalysisMode) -> Unit,
     onSaveApiKeyAndSummarize: (String, GeminiAnalysisMode) -> Unit = { _, _ -> },
     onDismiss: () -> Unit
@@ -242,8 +243,17 @@ fun GeminiSummaryBottomSheet(
                             .padding(12.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
+                        if (!keyDecryptionWarning.isNullOrBlank()) {
+                            Text(
+                                text = keyDecryptionWarning,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.error,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+
                         Text(
-                            text = "Ücretsiz Google AI Studio API anahtarınızı girerek Gemini 3.5 Flash-Lite ile canlı özetlemeyi başlatın:",
+                            text = "Ücretsiz Google AI Studio API anahtarınızı girerek Gemini 3.5 Flash-Lite ile canlı SSE özetlemeyi başlatın. Anahtarınız cihazınızda Android Keystore (AES-GCM) ile şifrelenerek saklanır.",
                             style = MaterialTheme.typography.labelSmall,
                             color = OledTextSecondary
                         )
@@ -362,7 +372,7 @@ fun GeminiSummaryBottomSheet(
                                         strokeWidth = 2.5.dp
                                     )
                                     Text(
-                                        text = "Entry'ler taranıyor, Gemini 3.5 Flash-Lite yanıtı hazırlanıyor...",
+                                        text = "Entry'ler taranıyor, Gemini 3.5 Flash-Lite SSE akışı başlatılıyor...",
                                         style = MaterialTheme.typography.bodyMedium,
                                         color = OledTextSecondary
                                     )
@@ -386,7 +396,7 @@ fun GeminiSummaryBottomSheet(
                                         )
                                         Spacer(modifier = Modifier.width(6.dp))
                                         Text(
-                                            text = "Gemini 3.5 Flash-Lite Canlı Özet Akışı...",
+                                            text = "Gemini 3.5 Flash-Lite Canlı SSE Akışı...",
                                             style = MaterialTheme.typography.labelSmall,
                                             color = EksiNeonGreen,
                                             fontWeight = FontWeight.Bold
