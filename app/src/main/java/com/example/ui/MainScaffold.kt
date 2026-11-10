@@ -10,6 +10,8 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -640,6 +642,7 @@ fun MainScaffold(
                                         preferTodayMode = selectedSection != LeftFrameSection.OLAYLAR
                                     )
                                 },
+                                onTopicWarm = viewModel::warmTopicOnPress,
                                 onOpenCloudflare = { viewModel.openCloudflareVerification() },
                                 emptyMessage = "$emptyTitle sekmesinde başlık bulunamadı."
                             )
@@ -666,6 +669,7 @@ fun MainScaffold(
                                         preferTodayMode = true
                                     )
                                 },
+                                onTopicWarm = viewModel::warmTopicOnPress,
                                 onOpenCloudflare = { viewModel.openCloudflareVerification() },
                                 emptyMessage = "Bugün sekmesinde başlık bulunamadı."
                             )
@@ -901,6 +905,7 @@ private fun ChannelsScreenContent(
             readStateByUrl = readStateByUrl,
             lastSeenEntryCounts = lastSeenEntryCounts,
             onTopicClick = onTopicClick,
+            onTopicWarm = viewModel::warmTopicOnPress,
             onOpenCloudflare = onOpenCloudflare,
             emptyMessage = "${selectedChannel.hashtag} kanalında güncel başlık bulunamadı."
         )
@@ -1129,7 +1134,8 @@ private fun DebeAndPeriodicBestsScreenContent(
                     ) {
                         itemsIndexed(
                             items = state.items,
-                            key = { _, item -> item.url.ifBlank { item.id } }
+                            key = { _, item -> item.url.ifBlank { item.id } },
+                            contentType = { _, _ -> "ranked_row" }
                         ) { index, item ->
                             val cleanUrl = item.url.substringBefore('?').trim().lowercase()
                             val titleKey = "title:${item.title.trim().lowercase()}"
@@ -1405,7 +1411,8 @@ private fun SearchScreenContent(
                         // 1) Başlık Önerileri (Titles)
                         itemsIndexed(
                             items = autocompleteState.titleSuggestions,
-                            key = { _, item -> "ac_title_${item.title}" }
+                            key = { _, item -> "ac_title_${item.title}" },
+                            contentType = { _, _ -> "ac_title" }
                         ) { _, suggestion ->
                             Row(
                                 modifier = Modifier
@@ -1462,7 +1469,8 @@ private fun SearchScreenContent(
                         // 2) Yazar Önerileri (Nicks)
                         itemsIndexed(
                             items = autocompleteState.nickSuggestions,
-                            key = { _, nick -> "ac_nick_$nick" }
+                            key = { _, nick -> "ac_nick_$nick" },
+                            contentType = { _, _ -> "ac_nick" }
                         ) { _, nick ->
                             Row(
                                 modifier = Modifier
@@ -1565,6 +1573,7 @@ private fun SearchScreenContent(
                 readStateByUrl = readStateByUrl,
                 lastSeenEntryCounts = lastSeenEntryCounts,
                 onTopicClick = onTopicClick,
+                onTopicWarm = viewModel::warmTopicOnPress,
                 onOpenCloudflare = onOpenCloudflare,
                 emptyMessage = "\"${submittedFilter.keywords}\" için başlık sonucu bulunamadı."
             )
@@ -1587,6 +1596,7 @@ private fun TopicPagingList(
     readStateByUrl: Map<String, TopicReadStateEntity>,
     lastSeenEntryCounts: Map<String, Int>,
     onTopicClick: (TopicItem) -> Unit,
+    onTopicWarm: (TopicItem) -> Unit = {},
     onOpenCloudflare: () -> Unit,
     emptyMessage: String
 ) {
@@ -1654,7 +1664,15 @@ private fun TopicPagingList(
                         modifier = Modifier
                             .fillMaxWidth()
                             .background(MaterialTheme.colorScheme.background)
-                            .clickable { onTopicClick(item) }
+                            .pointerInput(item.id, item.url) {
+                                detectTapGestures(
+                                    onPress = {
+                                        onTopicWarm(item)
+                                        tryAwaitRelease()
+                                    },
+                                    onTap = { onTopicClick(item) }
+                                )
+                            }
                             .padding(horizontal = 16.dp, vertical = 14.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween
@@ -2182,7 +2200,7 @@ private fun ProfileAndStudioScreenContent(
                 )
             }
         } else {
-            items(readStates, key = { it.topicKey }) { state: TopicReadStateEntity ->
+            items(readStates, key = { it.topicKey }, contentType = { "read_state" }) { state: TopicReadStateEntity ->
                 Card(
                     shape = RoundedCornerShape(12.dp),
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
@@ -2237,7 +2255,7 @@ private fun ProfileAndStudioScreenContent(
             )
         }
 
-        items(bookmarks, key = { it.entryId }) { item: BookmarkedEntryEntity ->
+        items(bookmarks, key = { it.entryId }, contentType = { "bookmark" }) { item: BookmarkedEntryEntity ->
             Card(
                 shape = RoundedCornerShape(12.dp),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),

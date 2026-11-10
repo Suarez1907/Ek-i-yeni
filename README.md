@@ -56,3 +56,24 @@ Use the same keystore for every release. A new keystore produces an APK that can
 1. Create one upload keystore and store it outside the repo.
 2. Add the four GitHub Actions secrets above if you want CI release APKs.
 3. Keep the keystore backed up. It cannot be recovered from the APK.
+
+## Baseline profile
+
+A startup profile and a baseline profile are already checked in under `app/src/release/generated/baselineProfiles/`. They were collected on an Android 15 (`aosp_atd` x86_64) emulator by cold-starting the app. Regenerate them on a phone or emulator with:
+
+```bash
+./gradlew :app:generateBaselineProfile
+```
+
+That writes the profile into the app module. The next release build installs it with ProfileInstaller. The generator needs a writable device (`adb devices` shows one). An emulator image such as `system-images;android-35;aosp_atd;x86_64` is enough.
+
+## Compose stability reports
+
+`compose_compiler.conf` marks the list and entry models as stable. A debug compile writes reports and metrics to:
+
+- `app/build/compose-reports`
+- `app/build/compose-metrics`
+
+```bash
+./gradlew :app:compileDebugKotlin
+```
