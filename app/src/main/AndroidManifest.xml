@@ -7,7 +7,8 @@
 
     <application
         android:name=".EksinApplication"
-        android:allowBackup="true"
+        android:allowBackup="false"
+        tools:targetApi="31"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"

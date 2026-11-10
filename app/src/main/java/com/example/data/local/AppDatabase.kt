@@ -38,6 +38,9 @@ interface EksinDao {
 
     @Query("SELECT EXISTS(SELECT 1 FROM bookmarked_entries WHERE entryId = :entryId)")
     fun isEntryBookmarked(entryId: String): Flow<Boolean>
+
+    @Query("SELECT EXISTS(SELECT 1 FROM bookmarked_entries WHERE entryId = :entryId)")
+    suspend fun isEntryBookmarkedNow(entryId: String): Boolean
 }
 
 @Database(
@@ -46,7 +49,7 @@ interface EksinDao {
         BookmarkedEntryEntity::class
     ],
     version = 2,
-    exportSchema = false
+    exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun readStateDao(): ReadStateDao

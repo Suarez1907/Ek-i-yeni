@@ -1,0 +1,177 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 2,
+    "identityHash": "e50c30de78452e2cbb2797ffc1d695a9",
+    "entities": [
+      {
+        "tableName": "topic_read_states",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`topic_key` TEXT NOT NULL, `topic_id` TEXT NOT NULL, `topic_title` TEXT NOT NULL, `topic_slug` TEXT NOT NULL, `topic_url` TEXT NOT NULL, `entry_id` TEXT NOT NULL, `page_number` INTEGER NOT NULL, `scroll_index` INTEGER NOT NULL, `scroll_offset` INTEGER NOT NULL, `total_known_pages` INTEGER NOT NULL, `updated_at_ms` INTEGER NOT NULL, PRIMARY KEY(`topic_key`))",
+        "fields": [
+          {
+            "fieldPath": "topicKey",
+            "columnName": "topic_key",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "topicId",
+            "columnName": "topic_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "topicTitle",
+            "columnName": "topic_title",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "topicSlug",
+            "columnName": "topic_slug",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "topicUrl",
+            "columnName": "topic_url",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "entryId",
+            "columnName": "entry_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "pageNumber",
+            "columnName": "page_number",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "scrollIndex",
+            "columnName": "scroll_index",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "scrollOffset",
+            "columnName": "scroll_offset",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "totalKnownPages",
+            "columnName": "total_known_pages",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAtMs",
+            "columnName": "updated_at_ms",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "topic_key"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_topic_read_states_topic_id",
+            "unique": false,
+            "columnNames": [
+              "topic_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_topic_read_states_topic_id` ON `${TABLE_NAME}` (`topic_id`)"
+          },
+          {
+            "name": "index_topic_read_states_updated_at_ms",
+            "unique": false,
+            "columnNames": [
+              "updated_at_ms"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_topic_read_states_updated_at_ms` ON `${TABLE_NAME}` (`updated_at_ms`)"
+          }
+        ]
+      },
+      {
+        "tableName": "bookmarked_entries",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`entryId` TEXT NOT NULL, `topicTitle` TEXT NOT NULL, `topicUrl` TEXT NOT NULL, `contentHtml` TEXT NOT NULL, `contentText` TEXT NOT NULL, `author` TEXT NOT NULL, `dateText` TEXT NOT NULL, `favoriteCount` INTEGER NOT NULL, `savedAtMs` INTEGER NOT NULL, PRIMARY KEY(`entryId`))",
+        "fields": [
+          {
+            "fieldPath": "entryId",
+            "columnName": "entryId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "topicTitle",
+            "columnName": "topicTitle",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "topicUrl",
+            "columnName": "topicUrl",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "contentHtml",
+            "columnName": "contentHtml",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "contentText",
+            "columnName": "contentText",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "author",
+            "columnName": "author",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "dateText",
+            "columnName": "dateText",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "favoriteCount",
+            "columnName": "favoriteCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "savedAtMs",
+            "columnName": "savedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "entryId"
+          ]
+        }
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'e50c30de78452e2cbb2797ffc1d695a9')"
+    ]
+  }
+}
