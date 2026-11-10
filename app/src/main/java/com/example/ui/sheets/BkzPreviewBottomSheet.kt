@@ -263,7 +263,7 @@ fun BkzPreviewBottomSheet(
                         ) {
                             itemsIndexed(
                                 items = entries,
-                                key = { idx, entry -> "bkz_${idx}_${entry.id}" },
+                                key = { _, entry -> entry.id.ifBlank { entry.plainText.hashCode().toString() } },
                                 contentType = { _, _ -> "bkz_entry_card" }
                             ) { _, entry ->
                                 BkzPreviewEntryCard(entry = entry)

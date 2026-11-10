@@ -13,6 +13,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -189,6 +190,16 @@ fun TopicDetailScreen(
     val coroutineScope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
     val listState = rememberLazyListState()
+    val imagesSettled by remember {
+        derivedStateOf { !listState.isScrollInProgress }
+    }
+    val onBkzClick = remember(viewModel) { { query: String -> viewModel.openBkzPreview(query) } }
+    val onExternalUrlClick = remember(context) {
+        { url: String ->
+            runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
+            Unit
+        }
+    }
     val isHeaderVisible by rememberDetailHeaderVisibility(listState)
 
     val activeTitle = metadata?.topicTitle?.takeIf { it.isNotBlank() } ?: topic.title
@@ -229,11 +240,15 @@ fun TopicDetailScreen(
     // 4. KURAL: Yeni sayfa verisi yüklendikten (`loadSequence` değiştiğinde) sonra:
     // - İlk açılışta kaydedilmiş okuma konumu varsa bir kez o entry'ye kaydır ve temizle.
     // - Kullanıcı sayfa değiştirdiyse (`goToPage`) listeyi en üste (`scrollToItem(0)`) sar.
-    val latestLoadSequence = (pageUiState as? TopicPageUiState.Success)?.loadSequence ?: 0
+    val latestSuccess = pageUiState as? TopicPageUiState.Success
+    val latestLoadSequence = latestSuccess?.loadSequence ?: 0
     LaunchedEffect(latestLoadSequence) {
         if (latestLoadSequence <= 0) return@LaunchedEffect
+        if (latestSuccess?.scrollAnchor == TopicScrollAnchor.KEEP) return@LaunchedEffect
         val saved = restoredReadState
-        if (saved != null && currentEntries.isNotEmpty()) {
+        if (latestSuccess?.scrollAnchor == TopicScrollAnchor.RESTORE &&
+            saved != null && currentEntries.isNotEmpty()
+        ) {
             val headerOffset = if (isSingleEntryOrFiltered) 1 else 0
             val matchedEntryIdx = currentEntries.indexOfFirst { it.id == saved.entryId }
             val targetLazyIndex = if (matchedEntryIdx >= 0) {
@@ -791,11 +806,8 @@ fun TopicDetailScreen(
                             contentType = { _, _ -> "entry_card" }
                         ) { _, entry ->
                             val isFavorited = favoritedIds.contains(entry.id) || entry.isFavorited
-
-                            SwipeableEntryOledCard(
-                                entry = entry,
-                                isFavorited = isFavorited,
-                                onSwipeRightSukelaFav = {
+                            val onFav = remember(entry.id, isFavorited) {
+                                {
                                     viewModel.toggleSukelaOrFavorite(entry)
                                     coroutineScope.launch {
                                         snackbarHostState.showSnackbar(
@@ -807,8 +819,11 @@ fun TopicDetailScreen(
                                             duration = SnackbarDuration.Short
                                         )
                                     }
-                                },
-                                onSwipeLeftAuthorOrShare = {
+                                    Unit
+                                }
+                            }
+                            val onAuthorFilter = remember(entry.id, entry.author) {
+                                {
                                     viewModel.filterByAuthorInTopic(entry.author)
                                     coroutineScope.launch {
                                         val result = snackbarHostState.showSnackbar(
@@ -820,40 +835,40 @@ fun TopicDetailScreen(
                                             shareEntry(entry)
                                         }
                                     }
-                                },
-                                onAuthorClick = { authorName ->
+                                    Unit
+                                }
+                            }
+                            val onAuthor = remember(entry.author, entry.authorProfileUrl) {
+                                { _: String ->
                                     val profile = entry.authorProfileUrl.ifBlank {
                                         val domain = viewModel.webViewFetchBridge.getActiveBaseDomain().trimEnd('/')
-                                        "$domain/biri/${android.net.Uri.encode(authorName)}"
+                                        "$domain/biri/${Uri.encode(entry.author)}"
                                     }
-                                    if (profile.isNotBlank()) {
-                                        try {
-                                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(profile)))
-                                        } catch (_: Exception) {
-                                        }
-                                    }
-                                },
-                                onShareEntry = {
-                                    shareEntry(entry)
-                                },
-                                onBkzClick = { bkzQuery ->
-                                    viewModel.openBkzPreview(bkzQuery)
-                                },
-                                onExternalUrlClick = { externalUrl ->
-                                    try {
-                                        context.startActivity(
-                                            Intent(Intent.ACTION_VIEW, Uri.parse(externalUrl))
-                                        )
-                                    } catch (_: Exception) {
-                                    }
-                                },
-                                onSummarizeSingle = {
+                                    if (profile.isNotBlank()) onExternalUrlClick(profile)
+                                }
+                            }
+                            val onShare = remember(entry.id) { { shareEntry(entry) } }
+                            val onSummarize = remember(entry.id) {
+                                {
                                     viewModel.runGeminiAnalysisStream(
                                         mode = GeminiAnalysisMode.FIVE_BULLET_SUMMARY,
                                         topicTitle = "${entry.topicTitle} (#${entry.id})",
                                         entries = listOf(entry)
                                     )
                                 }
+                            }
+
+                            SwipeableEntryOledCard(
+                                entry = entry,
+                                isFavorited = isFavorited,
+                                loadImages = imagesSettled,
+                                onSwipeRightSukelaFav = onFav,
+                                onSwipeLeftAuthorOrShare = onAuthorFilter,
+                                onAuthorClick = onAuthor,
+                                onShareEntry = onShare,
+                                onBkzClick = onBkzClick,
+                                onExternalUrlClick = onExternalUrlClick,
+                                onSummarizeSingle = onSummarize
                             )
                         }
 
@@ -953,7 +968,8 @@ fun SwipeableEntryOledCard(
     onShareEntry: () -> Unit,
     onBkzClick: (String) -> Unit,
     onExternalUrlClick: (String) -> Unit,
-    onSummarizeSingle: () -> Unit
+    onSummarizeSingle: () -> Unit,
+    loadImages: Boolean = true
 ) {
     val dismissState = rememberSwipeToDismissBoxState(
         confirmValueChange = { targetValue ->
@@ -1133,6 +1149,7 @@ fun SwipeableEntryOledCard(
                         inlineImageUrls.forEach { imageUrl ->
                             InlineEntryImagePreview(
                                 imageUrl = imageUrl,
+                                loadImage = loadImages,
                                 onOpenExternal = { onExternalUrlClick(imageUrl) }
                             )
                         }
@@ -1242,6 +1259,7 @@ fun SwipeableEntryOledCard(
 @Composable
 private fun InlineEntryImagePreview(
     imageUrl: String,
+    loadImage: Boolean,
     onOpenExternal: () -> Unit
 ) {
     Card(
@@ -1259,30 +1277,35 @@ private fun InlineEntryImagePreview(
                 host.contains("ekstat") ||
                 host.contains("eksiseyler")
             var revealRemote by remember(imageUrl) { mutableStateOf(trustedHost) }
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(16f / 9f)
+                    .clip(RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+            ) {
             if (!revealRemote) {
-                TextButton(onClick = { revealRemote = true }) {
+                TextButton(
+                    onClick = { revealRemote = true },
+                    modifier = Modifier.align(Alignment.Center)
+                ) {
                     Text("Üçüncü taraf görseli yükle", color = EksiNeonGreen)
                 }
+            } else if (!loadImage) {
+                Box(Modifier.fillMaxSize().oledShimmerBackground())
             } else SubcomposeAsyncImage(
                 model = ImageRequest.Builder(LocalContext.current)
                     .data(imageUrl)
                     .size(1080, 720)
                     .precision(Precision.INEXACT)
+                    .memoryCacheKey(imageUrl)
                     .crossfade(false)
                     .build(),
                 contentDescription = "Entry içi görsel önizleme",
-                contentScale = ContentScale.FillWidth,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 64.dp, max = 320.dp)
-                    .clip(RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp)),
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
                 loading = {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(160.dp)
-                            .oledShimmerBackground()
-                    )
+                    Box(Modifier.fillMaxSize().oledShimmerBackground())
                 },
                 error = {
                     Row(
@@ -1324,6 +1347,7 @@ private fun InlineEntryImagePreview(
                     }
                 }
             )
+            }
 
             Row(
                 modifier = Modifier

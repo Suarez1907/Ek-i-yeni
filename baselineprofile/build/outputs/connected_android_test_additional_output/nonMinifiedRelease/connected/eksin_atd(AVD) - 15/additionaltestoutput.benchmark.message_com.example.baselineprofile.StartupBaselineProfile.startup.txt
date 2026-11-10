@@ -1,0 +1,6 @@
+StartupBaselineProfile_startup
+Total run time Ns: 137926920797.
+Baseline profile [results](file://StartupBaselineProfile_startup-startup-prof-2026-11-10-16-30-35.txt)
+
+To copy the profile use:
+adb -s EMULATOR37X2X13X0 pull "/sdcard/Android/media/com.example.baselineprofile/additional_test_output/StartupBaselineProfile_startup-startup-prof.txt" .

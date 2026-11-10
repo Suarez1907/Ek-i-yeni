@@ -88,13 +88,23 @@ sealed interface AiImageState {
  * Paging 3'ün `prevKey` / `nextKey` sonsuz geri sarma döngüsü yerine
  * kullanıcının seçtiği `currentPage` sayfasını tekil ve deterministik olarak tutar.
  */
+enum class TopicScrollAnchor {
+    /** Same page was refreshed in place. Do not move the list. */
+    KEEP,
+    /** The reader picked another page. */
+    TOP,
+    /** First open should return to the saved entry when one exists. */
+    RESTORE
+}
+
 sealed interface TopicPageUiState {
     data object Idle : TopicPageUiState
     data class Loading(val targetPage: Int) : TopicPageUiState
     data class Success(
         val pageData: TopicPageData,
         val entries: List<EntryItem>,
-        val loadSequence: Int
+        val loadSequence: Int,
+        val scrollAnchor: TopicScrollAnchor = TopicScrollAnchor.TOP
     ) : TopicPageUiState
     data class Error(
         val targetPage: Int,
@@ -233,6 +243,8 @@ class EksinViewModel @Inject constructor(
     val topicPageUiState: StateFlow<TopicPageUiState> = _topicPageUiState.asStateFlow()
 
     private val pageMemoryCache = ConcurrentHashMap<Int, TopicPageData>()
+    private val topicWarmCache = ConcurrentHashMap<String, TopicPageData>()
+    private var topicWarmJob: Job? = null
     private var openTopicJob: Job? = null
     private var activePageLoadJob: Job? = null
     private var activePrefetchJob: Job? = null
@@ -511,28 +523,20 @@ class EksinViewModel @Inject constructor(
         val safeCount = entryCount.coerceAtLeast(0)
 
         val currentMap = _lastSeenEntryCounts.value.toMutableMap()
-        val editor = readCountPrefs.edit()
-
-        if (urlKey.isNotBlank()) {
-            currentMap[urlKey] = safeCount
-            editor.putInt(urlKey, safeCount)
-        }
-        if (topicTitle.isNotBlank()) {
-            currentMap[titleKey] = safeCount
-            editor.putInt(titleKey, safeCount)
-        }
-
+        if (urlKey.isNotBlank()) currentMap[urlKey] = safeCount
+        if (topicTitle.isNotBlank()) currentMap[titleKey] = safeCount
         if (currentMap.size > MAX_READ_COUNT_KEYS) {
             val overflow = currentMap.size - MAX_READ_COUNT_KEYS
-            val victims = currentMap.keys.take(overflow)
-            victims.forEach { key ->
-                currentMap.remove(key)
-                editor.remove(key)
-            }
+            currentMap.keys.take(overflow).forEach { currentMap.remove(it) }
         }
-
-        editor.apply()
         _lastSeenEntryCounts.value = currentMap
+        val snapshot = currentMap.toMap()
+        viewModelScope.launch(Dispatchers.IO) {
+            val editor = readCountPrefs.edit()
+            editor.clear()
+            snapshot.forEach { (key, value) -> editor.putInt(key, value) }
+            editor.apply()
+        }
     }
 
     // 4. TEMA YÖNETİMİ
@@ -844,6 +848,11 @@ class EksinViewModel @Inject constructor(
         activePageLoadJob?.cancel()
         activePrefetchJob?.cancel()
         pageMemoryCache.clear()
+        val warmKey = topic.cleanUrl.ifBlank { topic.url }
+        val warmed = if (preferTodayMode) topicWarmCache[warmKey] else null
+        if (warmed != null) {
+            pageMemoryCache[warmed.currentPage.coerceAtLeast(1)] = warmed
+        }
 
         recordTopicSeenEntryCount(
             rawUrl = topic.cleanUrl,
@@ -890,9 +899,37 @@ class EksinViewModel @Inject constructor(
             _totalPages.value = startPage.coerceAtLeast(1)
             goToPage(
                 targetPage = startPage,
-                forceRefresh = true,
-                preserveRestoredReadState = true
+                forceRefresh = warmed == null || startPage != warmed.currentPage,
+                preserveRestoredReadState = true,
+                scrollAnchor = if (_restoredReadState.value != null) {
+                    TopicScrollAnchor.RESTORE
+                } else {
+                    TopicScrollAnchor.TOP
+                },
+                revalidateQuietly = warmed != null && startPage == warmed.currentPage
             )
+        }
+    }
+
+    /**
+     * Starts the topic's first page when the finger goes down, so the open can paint
+     * from memory if the request finishes before the click.
+     */
+    fun warmTopicOnPress(topic: TopicItem) {
+        val key = topic.cleanUrl.ifBlank { topic.url }
+        if (key.isBlank() || topicWarmCache.containsKey(key)) return
+        if (topic.url.contains("/entry/", ignoreCase = true)) return
+        topicWarmJob?.cancel()
+        topicWarmJob = viewModelScope.launch(Dispatchers.IO) {
+            val page = repository.fetchSingleTopicPage(
+                initialTopicUrl = topic.url,
+                page = 1,
+                filterMode = TopicFilterMode.TODAY_POPULAR
+            ).getOrNull() ?: return@launch
+            topicWarmCache[key] = page
+            while (topicWarmCache.size > 6) {
+                topicWarmCache.keys.firstOrNull()?.let { topicWarmCache.remove(it) }
+            }
         }
     }
 
@@ -914,7 +951,9 @@ class EksinViewModel @Inject constructor(
     fun goToPage(
         targetPage: Int,
         forceRefresh: Boolean = false,
-        preserveRestoredReadState: Boolean = false
+        preserveRestoredReadState: Boolean = false,
+        scrollAnchor: TopicScrollAnchor? = null,
+        revalidateQuietly: Boolean = false
     ) {
         val currentTopic = _selectedTopic.value ?: return
         val knownMax = _totalPages.value.coerceAtLeast(1)
@@ -951,12 +990,29 @@ class EksinViewModel @Inject constructor(
             else -> currentTopic.url
         }
 
+        val displayedPage = (_topicPageUiState.value as? TopicPageUiState.Success)?.pageData?.currentPage
+        val anchor = scrollAnchor ?: if (displayedPage != null && displayedPage == requestedPage) {
+            TopicScrollAnchor.KEEP
+        } else {
+            TopicScrollAnchor.TOP
+        }
         _currentPage.value = requestedPage
 
         if (!forceRefresh) {
             val cachedPage = pageMemoryCache[requestedPage]
             if (cachedPage != null) {
-                applyLoadedPageData(cachedPage)
+                applyLoadedPageData(cachedPage, anchor)
+                if (revalidateQuietly) {
+                    revalidatePageQuietly(
+                        baseTopicUrl = cachedPage.activeFilterQueryUrl.ifBlank { baseTopicUrl },
+                        requestedPage = requestedPage,
+                        filterMode = filterMode,
+                        inTopicKeyword = inTopicKeyword,
+                        trackedFallbackActive = cachedPage.usedTrackedFallback,
+                        todayFallbackActive = cachedPage.usedTodayFallback,
+                        sessionAtStart = loadedTopicSessionKey
+                    )
+                }
                 prefetchNextPageInBackground(
                     baseTopicUrl = cachedPage.activeFilterQueryUrl.ifBlank { baseTopicUrl },
                     currentPage = cachedPage.currentPage,
@@ -988,7 +1044,7 @@ class EksinViewModel @Inject constructor(
             result.fold(
                 onSuccess = { pageData ->
                     pageMemoryCache[pageData.currentPage] = pageData
-                    applyLoadedPageData(pageData)
+                    applyLoadedPageData(pageData, anchor)
 
                     prefetchNextPageInBackground(
                         baseTopicUrl = pageData.activeFilterQueryUrl.ifBlank { baseTopicUrl },
@@ -1010,7 +1066,35 @@ class EksinViewModel @Inject constructor(
         }
     }
 
-    private fun applyLoadedPageData(pageData: TopicPageData) {
+    private fun revalidatePageQuietly(
+        baseTopicUrl: String,
+        requestedPage: Int,
+        filterMode: TopicFilterMode,
+        inTopicKeyword: String,
+        trackedFallbackActive: Boolean,
+        todayFallbackActive: Boolean,
+        sessionAtStart: String
+    ) {
+        activePageLoadJob = viewModelScope.launch {
+            val result = repository.fetchSingleTopicPage(
+                initialTopicUrl = baseTopicUrl,
+                resolvedCleanTopicUrl = baseTopicUrl,
+                page = requestedPage,
+                filterMode = filterMode,
+                inTopicSearchKeyword = inTopicKeyword,
+                trackedFallbackAlreadyActive = trackedFallbackActive,
+                todayFallbackAlreadyActive = todayFallbackActive
+            )
+            if (loadedTopicSessionKey != sessionAtStart) return@launch
+            if (_currentPage.value != requestedPage) return@launch
+            result.onSuccess { pageData ->
+                pageMemoryCache[pageData.currentPage] = pageData
+                applyLoadedPageData(pageData, TopicScrollAnchor.KEEP)
+            }
+        }
+    }
+
+    private fun applyLoadedPageData(pageData: TopicPageData, scrollAnchor: TopicScrollAnchor) {
         val resolvedPage = pageData.currentPage.coerceAtLeast(1)
         val resolvedTotal = pageData.pageCount.coerceAtLeast(resolvedPage)
         _currentPage.value = resolvedPage
@@ -1038,7 +1122,8 @@ class EksinViewModel @Inject constructor(
         _topicPageUiState.value = TopicPageUiState.Success(
             pageData = pageData,
             entries = pageData.entries,
-            loadSequence = seq
+            loadSequence = seq,
+            scrollAnchor = scrollAnchor
         )
     }
 
@@ -1084,7 +1169,11 @@ class EksinViewModel @Inject constructor(
     fun refreshCurrentTopicPage() {
         val page = _currentPage.value.coerceAtLeast(1)
         pageMemoryCache.remove(page)
-        goToPage(targetPage = page, forceRefresh = true)
+        goToPage(
+            targetPage = page,
+            forceRefresh = true,
+            scrollAnchor = TopicScrollAnchor.KEEP
+        )
     }
 
     /**

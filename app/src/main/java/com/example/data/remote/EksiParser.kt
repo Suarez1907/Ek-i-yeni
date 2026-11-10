@@ -67,7 +67,7 @@ class EksiParser @Inject constructor() {
             doc.select("ul.topic-list li, #partial-index ul li, #content-body ul.topic-list li, ul#threads li")
         }
 
-        val topics = mutableListOf<TopicItem>()
+        val topics = LinkedHashMap<String, TopicItem>(listItems.size)
         for (li in listItems) {
             if (li.hasClass("sponsored") || li.id().contains("sponsored", ignoreCase = true)) {
                 continue
@@ -114,8 +114,8 @@ class EksiParser @Inject constructor() {
             val topicId = extractTopicId(normalizedUrl).ifBlank { slug.ifBlank { normalizedUrl } }
             val isTracked = isTrackedSection || containsTrackedParam(normalizedUrl)
 
-            topics.add(
-                TopicItem(
+            if (!topics.containsKey(normalizedUrl)) {
+                topics[normalizedUrl] = TopicItem(
                     id = topicId,
                     title = title,
                     slug = slug,
@@ -125,10 +125,10 @@ class EksiParser @Inject constructor() {
                     favoriteCount = favAttr,
                     isTracked = isTracked
                 )
-            )
+            }
         }
 
-        return topics.distinctBy { it.url }
+        return topics.values.toList()
     }
 
     /**

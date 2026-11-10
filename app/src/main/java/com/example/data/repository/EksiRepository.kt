@@ -702,7 +702,7 @@ class EksiRepository @Inject constructor(
         return Pager(
             config = PagingConfig(
                 pageSize = 25,
-                prefetchDistance = 20,
+                prefetchDistance = 40,
                 initialLoadSize = 25,
                 enablePlaceholders = false
             ),
@@ -732,7 +732,7 @@ class EksiRepository @Inject constructor(
         return Pager(
             config = PagingConfig(
                 pageSize = 25,
-                prefetchDistance = 20,
+                prefetchDistance = 40,
                 initialLoadSize = 25,
                 enablePlaceholders = false
             ),
@@ -753,7 +753,7 @@ class EksiRepository @Inject constructor(
         return Pager(
             config = PagingConfig(
                 pageSize = 25,
-                prefetchDistance = 20,
+                prefetchDistance = 40,
                 initialLoadSize = 25,
                 enablePlaceholders = false
             ),
@@ -778,7 +778,7 @@ class EksiRepository @Inject constructor(
         return Pager(
             config = PagingConfig(
                 pageSize = 25,
-                prefetchDistance = 20,
+                prefetchDistance = 40,
                 initialLoadSize = 25,
                 enablePlaceholders = false
             ),
