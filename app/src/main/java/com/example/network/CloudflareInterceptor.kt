@@ -134,7 +134,7 @@ class CloudflareInterceptor @Inject constructor(
             bodyPreview.contains(marker, ignoreCase = true)
         }
 
-        return hasChallengeMarkers || hasCloudflareHeaders
+        return hasChallengeMarkers
     }
 
     /**

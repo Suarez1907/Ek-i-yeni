@@ -1,6 +1,9 @@
 package com.example.network
 
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import android.webkit.CookieManager
 import okhttp3.Cookie
@@ -9,28 +12,26 @@ import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * Android WebView [CookieManager] ile OkHttp [CookieJar] arayüzünü çift yönlü (bi-directional)
- * senkronize eden sınıf.
- *
- * Gerçek Android telefon ve tabletlerde sistem [CookieManager.getInstance] doğrudan başlatılır
- * ve WebView ile OkHttp arasındaki tüm oturum/`cf_clearance` çerezleri gerçek zamanlı eşitlenir.
+ * Android WebView [CookieManager] ile OkHttp [CookieJar] arayüzünü çift yönlü senkronize eder.
+ * Süresi dolmuş ve silinmiş çerezler bellekten düşer. Disk flush'ı her yanıtta değil, en fazla
+ * 2 saniyede bir yapılır.
  */
 @Singleton
 class WebViewCookieJar @Inject constructor() : CookieJar {
 
-    private val inMemoryCookies = ConcurrentHashMap<String, ConcurrentHashMap<String, String>>()
+    private val inMemoryCookies = ConcurrentHashMap<String, ConcurrentHashMap<String, Cookie>>()
     private val webViewBridgeEnabled = AtomicBoolean(false)
+    private val lastFlushElapsedMs = AtomicLong(0L)
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     @Volatile
     private var cachedCookieManager: CookieManager? = null
 
-    /**
-     * Sistem [CookieManager] köprüsünü etkinleştirir ve bellek içi çerezlerle çift yönlü eşitler.
-     */
     fun enableWebViewBridge(): CookieManager? {
         if (!isHardwareWebViewSupported()) {
             return null
@@ -43,11 +44,13 @@ class WebViewCookieJar @Inject constructor() : CookieJar {
                 webViewBridgeEnabled.set(true)
                 for ((host, map) in inMemoryCookies) {
                     val hostUrl = "https://$host"
-                    for ((k, v) in map) {
-                        setCookie(hostUrl, "$k=$v; Path=/; Secure")
+                    for (cookie in map.values) {
+                        if (!isExpired(cookie)) {
+                            setCookie(hostUrl, cookie.toString())
+                        }
                     }
                 }
-                flush()
+                flushNow(this)
             }
         } catch (e: Throwable) {
             Log.w(TAG, "CookieManager başlatılamadı: ${e.message}")
@@ -60,108 +63,77 @@ class WebViewCookieJar @Inject constructor() : CookieJar {
         return cachedCookieManager ?: enableWebViewBridge()
     }
 
-    /**
-     * WebView'ın sistem [CookieManager] deposundaki gerçek çerezleri okuyup
-     * bellek içi OkHttp çerez deposuyla senkronize eder.
-     */
     fun syncFromWebViewCookieManager(url: String) {
         val manager = getActiveCookieManagerIfEnabled() ?: return
         val httpUrl = url.toHttpUrlOrNull() ?: return
         try {
             val rawCookieHeader = manager.getCookie(url)
-            if (!rawCookieHeader.isNullOrBlank()) {
-                val hostMap = inMemoryCookies.getOrPut(httpUrl.host) { ConcurrentHashMap() }
-                rawCookieHeader.split(";").forEach { segment ->
-                    val trimmed = segment.trim()
-                    val idx = trimmed.indexOf('=')
-                    if (idx > 0) {
-                        val key = trimmed.substring(0, idx).trim()
-                        val value = trimmed.substring(idx + 1).trim()
-                        if (key.isNotEmpty() && value.isNotEmpty()) {
-                            hostMap[key] = value
-                        }
-                    }
-                }
-            }
-            manager.flush()
+            replaceHostCookies(httpUrl, rawCookieHeader)
         } catch (e: Throwable) {
             Log.w(TAG, "syncFromWebViewCookieManager uyarısı: ${e.message}")
         }
     }
 
-    /**
-     * OkHttp yanıtından gelen `Set-Cookie` başlıklarını hem bellek içi depoya hem de
-     * Android [CookieManager] içine yazar ve diske flush eder.
-     */
     override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
         if (cookies.isEmpty()) return
 
         val hostMap = inMemoryCookies.getOrPut(url.host) { ConcurrentHashMap() }
-        for (cookie in cookies) {
-            hostMap[cookie.name] = cookie.value
-        }
-
-        val manager = getActiveCookieManagerIfEnabled() ?: return
+        val manager = getActiveCookieManagerIfEnabled()
         val urlString = url.toString()
         for (cookie in cookies) {
-            manager.setCookie(urlString, cookie.toString())
+            val removed = cookie.value.isEmpty() || isExpired(cookie)
+            if (removed) {
+                hostMap.remove(cookie.name)
+                manager?.setCookie(
+                    urlString,
+                    "${cookie.name}=; Max-Age=0; Path=${cookie.path.ifBlank { "/" }}"
+                )
+            } else {
+                hostMap[cookie.name] = cookie
+                manager?.setCookie(urlString, cookie.toString())
+            }
         }
-        try {
-            manager.flush()
-        } catch (e: Throwable) {
-            Log.w(TAG, "CookieManager.flush() uyarısı: ${e.message}")
+        if (manager != null) {
+            scheduleFlush(manager)
         }
     }
 
-    /**
-     * OkHttp isteği çıkmadan hemen önce ilgili URL için tüm çerezleri okur,
-     * ayrıştırır ve OkHttp [Cookie] listesi olarak döndürür.
-     */
     override fun loadForRequest(url: HttpUrl): List<Cookie> {
-        val mergedPairs = LinkedHashMap<String, String>()
-
-        inMemoryCookies[url.host]?.forEach { (k, v) ->
-            mergedPairs[k] = v
-        }
-
+        val hostMap = inMemoryCookies.getOrPut(url.host) { ConcurrentHashMap() }
         val manager = getActiveCookieManagerIfEnabled()
         if (manager != null) {
             val rawCookieHeader = try {
                 manager.getCookie(url.toString())
-            } catch (e: Throwable) {
+            } catch (_: Throwable) {
                 null
             }
-            if (!rawCookieHeader.isNullOrBlank()) {
-                val hostMap = inMemoryCookies.getOrPut(url.host) { ConcurrentHashMap() }
-                rawCookieHeader.split(";").forEach { segment ->
-                    val trimmed = segment.trim()
-                    val idx = trimmed.indexOf('=')
-                    if (idx > 0) {
-                        val key = trimmed.substring(0, idx).trim()
-                        val value = trimmed.substring(idx + 1).trim()
-                        if (key.isNotEmpty()) {
-                            mergedPairs[key] = value
-                            hostMap[key] = value
-                        }
-                    }
+            if (rawCookieHeader != null) {
+                replaceHostCookies(url, rawCookieHeader)
+            }
+        }
+        dropExpired(hostMap)
+        if (hostMap.isEmpty()) return emptyList()
+        return hostMap.values.filter { cookie -> cookie.matches(url) && !isExpired(cookie) }
+    }
+
+    private fun replaceHostCookies(url: HttpUrl, rawCookieHeader: String?) {
+        val hostMap = ConcurrentHashMap<String, Cookie>()
+        if (!rawCookieHeader.isNullOrBlank()) {
+            rawCookieHeader.split(";").forEach { segment ->
+                parseSessionCookie(url, segment.trim())?.let { cookie ->
+                    hostMap[cookie.name] = cookie
                 }
             }
         }
-
-        if (mergedPairs.isEmpty()) return emptyList()
-
-        return mergedPairs.mapNotNull { (name, value) ->
-            parseFallbackCookie(url, "$name=$value")
-        }
+        inMemoryCookies[url.host] = hostMap
     }
 
-    private fun parseFallbackCookie(url: HttpUrl, rawPair: String): Cookie? {
+    private fun parseSessionCookie(url: HttpUrl, rawPair: String): Cookie? {
         val separatorIndex = rawPair.indexOf('=')
         if (separatorIndex <= 0) return null
         val name = rawPair.substring(0, separatorIndex).trim()
         val value = rawPair.substring(separatorIndex + 1).trim()
-        if (name.isEmpty()) return null
-
+        if (name.isEmpty() || value.isEmpty()) return null
         return try {
             Cookie.Builder()
                 .name(name)
@@ -174,23 +146,31 @@ class WebViewCookieJar @Inject constructor() : CookieJar {
                     }
                 }
                 .build()
-        } catch (e: IllegalArgumentException) {
+        } catch (_: IllegalArgumentException) {
             null
         }
     }
 
-    /**
-     * Verilen URL (varsayılan: https://eksisozluk.com) için `cf_clearance` çerezinin
-     * mevcut ve dolu olup olmadığını kontrol eder.
-     */
+    private fun dropExpired(hostMap: ConcurrentHashMap<String, Cookie>) {
+        val now = System.currentTimeMillis()
+        val iterator = hostMap.entries.iterator()
+        while (iterator.hasNext()) {
+            val cookie = iterator.next().value
+            if (cookie.expiresAt <= now) {
+                iterator.remove()
+            }
+        }
+    }
+
+    private fun isExpired(cookie: Cookie): Boolean {
+        return cookie.expiresAt <= System.currentTimeMillis()
+    }
+
     fun hasCfClearance(url: String = DEFAULT_BASE_URL): Boolean {
         val cookies = getCookieMap(url)
         return !cookies[CF_CLEARANCE_COOKIE].isNullOrBlank()
     }
 
-    /**
-     * Kullanıcının Ekşi Sözlük'e giriş yapmış olup olmadığını çerezler üzerinden kontrol eder.
-     */
     fun hasActiveUserSession(url: String = DEFAULT_BASE_URL): Boolean {
         val cookies = getCookieMap(url)
         return !cookies["a"].isNullOrBlank() ||
@@ -198,81 +178,61 @@ class WebViewCookieJar @Inject constructor() : CookieJar {
             cookies.keys.any { it.equals("iq", ignoreCase = true) }
     }
 
-    /**
-     * Belirtilen URL için tüm çerezleri [Map] (isim -> değer) olarak döndürür.
-     */
     fun getCookieMap(url: String = DEFAULT_BASE_URL): Map<String, String> {
-        val result = LinkedHashMap<String, String>()
-        val httpUrl = url.toHttpUrlOrNull()
-        if (httpUrl != null) {
-            inMemoryCookies[httpUrl.host]?.forEach { (k, v) ->
-                result[k] = v
-            }
-        }
-
-        val manager = getActiveCookieManagerIfEnabled()
-        if (manager != null) {
-            val raw = try {
-                manager.getCookie(url)
-            } catch (e: Throwable) {
-                null
-            }
-            if (!raw.isNullOrBlank()) {
-                val hostMap = httpUrl?.let { inMemoryCookies.getOrPut(it.host) { ConcurrentHashMap() } }
-                raw.split(";").forEach { part ->
-                    val trimmed = part.trim()
-                    val idx = trimmed.indexOf('=')
-                    if (idx > 0) {
-                        val key = trimmed.substring(0, idx).trim()
-                        val value = trimmed.substring(idx + 1).trim()
-                        result[key] = value
-                        hostMap?.put(key, value)
-                    }
-                }
-            }
-        }
-        return result
+        val httpUrl = url.toHttpUrlOrNull() ?: return emptyMap()
+        return loadForRequest(httpUrl).associate { it.name to it.value }
     }
 
-    /**
-     * WebView üzerinden manuel çerez senkronizasyonu veya dışarıdan çerez enjeksiyonu için yardımcı metot.
-     */
     fun setCookieExplicitly(url: String, cookieString: String) {
         val httpUrl = url.toHttpUrlOrNull()
         if (httpUrl != null) {
             val firstSegment = cookieString.substringBefore(";").trim()
-            val idx = firstSegment.indexOf('=')
-            if (idx > 0) {
-                val key = firstSegment.substring(0, idx).trim()
-                val value = firstSegment.substring(idx + 1).trim()
+            parseSessionCookie(httpUrl, firstSegment)?.let { cookie ->
                 val hostMap = inMemoryCookies.getOrPut(httpUrl.host) { ConcurrentHashMap() }
-                hostMap[key] = value
+                if (cookie.value.isEmpty()) {
+                    hostMap.remove(cookie.name)
+                } else {
+                    hostMap[cookie.name] = cookie
+                }
             }
         }
 
         val manager = getActiveCookieManagerIfEnabled() ?: return
         manager.setCookie(url, cookieString)
-        try {
-            manager.flush()
-        } catch (e: Throwable) {
-            Log.w(TAG, "setCookieExplicitly flush uyarısı: ${e.message}")
-        }
+        scheduleFlush(manager)
     }
 
-    /**
-     * Çerezleri kalıcı depolamaya senkronize eder.
-     */
     fun flush() {
         try {
-            getActiveCookieManagerIfEnabled()?.flush()
+            getActiveCookieManagerIfEnabled()?.let { flushNow(it) }
         } catch (e: Throwable) {
             Log.w(TAG, "Flush uyarısı: ${e.message}")
         }
     }
 
-    /**
-     * Tüm çerezleri temizler (çıkış yapma veya oturum sıfırlama için).
-     */
+    private fun scheduleFlush(manager: CookieManager) {
+        val now = SystemClock.elapsedRealtime()
+        val previous = lastFlushElapsedMs.get()
+        if (now - previous < FLUSH_INTERVAL_MS) return
+        if (!lastFlushElapsedMs.compareAndSet(previous, now)) return
+        mainHandler.post {
+            try {
+                manager.flush()
+            } catch (e: Throwable) {
+                Log.w(TAG, "CookieManager.flush() uyarısı: ${e.message}")
+            }
+        }
+    }
+
+    private fun flushNow(manager: CookieManager) {
+        lastFlushElapsedMs.set(SystemClock.elapsedRealtime())
+        try {
+            manager.flush()
+        } catch (e: Throwable) {
+            Log.w(TAG, "CookieManager.flush() uyarısı: ${e.message}")
+        }
+    }
+
     fun clearAllCookies(onComplete: ((Boolean) -> Unit)? = null) {
         inMemoryCookies.clear()
         val manager = getActiveCookieManagerIfEnabled()
@@ -282,7 +242,7 @@ class WebViewCookieJar @Inject constructor() : CookieJar {
         }
         try {
             manager.removeAllCookies { removed ->
-                manager.flush()
+                flushNow(manager)
                 onComplete?.invoke(removed)
             }
         } catch (e: Throwable) {
@@ -291,9 +251,6 @@ class WebViewCookieJar @Inject constructor() : CookieJar {
         }
     }
 
-    /**
-     * Verilen URL'yi HttpUrl olarak doğrulayıp mevcut çerezleri liste halinde döndürür.
-     */
     fun getCookiesForUrl(url: String): List<Cookie> {
         val httpUrl = url.toHttpUrlOrNull() ?: return emptyList()
         return loadForRequest(httpUrl)
@@ -303,11 +260,8 @@ class WebViewCookieJar @Inject constructor() : CookieJar {
         private const val TAG = "WebViewCookieJar"
         const val DEFAULT_BASE_URL = "https://eksisozluk.com"
         const val CF_CLEARANCE_COOKIE = "cf_clearance"
+        private const val FLUSH_INTERVAL_MS = 2_000L
 
-        /**
-         * Gerçek Android cihazlarda (ARM / x86 fark etmeksizin) her zaman `true` döner.
-         * Yalnızca yerel JVM birim testlerinde (Robolectric) native WebView motoru bulunmadığından `false` döner.
-         */
         fun isHardwareWebViewSupported(): Boolean {
             return try {
                 val fingerprint = Build.FINGERPRINT?.lowercase().orEmpty()

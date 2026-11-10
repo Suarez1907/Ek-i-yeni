@@ -83,8 +83,12 @@ class UserAgentInterceptor @Inject constructor(
         val originalRequest = chain.request()
         val requestBuilder = originalRequest.newBuilder()
 
-        // 1. Birebir aynı WebView User-Agent başlığını zorunlu kıl
-        requestBuilder.header(HEADER_USER_AGENT, userAgentProvider.getUserAgent())
+        // Wayback istekleri kendi User-Agent'ını taşır; onu ezip WebView UA'sı yazma.
+        val host = originalRequest.url.host.lowercase()
+        val preserveUserAgent = host == "web.archive.org" || host.endsWith(".archive.org")
+        if (!preserveUserAgent) {
+            requestBuilder.header(HEADER_USER_AGENT, userAgentProvider.getUserAgent())
+        }
 
         // 2. Sol frame / gündem / arama / AJAX isteklerinde X-Requested-With: XMLHttpRequest ekle
         val isAjax = shouldAttachXmlHttpRequestHeader(originalRequest)
