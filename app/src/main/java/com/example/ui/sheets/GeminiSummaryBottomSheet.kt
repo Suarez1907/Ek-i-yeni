@@ -142,7 +142,7 @@ fun GeminiSummaryBottomSheet(
                     )
                     Column {
                         Text(
-                            text = "${com.example.ai.GeminiModels.SUMMARY_DISPLAY_NAME} Canlı Özet",
+                            text = activeMode.title,
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.ExtraBold,
                             color = EksiNeonGreen

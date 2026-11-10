@@ -12,6 +12,7 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Arrangement
@@ -48,6 +49,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.FilterAlt
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.PersonSearch
@@ -98,6 +100,7 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -114,6 +117,8 @@ import coil.compose.AsyncImage
 import coil.compose.SubcomposeAsyncImage
 import coil.request.ImageRequest
 import coil.size.Precision
+import com.example.ai.AiPrompts
+import com.example.ai.AiProviderId
 import com.example.ai.GeminiAnalysisMode
 import com.example.data.model.EntryItem
 import com.example.data.model.TopicFilterMode
@@ -181,6 +186,11 @@ fun TopicDetailScreen(
     val bkzPreviewState by viewModel.bkzPreviewState.collectAsStateWithLifecycle()
     val geminiStreamState by viewModel.geminiStreamState.collectAsStateWithLifecycle()
     val isGeminiKeyConfigured by viewModel.isGeminiKeyConfigured.collectAsStateWithLifecycle()
+    val aiConfig by viewModel.aiConfig.collectAsStateWithLifecycle()
+    val hiddenEntryIds by viewModel.hiddenEntryIds.collectAsStateWithLifecycle()
+    val discussionPoints by viewModel.discussionPoints.collectAsStateWithLifecycle()
+    val catchUpAvailable by viewModel.catchUpAvailable.collectAsStateWithLifecycle()
+    val catchUpAnchorEntryId by viewModel.catchUpAnchorEntryId.collectAsStateWithLifecycle()
     val geminiKeyWarning by viewModel.geminiKeyDecryptionWarning.collectAsStateWithLifecycle()
     val themeMode by viewModel.themeMode.collectAsStateWithLifecycle()
     val showThemeDialog by viewModel.showThemeDialog.collectAsStateWithLifecycle()
@@ -211,17 +221,32 @@ fun TopicDetailScreen(
 
     val isWaybackArchiveActive = metadata?.isFromWaybackArchive == true
 
-    val currentEntries: List<EntryItem> = remember(pageUiState, metadata, authorFilter) {
+    val currentEntries: List<EntryItem> = remember(
+        pageUiState,
+        metadata,
+        authorFilter,
+        hiddenEntryIds,
+        aiConfig.smartFilterEnabled
+    ) {
         val rawEntries = when (val state = pageUiState) {
             is TopicPageUiState.Success -> state.entries
             else -> metadata?.entries.orEmpty()
         }
-        if (authorFilter.isNullOrBlank()) {
+        val byAuthor = if (authorFilter.isNullOrBlank()) {
             rawEntries
         } else {
             rawEntries.filter { it.author.equals(authorFilter, ignoreCase = true) }
         }
+        if (aiConfig.smartFilterEnabled && hiddenEntryIds.isNotEmpty()) {
+            byAuthor.filterNot { it.id in hiddenEntryIds }
+        } else {
+            byAuthor
+        }
     }
+    val catchUpSlice = remember(currentEntries, catchUpAnchorEntryId) {
+        AiPrompts.entriesAfter(currentEntries, catchUpAnchorEntryId)
+    }
+    val showCatchUp = catchUpAvailable || (!catchUpSlice.loadedPageOnly && catchUpSlice.entries.isNotEmpty())
 
     if (showThemeDialog) {
         ThemeSelectorDialog(
@@ -301,7 +326,7 @@ fun TopicDetailScreen(
     GeminiSummaryBottomSheet(
         topicTitle = activeTitle,
         streamState = geminiStreamState,
-        hasSavedApiKey = isGeminiKeyConfigured,
+        hasSavedApiKey = if (aiConfig.provider == AiProviderId.GEMINI) isGeminiKeyConfigured else true,
         keyDecryptionWarning = geminiKeyWarning,
         onSelectMode = { mode ->
             viewModel.runGeminiAnalysisStream(
@@ -526,6 +551,79 @@ fun TopicDetailScreen(
                         ),
                         modifier = Modifier.testTag("chip_gemini_summary")
                     )
+
+                    if (showCatchUp) {
+                        AssistChip(
+                            onClick = {
+                                viewModel.runCatchUp(
+                                    topicTitle = activeTitle,
+                                    entries = currentEntries,
+                                    lastReadEntryId = catchUpAnchorEntryId
+                                )
+                            },
+                            shape = RoundedCornerShape(50),
+                            label = {
+                                Text(
+                                    text = "Ne oldu?",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            },
+                            modifier = Modifier.testTag("chip_catch_up")
+                        )
+                    }
+
+                    if (currentEntries.size >= 4) {
+                        AssistChip(
+                            onClick = {
+                                viewModel.runDiscussionMap(
+                                    topicTitle = activeTitle,
+                                    entries = currentEntries
+                                )
+                            },
+                            shape = RoundedCornerShape(50),
+                            label = {
+                                Text(
+                                    text = "Tartışma haritası",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            },
+                            modifier = Modifier.testTag("chip_discussion_map")
+                        )
+                    }
+                }
+
+                if (discussionPoints.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState())
+                            .padding(horizontal = 12.dp, vertical = 2.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        discussionPoints.forEach { point ->
+                            AssistChip(
+                                onClick = {
+                                    val index = currentEntries.indexOfFirst { it.id == point.entryId }
+                                    if (index >= 0) {
+                                        val headerOffset = if (isSingleEntryOrFiltered) 1 else 0
+                                        coroutineScope.launch {
+                                            listState.animateScrollToItem(index + headerOffset)
+                                        }
+                                    }
+                                },
+                                label = {
+                                    Text(
+                                        text = "${point.side}: ${point.claim}",
+                                        fontSize = 11.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            )
+                        }
+                    }
                 }
 
                 // Sola kaydırma ile aktifleşen Yazar Filtresi bilgi bandı
@@ -857,6 +955,9 @@ fun TopicDetailScreen(
                                     )
                                 }
                             }
+                            val onExplain = remember(entry.id, activeTitle) {
+                                { viewModel.explainEntry(activeTitle, entry) }
+                            }
 
                             SwipeableEntryOledCard(
                                 entry = entry,
@@ -868,7 +969,8 @@ fun TopicDetailScreen(
                                 onShareEntry = onShare,
                                 onBkzClick = onBkzClick,
                                 onExternalUrlClick = onExternalUrlClick,
-                                onSummarizeSingle = onSummarize
+                                onSummarizeSingle = onSummarize,
+                                onExplainEntry = onExplain
                             )
                         }
 
@@ -969,6 +1071,7 @@ fun SwipeableEntryOledCard(
     onBkzClick: (String) -> Unit,
     onExternalUrlClick: (String) -> Unit,
     onSummarizeSingle: () -> Unit,
+    onExplainEntry: () -> Unit = {},
     loadImages: Boolean = true
 ) {
     val dismissState = rememberSwipeToDismissBoxState(
@@ -1080,7 +1183,10 @@ fun SwipeableEntryOledCard(
                 ) {
                     Surface(
                         color = OledElevatedCard,
-                        shape = RoundedCornerShape(6.dp)
+                        shape = RoundedCornerShape(6.dp),
+                        modifier = Modifier.pointerInput(entry.id) {
+                            detectTapGestures(onLongPress = { onExplainEntry() })
+                        }
                     ) {
                         Text(
                             text = "Sayfa ${entry.pageNumber} • #${entry.id}",
@@ -1098,6 +1204,17 @@ fun SwipeableEntryOledCard(
                             Icon(
                                 imageVector = Icons.Default.PersonSearch,
                                 contentDescription = "Sadece bu yazarın entry'lerini filtrele",
+                                tint = OledTextSecondary,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                        IconButton(
+                            onClick = onExplainEntry,
+                            modifier = Modifier.size(32.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Info,
+                                contentDescription = "Bağlamı açıkla",
                                 tint = OledTextSecondary,
                                 modifier = Modifier.size(16.dp)
                             )

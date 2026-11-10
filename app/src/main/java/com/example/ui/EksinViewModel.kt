@@ -11,10 +11,24 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.paging.PagingData
 import androidx.paging.cachedIn
+import com.example.ai.AiPrompts
+import com.example.ai.AiProviderConfig
+import com.example.ai.AiProviderId
+import com.example.ai.AiSettingsRepository
+import com.example.ai.AiTextChunk
+import com.example.ai.AiTextGateway
+import com.example.ai.DeepSeekPreset
+import com.example.ai.DiscussionMapParser
+import com.example.ai.DiscussionPoint
+import com.example.ai.EncryptedSecretStore
+import com.example.ai.EntryHeuristics
+import com.example.ai.FilterDecisionParser
 import com.example.ai.GeminiAnalysisMode
 import com.example.ai.GeminiHelper
 import com.example.ai.GeminiImageGenerationResult
 import com.example.ai.GeminiStreamState
+import com.example.ai.NlSearchParser
+import com.example.ai.OnDevicePromptAssistant
 import com.example.data.local.BookmarkedEntryEntity
 import com.example.data.local.TopicReadStateEntity
 import com.example.data.model.AutocompleteSuggestionState
@@ -62,8 +76,10 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
@@ -160,6 +176,10 @@ class EksinViewModel @Inject constructor(
     val webViewFetchBridge: WebViewFetchBridge,
     private val cloudflareManager: CloudflareChallengeManager,
     private val geminiHelper: GeminiHelper,
+    private val aiSettings: AiSettingsRepository,
+    private val aiGateway: AiTextGateway,
+    private val secretStore: EncryptedSecretStore,
+    private val onDevicePrompt: OnDevicePromptAssistant,
     private val viewModelCacheCleaner: ViewModelCacheCleaner,
     private val savedStateHandle: SavedStateHandle
 ) : ViewModel() {
@@ -287,6 +307,31 @@ class EksinViewModel @Inject constructor(
     private val _geminiStreamState = MutableStateFlow<GeminiStreamState>(GeminiStreamState.Idle)
     val geminiStreamState: StateFlow<GeminiStreamState> = _geminiStreamState.asStateFlow()
     private var activeGeminiJob: Job? = null
+    private var filterJob: Job? = null
+    private var naturalLanguageJob: Job? = null
+
+    private val _aiConfig = MutableStateFlow(AiProviderConfig())
+    val aiConfig: StateFlow<AiProviderConfig> = _aiConfig.asStateFlow()
+
+    private val _hasOpenAiKey = MutableStateFlow(false)
+    val hasOpenAiKey: StateFlow<Boolean> = _hasOpenAiKey.asStateFlow()
+
+    private val _hiddenEntryIds = MutableStateFlow<Set<String>>(emptySet())
+    val hiddenEntryIds: StateFlow<Set<String>> = _hiddenEntryIds.asStateFlow()
+
+    private val _discussionPoints = MutableStateFlow<List<DiscussionPoint>>(emptyList())
+    val discussionPoints: StateFlow<List<DiscussionPoint>> = _discussionPoints.asStateFlow()
+
+    private val _catchUpAvailable = MutableStateFlow(false)
+    val catchUpAvailable: StateFlow<Boolean> = _catchUpAvailable.asStateFlow()
+
+    private val _catchUpAnchorEntryId = MutableStateFlow<String?>(null)
+    val catchUpAnchorEntryId: StateFlow<String?> = _catchUpAnchorEntryId.asStateFlow()
+
+    private val _naturalLanguageStatus = MutableStateFlow<String?>(null)
+    val naturalLanguageStatus: StateFlow<String?> = _naturalLanguageStatus.asStateFlow()
+
+    private val filterHideCache = ConcurrentHashMap<String, Boolean>()
 
     private val _isGeminiKeyConfigured = MutableStateFlow(false)
     val isGeminiKeyConfigured: StateFlow<Boolean> = _isGeminiKeyConfigured.asStateFlow()
@@ -396,6 +441,8 @@ class EksinViewModel @Inject constructor(
             repository.setUserLoggedInState(loggedIn)
             _hasCfClearance.value = webViewFetchBridge.isDomVerified()
             _isGeminiKeyConfigured.value = geminiHelper.hasValidApiKey()
+            _aiConfig.value = aiSettings.load()
+            _hasOpenAiKey.value = secretStore.has(AiTextGateway.OPENAI_SECRET)
         }
 
         viewModelScope.launch {
@@ -854,6 +901,11 @@ class EksinViewModel @Inject constructor(
             pageMemoryCache[warmed.currentPage.coerceAtLeast(1)] = warmed
         }
 
+        val previousCount = _lastSeenEntryCounts.value[normalizeTopicReadKey(topic.cleanUrl)]
+        _catchUpAvailable.value = previousCount != null && topic.entryCount > previousCount
+        _catchUpAnchorEntryId.value = null
+        _discussionPoints.value = emptyList()
+        _hiddenEntryIds.value = emptySet()
         recordTopicSeenEntryCount(
             rawUrl = topic.cleanUrl,
             topicTitle = topic.title,
@@ -891,6 +943,7 @@ class EksinViewModel @Inject constructor(
                 }
                 if (loadedTopicSessionKey != sessionKey) return@launch
                 _restoredReadState.value = savedState
+                _catchUpAnchorEntryId.value = savedState?.entryId
                 startPage = if (isDirectEntry) 1 else (savedState?.pageNumber ?: 1).coerceAtLeast(1)
             }
 
@@ -1125,6 +1178,7 @@ class EksinViewModel @Inject constructor(
             loadSequence = seq,
             scrollAnchor = scrollAnchor
         )
+        scheduleEntryFilter(pageData.entries)
     }
 
     /**
@@ -1450,22 +1504,300 @@ class EksinViewModel @Inject constructor(
         topicTitle: String,
         entries: List<EntryItem>
     ) {
+        val fiveBullets = mode != GeminiAnalysisMode.DEBATE_AND_CONSENSUS
+        val prompt = AiPrompts.summary(topicTitle, entries, fiveBullets = fiveBullets)
+        val range = entryRange(entries)
+        launchTextStream(
+            mode = if (fiveBullets) GeminiAnalysisMode.FIVE_BULLET_SUMMARY else mode,
+            prompt = prompt,
+            cacheKey = "summary|$fiveBullets|$topicTitle|$range"
+        )
+    }
+
+    fun runCatchUp(topicTitle: String, entries: List<EntryItem>, lastReadEntryId: String?) {
+        val slice = AiPrompts.entriesAfter(entries, lastReadEntryId)
+        if (slice.entries.isEmpty()) {
+            _geminiStreamState.value = GeminiStreamState.Error(
+                mode = GeminiAnalysisMode.CATCH_UP,
+                message = "Özetlenecek yeni entry yok."
+            )
+            return
+        }
+        launchTextStream(
+            mode = GeminiAnalysisMode.CATCH_UP,
+            prompt = AiPrompts.catchUp(topicTitle, slice.entries, slice.loadedPageOnly),
+            cacheKey = "catchup|$topicTitle|${entryRange(slice.entries)}|${slice.loadedPageOnly}"
+        )
+    }
+
+    fun runDiscussionMap(topicTitle: String, entries: List<EntryItem>) {
+        if (entries.size < 4) {
+            _geminiStreamState.value = GeminiStreamState.Error(
+                mode = GeminiAnalysisMode.DISCUSSION_MAP,
+                message = "Tartışma haritası için bu sayfada en az 4 entry gerekir."
+            )
+            return
+        }
+        launchTextStream(
+            mode = GeminiAnalysisMode.DISCUSSION_MAP,
+            prompt = AiPrompts.discussionMap(topicTitle, entries),
+            cacheKey = "map|$topicTitle|${entryRange(entries)}"
+        )
+    }
+
+    fun labelPersonalTopics(titles: List<String>) {
+        val cleaned = titles.map { it.trim() }.filter { it.isNotEmpty() }.take(8)
+        if (cleaned.isEmpty()) return
+        launchTextStream(
+            mode = GeminiAnalysisMode.PERSONAL_LABEL,
+            prompt = AiPrompts.personalLabel(cleaned),
+            cacheKey = "label|${cleaned.joinToString("|")}"
+        )
+    }
+
+    fun explainEntry(topicTitle: String, entry: EntryItem) {
+        launchTextStream(
+            mode = GeminiAnalysisMode.EXPLAIN_ENTRY,
+            prompt = AiPrompts.explain(topicTitle, entry),
+            cacheKey = "explain|$topicTitle|${entry.id}"
+        )
+    }
+
+    fun runNaturalLanguageSearch(sentence: String) {
+        val cleaned = sentence.trim()
+        if (cleaned.length < 3) return
+        naturalLanguageJob?.cancel()
+        naturalLanguageJob = viewModelScope.launch {
+            _naturalLanguageStatus.value = "Cümle aramaya çevriliyor..."
+            val buffer = StringBuilder()
+            try {
+                aiGateway.stream(AiPrompts.naturalLanguageSearch(cleaned)).collect { chunk ->
+                    when (chunk) {
+                        is AiTextChunk.Delta -> buffer.append(chunk.text)
+                        is AiTextChunk.Done -> {
+                            val parsed = NlSearchParser.parse(buffer.toString())
+                            val filter = parsed.filter
+                            if (filter == null) {
+                                _naturalLanguageStatus.value = parsed.error ?: "Arama cümlesi geçersiz."
+                            } else {
+                                _searchQuery.value = filter.keywords
+                                _searchSortOrder.value = filter.sortOrder
+                                _submittedSearchFilter.value = filter
+                                _naturalLanguageStatus.value = null
+                            }
+                        }
+                        is AiTextChunk.Failure -> _naturalLanguageStatus.value = chunk.message
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                _naturalLanguageStatus.value = error.message ?: "Arama cümlesi çevrilemedi."
+            }
+        }
+    }
+
+    fun selectAiProvider(provider: AiProviderId) {
+        updateAiConfig(_aiConfig.value.copy(provider = provider))
+    }
+
+    fun saveOpenAiCompatibleKey(rawKey: String) {
+        secretStore.save(AiTextGateway.OPENAI_SECRET, rawKey)
+        _hasOpenAiKey.value = secretStore.has(AiTextGateway.OPENAI_SECRET)
+    }
+
+    fun clearOpenAiCompatibleKey() {
+        secretStore.clear(AiTextGateway.OPENAI_SECRET)
+        _hasOpenAiKey.value = false
+    }
+
+    fun updateOpenAiEndpoint(baseUrl: String, model: String) {
+        updateAiConfig(
+            _aiConfig.value.copy(
+                openAiBaseUrl = baseUrl.ifBlank { DeepSeekPreset.BASE_URL },
+                openAiModel = model.ifBlank { DeepSeekPreset.MODEL }
+            )
+        )
+    }
+
+    fun setSmartFilterEnabled(enabled: Boolean) {
+        updateAiConfig(_aiConfig.value.copy(smartFilterEnabled = enabled))
+        if (!enabled) {
+            filterJob?.cancel()
+            _hiddenEntryIds.value = emptySet()
+        } else {
+            val page = (_topicPageUiState.value as? TopicPageUiState.Success)?.entries.orEmpty()
+            scheduleEntryFilter(page)
+        }
+    }
+
+    fun setCloudFilterEnabled(enabled: Boolean) {
+        updateAiConfig(_aiConfig.value.copy(cloudFilterEnabled = enabled))
+    }
+
+    fun setPersonalFeedEnabled(enabled: Boolean) {
+        updateAiConfig(_aiConfig.value.copy(personalFeedEnabled = enabled))
+    }
+
+    private fun updateAiConfig(config: AiProviderConfig) {
+        _aiConfig.value = config
+        viewModelScope.launch(Dispatchers.IO) {
+            aiSettings.save(config)
+        }
+    }
+
+    private fun launchTextStream(
+        mode: GeminiAnalysisMode,
+        prompt: String,
+        cacheKey: String
+    ) {
         activeGeminiJob?.cancel()
-        val configured = geminiHelper.hasValidApiKey()
-        _isGeminiKeyConfigured.value = configured
-        if (!configured) {
-            _geminiStreamState.value = GeminiStreamState.AwaitingApiKey(mode)
+        val config = _aiConfig.value
+        val ready = when (config.provider) {
+            AiProviderId.GEMINI -> geminiHelper.hasValidApiKey()
+            AiProviderId.OPENAI_COMPATIBLE -> secretStore.has(AiTextGateway.OPENAI_SECRET)
+        }
+        if (config.provider == AiProviderId.GEMINI) {
+            _isGeminiKeyConfigured.value = ready
+        }
+        if (!ready) {
+            _geminiStreamState.value = if (config.provider == AiProviderId.GEMINI) {
+                GeminiStreamState.AwaitingApiKey(mode)
+            } else {
+                GeminiStreamState.Error(
+                    mode = mode,
+                    message = "OpenAI uyumlu sağlayıcı anahtarı yok. Profil ekranından kaydedin."
+                )
+            }
+            return
+        }
+        aiGateway.cached(cacheKey)?.let { cached ->
+            publishCompleted(mode, cached)
             return
         }
         activeGeminiJob = viewModelScope.launch {
-            geminiHelper.executeStreamingAnalysis(
-                mode = mode,
-                topicTitle = topicTitle,
-                entries = entries
-            ).collect { state ->
-                _geminiStreamState.value = state
+            val buffer = StringBuilder()
+            var lastPaint = 0L
+            _geminiStreamState.value = GeminiStreamState.Loading(mode)
+            try {
+                aiGateway.stream(prompt).collect { chunk ->
+                    when (chunk) {
+                        is AiTextChunk.Delta -> {
+                            buffer.append(chunk.text)
+                            val now = android.os.SystemClock.elapsedRealtime()
+                            if (now - lastPaint >= 80L) {
+                                lastPaint = now
+                                _geminiStreamState.value = GeminiStreamState.Streaming(
+                                    mode = mode,
+                                    partialText = buffer.toString(),
+                                    latestChunk = chunk.text
+                                )
+                            }
+                        }
+                        is AiTextChunk.Done -> {
+                            val full = buffer.toString().ifBlank { "Model boş yanıt döndürdü." }
+                            aiGateway.store(cacheKey, full)
+                            publishCompleted(mode, full)
+                        }
+                        is AiTextChunk.Failure -> {
+                            _geminiStreamState.value = GeminiStreamState.Error(mode, chunk.message)
+                        }
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                _geminiStreamState.value = GeminiStreamState.Error(
+                    mode = mode,
+                    message = error.message ?: "AI yanıtı alınamadı."
+                )
             }
         }
+    }
+
+    private fun publishCompleted(mode: GeminiAnalysisMode, full: String) {
+        if (mode == GeminiAnalysisMode.DISCUSSION_MAP) {
+            _discussionPoints.value = DiscussionMapParser.parse(full)
+        }
+        _geminiStreamState.value = GeminiStreamState.Completed(mode, full)
+    }
+
+    private fun scheduleEntryFilter(entries: List<EntryItem>) {
+        filterJob?.cancel()
+        val config = _aiConfig.value
+        if (!config.smartFilterEnabled || entries.isEmpty()) {
+            if (!config.smartFilterEnabled) _hiddenEntryIds.value = emptySet()
+            return
+        }
+        val snapshot = entries
+        filterJob = viewModelScope.launch(Dispatchers.Default) {
+            val seen = HashSet<String>()
+            val hidden = HashSet<String>()
+            val uncertain = ArrayList<EntryItem>(8)
+            for (entry in snapshot) {
+                if (!isActive) return@launch
+                val cached = filterHideCache[entry.id]
+                if (cached != null) {
+                    if (cached) hidden.add(entry.id)
+                    continue
+                }
+                val flags = EntryHeuristics.flags(entry.plainText, seen)
+                if (flags.isNotEmpty()) {
+                    hidden.add(entry.id)
+                    filterHideCache[entry.id] = true
+                } else if (uncertain.size < 8) {
+                    uncertain.add(entry)
+                }
+            }
+            _hiddenEntryIds.value = hidden.toSet()
+            if (uncertain.isEmpty() || !isActive) return@launch
+            val onDeviceReady = withTimeoutOrNull(1_500) {
+                runCatching { onDevicePrompt.isReady() }.getOrDefault(false)
+            } == true
+            if (onDeviceReady) {
+                for (entry in uncertain) {
+                    if (!isActive) return@launch
+                    val answer = withTimeoutOrNull(4_000) {
+                        runCatching { onDevicePrompt.complete(AiPrompts.onDeviceFilter(entry)) }.getOrNull()
+                    }
+                    val hide = answer != null && EntryHeuristics.onDeviceSaysHide(answer)
+                    filterHideCache[entry.id] = hide
+                    if (hide) hidden.add(entry.id)
+                }
+                _hiddenEntryIds.value = hidden.toSet()
+                return@launch
+            }
+            if (!config.cloudFilterEnabled || !isActive) return@launch
+            val allowed = uncertain.map { it.id }.toSet()
+            val buffer = StringBuilder()
+            try {
+                aiGateway.stream(AiPrompts.cloudFilter(uncertain)).collect { chunk ->
+                    when (chunk) {
+                        is AiTextChunk.Delta -> buffer.append(chunk.text)
+                        is AiTextChunk.Done -> {
+                            val extra = FilterDecisionParser.hiddenIds(buffer.toString(), allowed)
+                            extra.forEach { id ->
+                                filterHideCache[id] = true
+                                hidden.add(id)
+                            }
+                            allowed.filter { it !in extra }.forEach { filterHideCache.putIfAbsent(it, false) }
+                            _hiddenEntryIds.value = hidden.toSet()
+                        }
+                        is AiTextChunk.Failure -> Unit
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                Unit
+            }
+        }
+    }
+
+    private fun entryRange(entries: List<EntryItem>): String {
+        val first = entries.firstOrNull()?.id ?: "none"
+        val last = entries.lastOrNull()?.id ?: first
+        return "$first-$last-${entries.size}"
     }
 
     fun runFiveBulletSummaryStream(topicTitle: String, entries: List<EntryItem>) {
@@ -1519,6 +1851,12 @@ class EksinViewModel @Inject constructor(
     fun generateEntryVisual(promptText: String) {
         val cleanPrompt = promptText.trim()
         if (cleanPrompt.isEmpty()) return
+        if (!_aiConfig.value.provider.supportsImages) {
+            _aiImageState.value = AiImageState.Error(
+                "Görsel üretim yalnızca Gemini sağlayıcısında kullanılabilir."
+            )
+            return
+        }
 
         val chosenModel = _selectedImageModel.value
         val chosenSize = _selectedImageSize.value
