@@ -97,13 +97,16 @@ class EksiParser @Inject constructor() {
                 ?: 0
 
             val captionElement = anchor.selectFirst("span.caption")
-            val title = if (captionElement != null && captionElement.text().isNotBlank()) {
-                captionElement.text().trim()
-            } else {
-                val anchorClone = anchor.clone()
-                anchorClone.select("small, div.detail, span.detail").remove()
-                anchorClone.text().trim()
-            }
+            val title = captionElement?.text()?.trim()?.takeIf { it.isNotBlank() }
+                ?: anchor.ownText().trim().ifBlank {
+                    val full = anchor.text().trim()
+                    val smallText = smallElement?.text()?.trim().orEmpty()
+                    if (smallText.isNotEmpty() && full.endsWith(smallText)) {
+                        full.removeSuffix(smallText).trim()
+                    } else {
+                        full
+                    }
+                }
             if (title.isBlank()) continue
 
             val normalizedUrl = normalizeUrl(rawHref)

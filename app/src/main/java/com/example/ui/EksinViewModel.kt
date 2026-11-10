@@ -5,6 +5,8 @@ import android.content.SharedPreferences
 import android.graphics.Bitmap
 import android.net.Uri
 import android.util.Log
+import androidx.compose.runtime.Stable
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.paging.PagingData
@@ -138,6 +140,7 @@ data class ActiveAuthSheet(
 )
 
 @OptIn(ExperimentalCoroutinesApi::class)
+@Stable
 @HiltViewModel
 class EksinViewModel @Inject constructor(
     @ApplicationContext private val appContext: Context,
@@ -147,7 +150,8 @@ class EksinViewModel @Inject constructor(
     val webViewFetchBridge: WebViewFetchBridge,
     private val cloudflareManager: CloudflareChallengeManager,
     private val geminiHelper: GeminiHelper,
-    private val viewModelCacheCleaner: ViewModelCacheCleaner
+    private val viewModelCacheCleaner: ViewModelCacheCleaner,
+    private val savedStateHandle: SavedStateHandle
 ) : ViewModel() {
 
     // 1. AKILLI OKUNDU TAKİBİ (SharedPreferences + Map<String, Int>: topicKey -> lastSeenEntryCount)
@@ -387,6 +391,25 @@ class EksinViewModel @Inject constructor(
                 _pendingCloudflareChallenge.value = event
             }
         }
+        restoreTopicAfterProcessDeath()
+    }
+
+    private fun restoreTopicAfterProcessDeath() {
+        val url = savedStateHandle.get<String>(KEY_TOPIC_URL)?.takeIf { it.isNotBlank() } ?: return
+        if (_selectedTopic.value != null) return
+        val title = savedStateHandle.get<String>(KEY_TOPIC_TITLE).orEmpty().ifBlank { url }
+        val id = savedStateHandle.get<String>(KEY_TOPIC_ID).orEmpty().ifBlank { url }
+        openTopic(
+            topic = TopicItem(id = id, title = title, slug = title, url = url),
+            preferTodayMode = savedStateHandle.get<Boolean>(KEY_TOPIC_TODAY) ?: true
+        )
+    }
+
+    private fun rememberOpenTopic(topic: TopicItem, preferTodayMode: Boolean) {
+        savedStateHandle[KEY_TOPIC_URL] = topic.url
+        savedStateHandle[KEY_TOPIC_TITLE] = topic.title
+        savedStateHandle[KEY_TOPIC_ID] = topic.id
+        savedStateHandle[KEY_TOPIC_TODAY] = preferTodayMode
     }
 
     fun setActivePagingTab(tabName: String) {
@@ -833,6 +856,7 @@ class EksinViewModel @Inject constructor(
         _inTopicSearchQuery.value = ""
         _authorFilterInTopic.value = null
         _selectedTopic.value = topic
+        rememberOpenTopic(topic, preferTodayMode)
         val sessionKey = "${topic.id}|${topic.url}"
         loadedTopicSessionKey = sessionKey
         _restoredReadState.value = null
@@ -1254,6 +1278,10 @@ class EksinViewModel @Inject constructor(
         pageMemoryCache.clear()
         loadedTopicSessionKey = ""
         _selectedTopic.value = null
+        savedStateHandle.remove<String>(KEY_TOPIC_URL)
+        savedStateHandle.remove<String>(KEY_TOPIC_TITLE)
+        savedStateHandle.remove<String>(KEY_TOPIC_ID)
+        savedStateHandle.remove<Boolean>(KEY_TOPIC_TODAY)
         _topicPageUiState.value = TopicPageUiState.Idle
     }
 
@@ -1461,5 +1489,9 @@ class EksinViewModel @Inject constructor(
         private const val PREFS_READ_TOPIC_COUNTS = "eksin_read_topic_counts_prefs"
         private const val MAX_READ_COUNT_KEYS = 400
         private const val MAX_FAVORITE_ENRICHMENT = 8
+        private const val KEY_TOPIC_URL = "open_topic_url"
+        private const val KEY_TOPIC_TITLE = "open_topic_title"
+        private const val KEY_TOPIC_ID = "open_topic_id"
+        private const val KEY_TOPIC_TODAY = "open_topic_today"
     }
 }

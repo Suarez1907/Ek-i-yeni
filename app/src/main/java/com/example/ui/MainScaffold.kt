@@ -77,6 +77,7 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -119,7 +120,9 @@ import com.example.data.model.PeriodicRankingTab
 import com.example.data.model.PeriodicTimeRange
 import com.example.data.model.RankedTopicOrEntryItem
 import com.example.data.model.SearchSortOrder
+import com.example.EksinApplication
 import com.example.data.model.TopicItem
+import com.example.util.PerfLog
 import com.example.ui.auth.AuthWebViewScreen
 import com.example.ui.components.ThemeSelectorDialog
 import com.example.ui.components.TopicListSkeletonShimmer
@@ -192,9 +195,17 @@ fun MainScaffold(
     val channelPagingItems = viewModel.channelTopicsPagingFlow.collectAsLazyPagingItems()
     val searchPagingItems = viewModel.searchTopicsPagingFlow.collectAsLazyPagingItems()
 
+    var loggedFirstGundem by remember { mutableStateOf(false) }
     LaunchedEffect(gundemPagingItems.itemCount, bugunPagingItems.itemCount) {
         if (gundemPagingItems.itemCount > 0 || bugunPagingItems.itemCount > 0) {
             viewModel.refreshCookieState()
+        }
+        if (!loggedFirstGundem && gundemPagingItems.itemCount > 0) {
+            loggedFirstGundem = true
+            PerfLog.logEvent(
+                "time_to_first_gundem",
+                android.os.SystemClock.elapsedRealtime() - EksinApplication.appLaunchStartRealtimeMs
+            )
         }
     }
 
@@ -1592,6 +1603,11 @@ private fun TopicPagingList(
         }
 
         Column(modifier = Modifier.fillMaxSize()) {
+            if (refreshState is LoadState.Error && pagingItems.itemCount > 0) {
+                TextButton(onClick = { pagingItems.retry() }) {
+                    Text(friendlyLoadError(refreshState.error), color = EksiNeonGreen)
+                }
+            }
             if (refreshState is LoadState.Loading && pagingItems.itemCount > 0) {
                 LinearProgressIndicator(
                     modifier = Modifier
@@ -1616,7 +1632,8 @@ private fun TopicPagingList(
                         pagingItems.peek(index)?.cleanUrl?.ifBlank { null }
                             ?: pagingItems.peek(index)?.id
                             ?: "topic_$index"
-                    }
+                    },
+                    contentType = { "topic" }
                 ) { index ->
                     val item = pagingItems[index] ?: return@items
                     val savedRead = readStateByUrl[item.cleanUrl]
@@ -1730,8 +1747,14 @@ private fun TopicPagingList(
                 }
 
                 if (pagingItems.loadState.append is LoadState.Loading) {
-                    item {
+                    item(key = "append_loading", contentType = "append_status") {
                         TopicListSkeletonShimmer(itemCount = 3)
+                    }
+                } else if (pagingItems.loadState.append is LoadState.Error) {
+                    item(key = "append_error", contentType = "append_status") {
+                        TextButton(onClick = { pagingItems.retry() }) {
+                            Text("Devamı yüklenemedi. Tekrar dene", color = EksiNeonGreen)
+                        }
                     }
                 }
             }
@@ -1765,7 +1788,7 @@ private fun TopicPagingList(
                         color = OledTextPrimary
                     )
                     Text(
-                        text = refreshState.error.localizedMessage ?: "Bağlantı hatası",
+                        text = friendlyLoadError(refreshState.error),
                         style = MaterialTheme.typography.bodySmall,
                         color = OledTextSecondary
                     )
@@ -1804,6 +1827,19 @@ private fun TopicPagingList(
                 )
             }
         }
+    }
+}
+
+private fun friendlyLoadError(error: Throwable): String {
+    val message = error.message.orEmpty()
+    return if (
+        message.contains("İnternet", ignoreCase = true) ||
+        message.contains("offline", ignoreCase = true) ||
+        message.contains("bağlantı", ignoreCase = true)
+    ) {
+        "Çevrimdışısınız. Bağlantı gelince tekrar deneyin."
+    } else {
+        error.localizedMessage ?: "Bağlantı hatası"
     }
 }
 

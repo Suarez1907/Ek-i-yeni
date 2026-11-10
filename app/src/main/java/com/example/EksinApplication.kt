@@ -2,6 +2,7 @@ package com.example
 
 import android.app.Application
 import android.content.ComponentCallbacks2
+import android.os.StrictMode
 import android.os.SystemClock
 import coil.ImageLoader
 import coil.ImageLoaderFactory
@@ -10,6 +11,7 @@ import coil.memory.MemoryCache
 import com.example.data.repository.EksiRepository
 import com.example.di.ViewModelCacheCleaner
 import com.example.network.WebViewFetchBridge
+import com.example.BuildConfig
 import com.example.util.PerfLog
 import dagger.hilt.android.EntryPointAccessors
 import dagger.hilt.EntryPoint
@@ -21,6 +23,23 @@ import dagger.hilt.components.SingletonComponent
 class EksinApplication : Application(), ComponentCallbacks2, ImageLoaderFactory {
 
     override fun onCreate() {
+        if (BuildConfig.DEBUG) {
+            StrictMode.setThreadPolicy(
+                StrictMode.ThreadPolicy.Builder()
+                    .detectDiskReads()
+                    .detectDiskWrites()
+                    .detectNetwork()
+                    .penaltyLog()
+                    .build()
+            )
+            StrictMode.setVmPolicy(
+                StrictMode.VmPolicy.Builder()
+                    .detectLeakedClosableObjects()
+                    .detectActivityLeaks()
+                    .penaltyLog()
+                    .build()
+            )
+        }
         val startMs = SystemClock.elapsedRealtime()
         appLaunchStartRealtimeMs = startMs
         super.onCreate()

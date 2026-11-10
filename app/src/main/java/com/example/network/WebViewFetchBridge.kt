@@ -40,7 +40,10 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
+import okhttp3.Cache
+import okhttp3.ConnectionPool
 import okhttp3.OkHttpClient
+import okhttp3.Protocol
 import okhttp3.Request
 import org.json.JSONObject
 import org.jsoup.Jsoup
@@ -113,6 +116,9 @@ class WebViewFetchBridge @Inject constructor(
     private val directHttpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
             .cookieJar(cookieJar)
+            .cache(Cache(java.io.File(appContext.cacheDir, "http-eksi"), HTTP_DISK_CACHE_BYTES))
+            .connectionPool(ConnectionPool(5, 5, TimeUnit.MINUTES))
+            .protocols(listOf(Protocol.HTTP_2, Protocol.HTTP_1_1))
             .addInterceptor(UserAgentInterceptor(userAgentProvider))
             .connectTimeout(6, TimeUnit.SECONDS)
             .readTimeout(10, TimeUnit.SECONDS)
@@ -121,6 +127,12 @@ class WebViewFetchBridge @Inject constructor(
             .followSslRedirects(true)
             .build()
     }
+
+    private val listDiskCache by lazy {
+        ListHtmlDiskCache(java.io.File(appContext.cacheDir, "list-html"))
+    }
+
+    private val revalidatingListKeys = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     private val pendingFetchRequests =
         ConcurrentHashMap<String, CompletableDeferred<FetchBridgeResult>>()
@@ -238,6 +250,7 @@ class WebViewFetchBridge @Inject constructor(
         cachedRealGundemHtml = null
         cachedRealDebeHtml = null
         lastVerifiedHomeHtml = null
+        destroyBackgroundWebViewOnMain()
     }
 
     private fun normalizeSourceKey(url: String): String {
@@ -251,16 +264,56 @@ class WebViewFetchBridge @Inject constructor(
         return "${if (isAjax) "AJAX" else "FULL"}|$canonical"
     }
 
-    private fun getValidTtlCachedEntry(cacheKey: String): CachedHtmlEntry? {
-        val now = SystemClock.elapsedRealtime()
+    private data class ReusableHtml(
+        val html: String,
+        val source: ContentSource,
+        val fresh: Boolean
+    )
+
+    private fun readReusableCache(cacheKey: String, allowStale: Boolean): ReusableHtml? {
+        val nowElapsed = SystemClock.elapsedRealtime()
         synchronized(responseTtlCacheLock) {
-            val cached = responseTtlCache.get(cacheKey) ?: return null
-            if (now - cached.timestampMs <= RESPONSE_TTL_MS) {
-                return cached
+            val cached = responseTtlCache.get(cacheKey)
+            if (cached != null) {
+                val age = nowElapsed - cached.timestampMs
+                val kind = ListCacheAges.classify(age)
+                if (kind == ListCacheAge.EXPIRED) {
+                    responseTtlCache.remove(cacheKey)
+                } else if (kind == ListCacheAge.FRESH || allowStale) {
+                    return ReusableHtml(cached.html, cached.contentSource, kind == ListCacheAge.FRESH)
+                }
             }
-            responseTtlCache.remove(cacheKey)
-            return null
         }
+        if (!allowStale) return null
+        val disk = listDiskCache.read(cacheKey, System.currentTimeMillis()) ?: return null
+        val fresh = ListCacheAges.classify(disk.ageMs) == ListCacheAge.FRESH
+        val backdated = SystemClock.elapsedRealtime() - disk.ageMs.coerceAtLeast(0L)
+        synchronized(responseTtlCacheLock) {
+            responseTtlCache.put(
+                cacheKey,
+                CachedHtmlEntry(html = disk.html, contentSource = disk.source, timestampMs = backdated)
+            )
+        }
+        return ReusableHtml(disk.html, disk.source, fresh)
+    }
+
+    private fun scheduleListRevalidate(rawUrl: String, isAjax: Boolean, cacheKey: String) {
+        if (!revalidatingListKeys.add(cacheKey)) return
+        bridgeScope.launch {
+            try {
+                fetchHtml(rawUrl = rawUrl, isAjax = isAjax, bypassCache = false, networkOnly = true)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+            } finally {
+                revalidatingListKeys.remove(cacheKey)
+            }
+        }
+    }
+
+    private fun isListUrl(rawUrl: String): Boolean {
+        val lower = rawUrl.lowercase()
+        return lower.contains("/basliklar/") || lower.endsWith("/debe") || lower.contains("/debe?")
     }
 
     private fun putTtlCachedEntry(cacheKey: String, html: String, source: ContentSource) {
@@ -272,6 +325,9 @@ class WebViewFetchBridge @Inject constructor(
         )
         synchronized(responseTtlCacheLock) {
             responseTtlCache.put(cacheKey, entry)
+        }
+        if (isListUrl(cacheKey)) {
+            listDiskCache.write(cacheKey, html, source, System.currentTimeMillis())
         }
     }
 
@@ -425,7 +481,8 @@ class WebViewFetchBridge @Inject constructor(
     suspend fun fetchHtml(
         rawUrl: String,
         isAjax: Boolean = true,
-        bypassCache: Boolean = false
+        bypassCache: Boolean = false,
+        networkOnly: Boolean = false
     ): String {
         val startMs = SystemClock.elapsedRealtime()
         try {
@@ -433,9 +490,12 @@ class WebViewFetchBridge @Inject constructor(
 
             if (bypassCache) {
                 invalidateTtlCacheForUrl(rawUrl)
-            } else {
-                getValidTtlCachedEntry(cacheKey)?.let { cached ->
-                    recordUrlContentSource(rawUrl, cached.contentSource)
+            } else if (!networkOnly) {
+                readReusableCache(cacheKey, allowStale = isListUrl(rawUrl))?.let { cached ->
+                    recordUrlContentSource(rawUrl, cached.source)
+                    if (!cached.fresh && isListUrl(rawUrl)) {
+                        scheduleListRevalidate(rawUrl, isAjax, cacheKey)
+                    }
                     return cached.html
                 }
             }
@@ -506,7 +566,8 @@ class WebViewFetchBridge @Inject constructor(
         for (candidateDomain in candidateDomains) {
             val urlsToTryOnDomain = buildEndpointVariantsForDomain(rawUrl, candidateDomain)
 
-            // AŞAMA 1: Birebir WebView User-Agent ve CookieManager çerezleriyle hızlı doğrudan OkHttp isteği
+            // OkHttp on every candidate before any hidden WebView. A mirror that answers
+            // directly should not wait on Chromium startup.
             for ((index, candidateUrl) in urlsToTryOnDomain.withIndex()) {
                 val effectiveAjax = if (candidateUrl.endsWith("/debe")) false else isAjax
                 val directResult = executeDirectHttpFetch(
@@ -523,20 +584,26 @@ class WebViewFetchBridge @Inject constructor(
                         !directResult.isCloudflareChallenge &&
                         hasRelevantContentForUrl(candidateUrl, directResult.html)
                     ) {
-                        onDomainSucceeded(candidateDomain, directResult.finalUrl)
-                        recordUrlContentSource(rawUrl, ContentSource.LIVE)
-                        recordUrlContentSource(candidateUrl, ContentSource.LIVE)
-                        putTtlCachedEntry(cacheKey, directResult.html, ContentSource.LIVE)
-                        return directResult.html
+                        return publishLiveHtml(
+                            cacheKey = cacheKey,
+                            candidateDomain = candidateDomain,
+                            candidateUrl = candidateUrl,
+                            finalUrl = directResult.finalUrl,
+                            html = directResult.html
+                        )
                     }
                     if (directResult.isCloudflareChallenge && index == 0) {
                         break
                     }
                 }
             }
+        }
 
+        if (hardwareWebViewSupported && lastSawCloudflareChallenge) {
+            for (candidateDomain in candidateDomains) {
+            val urlsToTryOnDomain = buildEndpointVariantsForDomain(rawUrl, candidateDomain)
             // AŞAMA 2: Gerçek cihazda Chromium WebView üzerinden JS fetch() ve loadUrl()
-            if (hardwareWebViewSupported) {
+            run {
                 scheduleIdleWebViewHibernation()
                 val originReady = ensureRealOriginLoaded(candidateDomain)
                 if (originReady) {
@@ -557,11 +624,13 @@ class WebViewFetchBridge @Inject constructor(
                                 !jsFetchResult.isCloudflareChallenge &&
                                 hasRelevantContentForUrl(candidateUrl, jsFetchResult.html)
                             ) {
-                                onDomainSucceeded(candidateDomain, jsFetchResult.finalUrl)
-                                recordUrlContentSource(rawUrl, ContentSource.LIVE)
-                                recordUrlContentSource(candidateUrl, ContentSource.LIVE)
-                                putTtlCachedEntry(cacheKey, jsFetchResult.html, ContentSource.LIVE)
-                                return jsFetchResult.html
+                                return publishLiveHtml(
+                                    cacheKey = cacheKey,
+                                    candidateDomain = candidateDomain,
+                                    candidateUrl = candidateUrl,
+                                    finalUrl = jsFetchResult.finalUrl,
+                                    html = jsFetchResult.html
+                                )
                             }
                         }
                     }
@@ -584,14 +653,17 @@ class WebViewFetchBridge @Inject constructor(
                             !fullPageResult.isCloudflareChallenge &&
                             hasRelevantContentForUrl(candidateUrl, fullPageResult.html)
                         ) {
-                            onDomainSucceeded(candidateDomain, fullPageResult.finalUrl)
-                            recordUrlContentSource(rawUrl, ContentSource.LIVE)
-                            recordUrlContentSource(candidateUrl, ContentSource.LIVE)
-                            putTtlCachedEntry(cacheKey, fullPageResult.html, ContentSource.LIVE)
-                            return fullPageResult.html
+                            return publishLiveHtml(
+                                cacheKey = cacheKey,
+                                candidateDomain = candidateDomain,
+                                candidateUrl = candidateUrl,
+                                finalUrl = fullPageResult.finalUrl,
+                                html = fullPageResult.html
+                            )
                         }
                     }
                 }
+            }
             }
         }
 
@@ -599,6 +671,24 @@ class WebViewFetchBridge @Inject constructor(
             lastLiveFetchSawCloudflare = true
         }
         return null
+    }
+
+    private fun publishLiveHtml(
+        cacheKey: String,
+        candidateDomain: String,
+        candidateUrl: String,
+        finalUrl: String,
+        html: String
+    ): String {
+        onDomainSucceeded(candidateDomain, finalUrl)
+        val requested = cacheKey.substringAfter('|', "")
+        if (requested.isNotBlank()) {
+            recordUrlContentSource(requested, ContentSource.LIVE)
+        }
+        recordUrlContentSource(candidateUrl, ContentSource.LIVE)
+        recordUrlContentSource(finalUrl, ContentSource.LIVE)
+        putTtlCachedEntry(cacheKey, html, ContentSource.LIVE)
+        return html
     }
 
     @Volatile
@@ -616,6 +706,8 @@ class WebViewFetchBridge @Inject constructor(
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
+        } catch (offline: IOException) {
+            throw offline
         } catch (_: Throwable) {
             null
         }
@@ -1605,6 +1697,7 @@ class WebViewFetchBridge @Inject constructor(
             "https://eksisozluk1923.com"
         )
 
+        private const val HTTP_DISK_CACHE_BYTES = 20L * 1024L * 1024L
         private const val LIVE_FETCH_BUDGET_MS = 28_000L
         private const val ARCHIVE_FETCH_BUDGET_MS = 12_000L
         private const val RESPONSE_TTL_MS = 90_000L
