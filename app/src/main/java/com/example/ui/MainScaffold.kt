@@ -78,6 +78,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -112,6 +113,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.paging.LoadState
 import androidx.paging.compose.LazyPagingItems
 import androidx.paging.compose.collectAsLazyPagingItems
+import com.example.ai.AiProviderId
+import com.example.ai.DeepSeekPreset
+import com.example.ai.PersonalGundemRanker
 import com.example.data.local.BookmarkedEntryEntity
 import com.example.data.local.TopicReadStateEntity
 import com.example.data.model.DebeAndStatsCategory
@@ -126,6 +130,7 @@ import com.example.EksinApplication
 import com.example.data.model.TopicItem
 import com.example.util.PerfLog
 import com.example.ui.auth.AuthWebViewScreen
+import com.example.ui.sheets.GeminiSummaryBottomSheet
 import com.example.ui.components.ThemeSelectorDialog
 import com.example.ui.components.TopicListSkeletonShimmer
 import com.example.ui.theme.AppThemeMode
@@ -483,6 +488,18 @@ fun MainScaffold(
                                         viewModel.selectSection(LeftFrameSection.OLAYLAR)
                                     }
                                 )
+                                val personalOn by viewModel.aiConfig.collectAsStateWithLifecycle()
+                                TopQuickSectionChip(
+                                    label = "Sana göre",
+                                    selected = personalOn.personalFeedEnabled &&
+                                        currentDestination == MainNavDestination.GUNDEM &&
+                                        selectedSection == LeftFrameSection.GUNDEM,
+                                    onClick = {
+                                        currentDestination = MainNavDestination.GUNDEM
+                                        viewModel.selectSection(LeftFrameSection.GUNDEM)
+                                        viewModel.setPersonalFeedEnabled(!personalOn.personalFeedEnabled)
+                                    }
+                                )
                             }
                         }
 
@@ -630,6 +647,47 @@ fun MainScaffold(
                                 "Gündem"
                             }
 
+                            Column(modifier = Modifier.fillMaxSize()) {
+                            val personalConfig by viewModel.aiConfig.collectAsStateWithLifecycle()
+                            if (personalConfig.personalFeedEnabled &&
+                                selectedSection == LeftFrameSection.GUNDEM
+                            ) {
+                                val rememberedTopics by viewModel.gundemTopics.collectAsStateWithLifecycle()
+                                val personalTopics = remember(rememberedTopics, lastSeenEntryCounts) {
+                                    PersonalGundemRanker.forReader(rememberedTopics, lastSeenEntryCounts)
+                                        .take(8)
+                                }
+                                if (personalTopics.isNotEmpty()) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .horizontalScroll(rememberScrollState())
+                                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        AssistChip(
+                                            onClick = {
+                                                viewModel.labelPersonalTopics(personalTopics.map { it.title })
+                                            },
+                                            label = { Text("Etiketle", fontSize = 12.sp) }
+                                        )
+                                        personalTopics.forEach { topic ->
+                                            AssistChip(
+                                                onClick = {
+                                                    viewModel.openTopic(topic, preferTodayMode = true)
+                                                },
+                                                label = {
+                                                    Text(
+                                                        text = topic.title,
+                                                        fontSize = 12.sp,
+                                                        maxLines = 1
+                                                    )
+                                                }
+                                            )
+                                        }
+                                    }
+                                }
+                            }
                             TopicPagingList(
                                 pagingItems = activePaging,
                                 listState = activeState,
@@ -644,8 +702,10 @@ fun MainScaffold(
                                 },
                                 onTopicWarm = viewModel::warmTopicOnPress,
                                 onOpenCloudflare = { viewModel.openCloudflareVerification() },
-                                emptyMessage = "$emptyTitle sekmesinde başlık bulunamadı."
+                                emptyMessage = "$emptyTitle sekmesinde başlık bulunamadı.",
+                                modifier = Modifier.weight(1f)
                             )
+                            }
                         }
 
                         MainNavDestination.BUGUN -> {
@@ -745,6 +805,19 @@ fun MainScaffold(
                     onBack = { viewModel.closeTopicDetail() }
                 )
             }
+        }
+
+        if (selectedTopic == null) {
+            val textStream by viewModel.geminiStreamState.collectAsStateWithLifecycle()
+            val geminiReady by viewModel.isGeminiKeyConfigured.collectAsStateWithLifecycle()
+            val providerConfig by viewModel.aiConfig.collectAsStateWithLifecycle()
+            GeminiSummaryBottomSheet(
+                topicTitle = "Sana göre",
+                streamState = textStream,
+                hasSavedApiKey = if (providerConfig.provider == AiProviderId.GEMINI) geminiReady else true,
+                onSelectMode = {},
+                onDismiss = { viewModel.clearGeminiStream() }
+            )
         }
 
         // Cloudflare Doğrulama veya Giriş WebView Ekranı
@@ -1288,6 +1361,7 @@ private fun SearchScreenContent(
     val query by viewModel.searchQuery.collectAsStateWithLifecycle()
     val sortOrder by viewModel.searchSortOrder.collectAsStateWithLifecycle()
     val submittedFilter by viewModel.submittedSearchFilter.collectAsStateWithLifecycle()
+    val naturalLanguageStatus by viewModel.naturalLanguageStatus.collectAsStateWithLifecycle()
     val autocompleteState by viewModel.autocompleteState.collectAsStateWithLifecycle()
     val focusManager = LocalFocusManager.current
 
@@ -1548,6 +1622,20 @@ private fun SearchScreenContent(
                     )
                 )
             }
+            AssistChip(
+                onClick = { viewModel.runNaturalLanguageSearch(query) },
+                enabled = query.trim().length >= 3,
+                label = { Text("Cümleyle ara", fontSize = 12.sp) }
+            )
+        }
+
+        naturalLanguageStatus?.let { status ->
+            Text(
+                text = status,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                style = MaterialTheme.typography.labelSmall,
+                color = OledTextSecondary
+            )
         }
 
         HorizontalDivider(color = OledHairlineDivider, thickness = 0.5.dp)
@@ -1598,14 +1686,13 @@ private fun TopicPagingList(
     onTopicClick: (TopicItem) -> Unit,
     onTopicWarm: (TopicItem) -> Unit = {},
     onOpenCloudflare: () -> Unit,
-    emptyMessage: String
+    emptyMessage: String,
+    modifier: Modifier = Modifier.fillMaxSize()
 ) {
     val refreshState = pagingItems.loadState.refresh
 
     Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
+        modifier = modifier.background(MaterialTheme.colorScheme.background)
     ) {
         if (refreshState is LoadState.Loading && pagingItems.itemCount == 0) {
             TopicListSkeletonShimmer()
@@ -1873,6 +1960,8 @@ private fun ProfileAndStudioScreenContent(
     val hasCfClearance by viewModel.hasCfClearance.collectAsStateWithLifecycle()
     val currentTheme by viewModel.themeMode.collectAsStateWithLifecycle()
     val isGeminiKeyConfigured by viewModel.isGeminiKeyConfigured.collectAsStateWithLifecycle()
+    val aiConfig by viewModel.aiConfig.collectAsStateWithLifecycle()
+    val hasOpenAiKey by viewModel.hasOpenAiKey.collectAsStateWithLifecycle()
 
     val selectedModel by viewModel.selectedImageModel.collectAsStateWithLifecycle()
     val selectedSize by viewModel.selectedImageSize.collectAsStateWithLifecycle()
@@ -1882,6 +1971,9 @@ private fun ProfileAndStudioScreenContent(
     var apiKeyInput by remember { mutableStateOf("") }
     var showApiKeyPlain by remember { mutableStateOf(false) }
     var apiKeyFeedbackMessage by remember { mutableStateOf<String?>(null) }
+    var openAiKeyInput by remember { mutableStateOf("") }
+    var openAiBaseInput by remember(aiConfig.openAiBaseUrl) { mutableStateOf(aiConfig.openAiBaseUrl) }
+    var openAiModelInput by remember(aiConfig.openAiModel) { mutableStateOf(aiConfig.openAiModel) }
 
     var promptInput by rememberSaveable {
         mutableStateOf("Gece yarısı OLED siyah ekranda yeşil neon ışıklarla aydınlanan fütüristik sözlük kütüphanesi")
@@ -2181,6 +2273,120 @@ private fun ProfileAndStudioScreenContent(
             }
         }
 
+        item {
+            Card(
+                shape = RoundedCornerShape(14.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .border(0.5.dp, OledHairlineDivider, RoundedCornerShape(14.dp))
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Text(
+                        text = "Metin sağlayıcısı",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = EksiNeonGreen
+                    )
+                    Text(
+                        text = "Gemini varsayılan. OpenAI uyumlu seçenek DeepSeek ön ayarıyla gelir (api.deepseek.com, deepseek-flash). Anahtar Keystore'da durur ve çerez gönderilmez. Görsel üretim yalnızca Gemini'de açıktır.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = OledTextSecondary
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        AiProviderId.entries.forEach { provider ->
+                            FilterChip(
+                                selected = aiConfig.provider == provider,
+                                onClick = { viewModel.selectAiProvider(provider) },
+                                label = { Text(provider.label) }
+                            )
+                        }
+                    }
+                    OutlinedTextField(
+                        value = openAiKeyInput,
+                        onValueChange = { openAiKeyInput = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        label = { Text(if (hasOpenAiKey) "Yeni OpenAI uyumlu anahtar (kayıtlı)" else "OpenAI uyumlu API anahtarı") },
+                        visualTransformation = PasswordVisualTransformation()
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = {
+                                viewModel.saveOpenAiCompatibleKey(openAiKeyInput)
+                                openAiKeyInput = ""
+                            },
+                            enabled = openAiKeyInput.isNotBlank(),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = EksiNeonGreen,
+                                contentColor = OledOnAccentColor
+                            )
+                        ) { Text("Anahtarı kaydet") }
+                        if (hasOpenAiKey) {
+                            OutlinedButton(onClick = { viewModel.clearOpenAiCompatibleKey() }) {
+                                Text("Temizle")
+                            }
+                        }
+                    }
+                    OutlinedTextField(
+                        value = openAiBaseInput,
+                        onValueChange = { openAiBaseInput = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        label = { Text("Base URL") }
+                    )
+                    OutlinedTextField(
+                        value = openAiModelInput,
+                        onValueChange = { openAiModelInput = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        label = { Text("Model") }
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(
+                            onClick = {
+                                openAiBaseInput = DeepSeekPreset.BASE_URL
+                                openAiModelInput = DeepSeekPreset.MODEL
+                                viewModel.updateOpenAiEndpoint(DeepSeekPreset.BASE_URL, DeepSeekPreset.MODEL)
+                            }
+                        ) { Text("DeepSeek ön ayarı") }
+                        Button(
+                            onClick = { viewModel.updateOpenAiEndpoint(openAiBaseInput, openAiModelInput) },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = EksiNeonGreen,
+                                contentColor = OledOnAccentColor
+                            )
+                        ) { Text("Adresi kaydet") }
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Akıllı filtre (kapalı başlar)", color = OledTextPrimary)
+                        Switch(
+                            checked = aiConfig.smartFilterEnabled,
+                            onCheckedChange = { viewModel.setSmartFilterEnabled(it) }
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Bulutla toplu filtre", color = OledTextPrimary)
+                        Switch(
+                            checked = aiConfig.cloudFilterEnabled,
+                            onCheckedChange = { viewModel.setCloudFilterEnabled(it) }
+                        )
+                    }
+                }
+            }
+        }
+
         // 2. Okunan Yer Takibi (Room ReadStateDao)
         item {
             Text(
@@ -2318,7 +2524,11 @@ private fun ProfileAndStudioScreenContent(
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     Text(
-                        text = "Gemini Görsel Stüdyosu (1K/2K/4K & En-Boy Oranı)",
+                        text = if (aiConfig.provider.supportsImages) {
+                            "Gemini Görsel Stüdyosu (1K/2K/4K & En-Boy Oranı)"
+                        } else {
+                            "Görsel stüdyo kapalı. Görsel üretim yalnızca Gemini sağlayıcısındadır."
+                        },
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.Bold,
                         color = EksiNeonGreen
@@ -2398,7 +2608,9 @@ private fun ProfileAndStudioScreenContent(
 
                     Button(
                         onClick = { viewModel.generateEntryVisual(promptInput) },
-                        enabled = aiImageState !is AiImageState.Loading && promptInput.isNotBlank(),
+                        enabled = aiConfig.provider.supportsImages &&
+                            aiImageState !is AiImageState.Loading &&
+                            promptInput.isNotBlank(),
                         colors = ButtonDefaults.buttonColors(
                             containerColor = EksiNeonGreen,
                             contentColor = OledOnAccentColor

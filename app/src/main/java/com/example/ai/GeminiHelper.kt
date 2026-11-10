@@ -69,6 +69,22 @@ enum class GeminiAnalysisMode(val title: String, val subtitle: String) {
     DEBATE_AND_CONSENSUS(
         title = "Fikir Ayrılıklarını ve Baskın Görüşü Çıkar",
         subtitle = "Tartışma eksenlerini, karşıt kampları ve ortak kanaati analiz eder"
+    ),
+    CATCH_UP(
+        title = "Ne oldu?",
+        subtitle = "Son okunan entry'den sonraki yenileri özetler"
+    ),
+    DISCUSSION_MAP(
+        title = "Tartışma haritası",
+        subtitle = "Tarafları ve tekrar eden görüşleri entry referansıyla çıkarır"
+    ),
+    EXPLAIN_ENTRY(
+        title = "Bağlam",
+        subtitle = "Kısaltma, gönderme ve espriyi bu sayfadaki metinden açıklar"
+    ),
+    PERSONAL_LABEL(
+        title = "Gündem etiketi",
+        subtitle = "Yerel okuma sırasındaki başlıklara kısa bir ad verir"
     )
 }
 
@@ -983,6 +999,14 @@ class GeminiHelper @Inject constructor(
                 ENTRY'LER:
                 $formattedEntries
             """.trimIndent()
+
+            GeminiAnalysisMode.CATCH_UP -> AiPrompts.catchUp(topicTitle, entries, loadedPageOnly = true)
+            GeminiAnalysisMode.DISCUSSION_MAP -> AiPrompts.discussionMap(topicTitle, entries)
+            GeminiAnalysisMode.EXPLAIN_ENTRY -> AiPrompts.explain(
+                topicTitle,
+                entries.firstOrNull() ?: return "Açıklanacak entry yok."
+            )
+            GeminiAnalysisMode.PERSONAL_LABEL -> AiPrompts.personalLabel(listOf(topicTitle))
         }
     }
 

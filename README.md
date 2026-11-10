@@ -14,6 +14,8 @@ Debug does not need a release keystore or API secrets. The Android Gradle Plugin
 
 The Gemini API key is entered in the app and stored with the Android Keystore. It is not compiled into the APK.
 
+Text AI uses the provider selected in Profil. Gemini is the default. The OpenAI-compatible provider defaults to DeepSeek (`https://api.deepseek.com`, model `deepseek-flash`, thinking disabled) and its key is stored in a separate Keystore entry. Image generation stays on Gemini and the studio button is disabled for the other provider. Smart filter and the optional cloud batch are off until enabled in Profil. No AI key is a GitHub secret, and no AI call runs at startup.
+
 ## Release signing
 
 Release builds enable R8 (minify + resource shrinking). They are signed only when a real upload keystore is provided. The workflow does not generate a new keystore.
