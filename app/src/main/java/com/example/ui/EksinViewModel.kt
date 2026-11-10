@@ -29,8 +29,9 @@ import com.example.data.model.SearchSortOrder
 import com.example.data.model.TopicFilterMode
 import com.example.data.model.TopicItem
 import com.example.data.model.TopicPageData
+import com.example.ai.GeminiModels
 import com.example.data.repository.EksiRepository
-import com.example.di.AppModule
+import com.example.di.ViewModelCacheCleaner
 import com.example.network.CloudflareChallengeEvent
 import com.example.network.CloudflareChallengeManager
 import com.example.network.ContentSource
@@ -56,6 +57,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -116,8 +118,17 @@ enum class StudioAspectRatio(val label: String) {
 }
 
 enum class StudioImageModel(val modelId: String, val displayName: String) {
-    PRO_STUDIO("gemini-3-pro-image", "Gemini 3 Pro Image (Stüdyo 1K/2K/4K)"),
-    NANO_BANANA("gemini-nano-banana-2.1", "Gemini Nano Banana 2.1 (Hızlı)")
+    PRO_STUDIO(GeminiModels.IMAGE_PRO, "Gemini 3 Pro Image (Stüdyo 1K/2K/4K)"),
+    NANO_BANANA(GeminiModels.IMAGE_FAST, "Gemini Nano Banana 2.1 (Hızlı)")
+}
+
+private enum class ActivePagingTab {
+    GUNDEM,
+    BUGUN,
+    OLAYLAR,
+    CHANNELS,
+    SEARCH,
+    NONE
 }
 
 data class ActiveAuthSheet(
@@ -135,18 +146,20 @@ class EksinViewModel @Inject constructor(
     val userAgentProvider: UserAgentProvider,
     val webViewFetchBridge: WebViewFetchBridge,
     private val cloudflareManager: CloudflareChallengeManager,
-    private val geminiHelper: GeminiHelper
+    private val geminiHelper: GeminiHelper,
+    private val viewModelCacheCleaner: ViewModelCacheCleaner
 ) : ViewModel() {
 
     // 1. AKILLI OKUNDU TAKİBİ (SharedPreferences + Map<String, Int>: topicKey -> lastSeenEntryCount)
-    private val readCountPrefs: SharedPreferences =
+    private val readCountPrefs: SharedPreferences by lazy {
         appContext.getSharedPreferences(PREFS_READ_TOPIC_COUNTS, Context.MODE_PRIVATE)
+    }
 
-    private val _lastSeenEntryCounts = MutableStateFlow<Map<String, Int>>(loadSavedReadCountsFromPrefs())
+    private val _lastSeenEntryCounts = MutableStateFlow<Map<String, Int>>(emptyMap())
     val lastSeenEntryCounts: StateFlow<Map<String, Int>> = _lastSeenEntryCounts.asStateFlow()
 
     // 4. ARAYÜZ RENK / TEMA SEÇENEĞİ (OLED Siyah, Koyu Gri, Klasik Beyaz)
-    private val _themeMode = MutableStateFlow(ThemePreferencesManager.loadSavedTheme(appContext))
+    private val _themeMode = MutableStateFlow(AppThemeMode.OLED_BLACK)
     val themeMode: StateFlow<AppThemeMode> = _themeMode.asStateFlow()
 
     private val _showThemeDialog = MutableStateFlow(false)
@@ -160,6 +173,7 @@ class EksinViewModel @Inject constructor(
     val gundemTopics: StateFlow<List<TopicItem>> = repository.gundemTopics
     val bugunTopics: StateFlow<List<TopicItem>> = repository.bugunTopics
     val isBugunLoading: StateFlow<Boolean> = repository.isBugunLoading
+    val bugunIsApproximate: StateFlow<Boolean> = repository.bugunIsApproximate
     private var bugunPrefetchJob: Job? = null
     private val initialBugunPrefetchScheduled = AtomicBoolean(false)
 
@@ -181,6 +195,7 @@ class EksinViewModel @Inject constructor(
     val debeAndStatsUiState: StateFlow<DebeAndStatsUiState> = _debeAndStatsUiState.asStateFlow()
     private var activeDebeStatsJob: Job? = null
 
+    private val _activePagingTab = MutableStateFlow(ActivePagingTab.GUNDEM)
     private val _refreshTrigger = MutableStateFlow(0)
     private val _gundemRefreshTrigger = MutableStateFlow(0)
     private val _bugunRefreshTrigger = MutableStateFlow(0)
@@ -214,6 +229,7 @@ class EksinViewModel @Inject constructor(
     val topicPageUiState: StateFlow<TopicPageUiState> = _topicPageUiState.asStateFlow()
 
     private val pageMemoryCache = ConcurrentHashMap<Int, TopicPageData>()
+    private var openTopicJob: Job? = null
     private var activePageLoadJob: Job? = null
     private var activePrefetchJob: Job? = null
     private val pageLoadSequenceGenerator = AtomicInteger(0)
@@ -246,20 +262,17 @@ class EksinViewModel @Inject constructor(
     val bkzPreviewState: StateFlow<BkzPreviewUiState> = _bkzPreviewState.asStateFlow()
     private var activeBkzJob: Job? = null
 
-    private val _hasCfClearance = MutableStateFlow(webViewFetchBridge.isDomVerified())
+    private val _hasCfClearance = MutableStateFlow(false)
     val hasCfClearance: StateFlow<Boolean> = _hasCfClearance.asStateFlow()
 
-    private val _hasUserSession = MutableStateFlow(cookieJar.hasActiveUserSession())
+    private val _hasUserSession = MutableStateFlow(false)
     val hasUserSession: StateFlow<Boolean> = _hasUserSession.asStateFlow()
 
     private val _geminiStreamState = MutableStateFlow<GeminiStreamState>(GeminiStreamState.Idle)
     val geminiStreamState: StateFlow<GeminiStreamState> = _geminiStreamState.asStateFlow()
     private var activeGeminiJob: Job? = null
 
-    private val _geminiApiKey = MutableStateFlow(geminiHelper.getUserSavedApiKey())
-    val geminiApiKey: StateFlow<String> = _geminiApiKey.asStateFlow()
-
-    private val _isGeminiKeyConfigured = MutableStateFlow(geminiHelper.hasValidApiKey())
+    private val _isGeminiKeyConfigured = MutableStateFlow(false)
     val isGeminiKeyConfigured: StateFlow<Boolean> = _isGeminiKeyConfigured.asStateFlow()
 
     val geminiKeyDecryptionWarning: StateFlow<String?> = geminiHelper.keyDecryptionWarning
@@ -306,60 +319,67 @@ class EksinViewModel @Inject constructor(
      * ne liste verisi ne de kaydırma konumu sıfırlanır.
      */
     val gundemTopicsPagingFlow: Flow<PagingData<TopicItem>> =
-        combine(_gundemRefreshTrigger, _refreshTrigger) { g, r -> g + r }
-            .flatMapLatest {
-                repository.getGundemTopicsPager()
-            }
-            .cachedIn(viewModelScope)
+        combine(_activePagingTab, _gundemRefreshTrigger, _refreshTrigger) { tab, g, r ->
+            tab to (g + r)
+        }.flatMapLatest { (tab, _) ->
+            if (tab == ActivePagingTab.GUNDEM) repository.getGundemTopicsPager()
+            else flowOf(PagingData.empty())
+        }.cachedIn(viewModelScope)
 
     val bugunTopicsPagingFlow: Flow<PagingData<TopicItem>> =
-        combine(_bugunRefreshTrigger, _refreshTrigger) { b, r -> b + r }
-            .flatMapLatest {
-                repository.getBugunTopicsPager()
-            }
-            .cachedIn(viewModelScope)
+        combine(_activePagingTab, _bugunRefreshTrigger, _refreshTrigger) { tab, b, r ->
+            tab to (b + r)
+        }.flatMapLatest { (tab, _) ->
+            if (tab == ActivePagingTab.BUGUN) repository.getBugunTopicsPager()
+            else flowOf(PagingData.empty())
+        }.cachedIn(viewModelScope)
 
     val olaylarTopicsPagingFlow: Flow<PagingData<TopicItem>> =
-        combine(_olaylarRefreshTrigger, _refreshTrigger) { o, r -> o + r }
-            .flatMapLatest {
-                repository.getOlaylarTopicsPager()
-            }
-            .cachedIn(viewModelScope)
-
-    val leftFramePagingFlow: Flow<PagingData<TopicItem>> =
-        combine(_selectedSection, _refreshTrigger) { section, _ -> section }
-            .flatMapLatest { section ->
-                repository.getLeftFrameTopicsPager(section)
-            }
-            .cachedIn(viewModelScope)
+        combine(_activePagingTab, _olaylarRefreshTrigger, _refreshTrigger) { tab, o, r ->
+            tab to (o + r)
+        }.flatMapLatest { (tab, _) ->
+            if (tab == ActivePagingTab.OLAYLAR) repository.getOlaylarTopicsPager()
+            else flowOf(PagingData.empty())
+        }.cachedIn(viewModelScope)
 
     /**
      * 1. KANALLAR Paging 3 Akışı (`https://eksisozluk.com/basliklar/kanal/{kanal_slug}?p={page}`).
      */
     val channelTopicsPagingFlow: Flow<PagingData<TopicItem>> =
-        combine(_selectedChannel, _refreshTrigger) { channel, _ -> channel }
-            .flatMapLatest { channel ->
-                repository.getChannelTopicsPager(channel)
-            }
-            .cachedIn(viewModelScope)
+        combine(_activePagingTab, _selectedChannel, _refreshTrigger) { tab, channel, _ ->
+            tab to channel
+        }.flatMapLatest { (tab, channel) ->
+            if (tab == ActivePagingTab.CHANNELS) repository.getChannelTopicsPager(channel)
+            else flowOf(PagingData.empty())
+        }.cachedIn(viewModelScope)
 
     val searchTopicsPagingFlow: Flow<PagingData<TopicItem>> =
-        combine(_submittedSearchFilter, _refreshTrigger) { filter, _ -> filter }
-            .flatMapLatest { filter ->
+        combine(_activePagingTab, _submittedSearchFilter, _refreshTrigger) { tab, filter, _ ->
+            tab to filter
+        }.flatMapLatest { (tab, filter) ->
+            if (tab == ActivePagingTab.SEARCH && filter.keywords.isNotBlank()) {
                 repository.getSearchTopicsPager(filter)
+            } else {
+                flowOf(PagingData.empty())
             }
-            .cachedIn(viewModelScope)
+        }.cachedIn(viewModelScope)
+
+    private val memoryCacheCleaner: () -> Unit = { pageMemoryCache.clear() }
 
     init {
-        AppModule.registerViewModelCacheCleaner {
-            pageMemoryCache.clear()
-        }
-        repository.setUserLoggedInState(_hasUserSession.value)
-
-        // 3. KURAL: Uygulama ilk açıldığında Gündem yüklendikten hemen 500ms sonra arka planda
-        // sessizce "Bugün" listesini (`prefetchBugunTopics()`) hazırla!
+        viewModelCacheCleaner.register(memoryCacheCleaner)
         repository.setOnGundemFirstPageLoadedListener {
             scheduleBackgroundBugunPrefetchAfterGundem()
+        }
+
+        viewModelScope.launch(Dispatchers.IO) {
+            _lastSeenEntryCounts.value = loadSavedReadCountsFromPrefs()
+            _themeMode.value = ThemePreferencesManager.loadSavedTheme(appContext)
+            val loggedIn = cookieJar.hasActiveUserSession()
+            _hasUserSession.value = loggedIn
+            repository.setUserLoggedInState(loggedIn)
+            _hasCfClearance.value = webViewFetchBridge.isDomVerified()
+            _isGeminiKeyConfigured.value = geminiHelper.hasValidApiKey()
         }
 
         viewModelScope.launch {
@@ -367,7 +387,23 @@ class EksinViewModel @Inject constructor(
                 _pendingCloudflareChallenge.value = event
             }
         }
-        loadDebeAndStats()
+    }
+
+    fun setActivePagingTab(tabName: String) {
+        _activePagingTab.value = when (tabName) {
+            "BUGUN" -> ActivePagingTab.BUGUN
+            "OLAYLAR" -> ActivePagingTab.OLAYLAR
+            "CHANNELS" -> ActivePagingTab.CHANNELS
+            "SEARCH" -> ActivePagingTab.SEARCH
+            "NONE" -> ActivePagingTab.NONE
+            else -> ActivePagingTab.GUNDEM
+        }
+    }
+
+    override fun onCleared() {
+        repository.setOnGundemFirstPageLoadedListener { }
+        viewModelCacheCleaner.unregister(memoryCacheCleaner)
+        super.onCleared()
     }
 
     /**
@@ -376,13 +412,18 @@ class EksinViewModel @Inject constructor(
      * 0 milisaniye bekleme süresiyle anında hazır listeyi görür.
      */
     private fun scheduleBackgroundBugunPrefetchAfterGundem() {
-        if (!initialBugunPrefetchScheduled.compareAndSet(false, true)) {
-            if (repository.hasCachedBugunTopics()) return
-        }
-        bugunPrefetchJob?.cancel()
-        bugunPrefetchJob = viewModelScope.launch(Dispatchers.IO) {
-            delay(500L)
-            prefetchBugunTopics(forceRefresh = false)
+        viewModelScope.launch(Dispatchers.Main.immediate) {
+            if (!initialBugunPrefetchScheduled.compareAndSet(false, true)) {
+                if (repository.hasCachedBugunTopics()) return@launch
+            }
+            bugunPrefetchJob?.cancel()
+            bugunPrefetchJob = viewModelScope.launch(Dispatchers.IO) {
+                delay(500L)
+                val loaded = repository.prefetchBugunTopics(forceRefresh = false)
+                if (loaded.isNotEmpty()) {
+                    _bugunRefreshTrigger.value += 0
+                }
+            }
         }
     }
 
@@ -394,11 +435,13 @@ class EksinViewModel @Inject constructor(
         if (!forceRefresh && repository.hasCachedBugunTopics()) {
             return
         }
-        bugunPrefetchJob?.cancel()
-        bugunPrefetchJob = viewModelScope.launch(Dispatchers.IO) {
-            val loaded = repository.prefetchBugunTopics(forceRefresh = forceRefresh)
-            if (loaded.isNotEmpty() && forceRefresh) {
-                _bugunRefreshTrigger.value += 1
+        viewModelScope.launch(Dispatchers.Main.immediate) {
+            bugunPrefetchJob?.cancel()
+            bugunPrefetchJob = viewModelScope.launch(Dispatchers.IO) {
+                val loaded = repository.prefetchBugunTopics(forceRefresh = forceRefresh)
+                if (loaded.isNotEmpty() && forceRefresh) {
+                    _bugunRefreshTrigger.value += 1
+                }
             }
         }
     }
@@ -454,6 +497,15 @@ class EksinViewModel @Inject constructor(
         if (topicTitle.isNotBlank()) {
             currentMap[titleKey] = safeCount
             editor.putInt(titleKey, safeCount)
+        }
+
+        if (currentMap.size > MAX_READ_COUNT_KEYS) {
+            val overflow = currentMap.size - MAX_READ_COUNT_KEYS
+            val victims = currentMap.keys.take(overflow)
+            victims.forEach { key ->
+                currentMap.remove(key)
+                editor.remove(key)
+            }
         }
 
         editor.apply()
@@ -592,7 +644,10 @@ class EksinViewModel @Inject constructor(
         subtitle: String,
         sortDescendingAfterUpdate: Boolean
     ) {
-        if (initialItems.none { it.favoriteCount <= 0 || it.entryId.isNullOrBlank() }) return
+        val needsEnrichment = initialItems.withIndex().filter { (_, item) ->
+            item.favoriteCount <= 0 || item.entryId.isNullOrBlank()
+        }.take(MAX_FAVORITE_ENRICHMENT)
+        if (needsEnrichment.isEmpty()) return
 
         val workingArray = initialItems.toMutableList()
         val stateMutex = kotlinx.coroutines.sync.Mutex()
@@ -600,7 +655,7 @@ class EksinViewModel @Inject constructor(
 
         withContext(Dispatchers.IO) {
             coroutineScope {
-                initialItems.forEachIndexed { index, item ->
+                needsEnrichment.forEach { (index, item) ->
                     if (item.favoriteCount <= 0 || item.entryId.isNullOrBlank()) {
                         launch {
                             semaphore.withPermit {
@@ -762,6 +817,7 @@ class EksinViewModel @Inject constructor(
         topic: TopicItem,
         preferTodayMode: Boolean = true
     ) {
+        openTopicJob?.cancel()
         activePageLoadJob?.cancel()
         activePrefetchJob?.cancel()
         pageMemoryCache.clear()
@@ -777,9 +833,11 @@ class EksinViewModel @Inject constructor(
         _inTopicSearchQuery.value = ""
         _authorFilterInTopic.value = null
         _selectedTopic.value = topic
-        loadedTopicSessionKey = "${topic.id}|${topic.url}"
+        val sessionKey = "${topic.id}|${topic.url}"
+        loadedTopicSessionKey = sessionKey
+        _restoredReadState.value = null
 
-        viewModelScope.launch {
+        openTopicJob = viewModelScope.launch {
             val isDirectEntry = topic.url.contains("/entry/", ignoreCase = true) ||
                 topic.url.contains("a=debe", ignoreCase = true)
 
@@ -798,10 +856,12 @@ class EksinViewModel @Inject constructor(
                         topicId = topic.id
                     )
                 }
+                if (loadedTopicSessionKey != sessionKey) return@launch
                 _restoredReadState.value = savedState
                 startPage = if (isDirectEntry) 1 else (savedState?.pageNumber ?: 1).coerceAtLeast(1)
             }
 
+            if (loadedTopicSessionKey != sessionKey) return@launch
             _currentPage.value = startPage
             _totalPages.value = startPage.coerceAtLeast(1)
             goToPage(
@@ -886,6 +946,7 @@ class EksinViewModel @Inject constructor(
             }
         }
 
+        val sessionAtStart = loadedTopicSessionKey
         activePageLoadJob = viewModelScope.launch {
             _topicPageUiState.value = TopicPageUiState.Loading(targetPage = requestedPage)
 
@@ -899,6 +960,7 @@ class EksinViewModel @Inject constructor(
                 todayFallbackAlreadyActive = todayFallbackActive
             )
 
+            if (loadedTopicSessionKey != sessionAtStart) return@launch
             result.fold(
                 onSuccess = { pageData ->
                     pageMemoryCache[pageData.currentPage] = pageData
@@ -1272,10 +1334,9 @@ class EksinViewModel @Inject constructor(
         entries: List<EntryItem>
     ) {
         activeGeminiJob?.cancel()
-        val savedKey = geminiHelper.getUserSavedApiKey()
-        _geminiApiKey.value = savedKey
-        _isGeminiKeyConfigured.value = savedKey.isNotBlank()
-        if (savedKey.isBlank()) {
+        val configured = geminiHelper.hasValidApiKey()
+        _isGeminiKeyConfigured.value = configured
+        if (!configured) {
             _geminiStreamState.value = GeminiStreamState.AwaitingApiKey(mode)
             return
         }
@@ -1314,15 +1375,13 @@ class EksinViewModel @Inject constructor(
     fun saveGeminiApiKey(rawKey: String) {
         val trimmed = rawKey.trim()
         geminiHelper.saveUserApiKey(trimmed)
-        _geminiApiKey.value = geminiHelper.getUserSavedApiKey()
         _isGeminiKeyConfigured.value = geminiHelper.hasValidApiKey()
     }
 
     fun clearGeminiApiKey() {
         activeGeminiJob?.cancel()
         geminiHelper.clearUserApiKey()
-        _geminiApiKey.value = geminiHelper.getUserSavedApiKey()
-        _isGeminiKeyConfigured.value = geminiHelper.hasValidApiKey()
+        _isGeminiKeyConfigured.value = false
         if (_geminiStreamState.value !is GeminiStreamState.Idle) {
             _geminiStreamState.value = GeminiStreamState.AwaitingApiKey()
         }
@@ -1354,7 +1413,11 @@ class EksinViewModel @Inject constructor(
                 when (
                     val imgResult = geminiHelper.generateImageFromPrompt(
                         promptText = cleanPrompt,
-                        modelId = chosenModel.modelId
+                        modelId = chosenModel.modelId,
+                        aspectRatio = chosenRatio.label,
+                        imageSize = chosenSize.label,
+                        targetWidth = chosenSize.pixelDimension.coerceAtMost(2048),
+                        targetHeight = chosenSize.pixelDimension.coerceAtMost(2048)
                     )
                 ) {
                     is GeminiImageGenerationResult.Success -> {
@@ -1396,22 +1459,7 @@ class EksinViewModel @Inject constructor(
     companion object {
         private const val TAG = "EksinViewModel"
         private const val PREFS_READ_TOPIC_COUNTS = "eksin_read_topic_counts_prefs"
-
-        fun provideFactory(context: Context): androidx.lifecycle.ViewModelProvider.Factory =
-            object : androidx.lifecycle.ViewModelProvider.Factory {
-                @Suppress("UNCHECKED_CAST")
-                override fun <T : ViewModel> create(modelClass: Class<T>): T {
-                    val container = AppModule.getContainer(context)
-                    return EksinViewModel(
-                        appContext = container.appContext,
-                        repository = container.repository,
-                        cookieJar = container.cookieJar,
-                        userAgentProvider = container.userAgentProvider,
-                        webViewFetchBridge = container.webViewFetchBridge,
-                        cloudflareManager = container.cloudflareManager,
-                        geminiHelper = container.geminiHelper
-                    ) as T
-                }
-            }
+        private const val MAX_READ_COUNT_KEYS = 400
+        private const val MAX_FAVORITE_ENRICHMENT = 8
     }
 }

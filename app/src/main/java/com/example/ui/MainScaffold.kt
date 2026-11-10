@@ -81,7 +81,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -209,6 +209,21 @@ fun MainScaffold(
         MainNavDestination.DEBE_ENLER -> debeListState
         MainNavDestination.ARAMA -> searchListState
         MainNavDestination.PROFIL -> gundemListState
+    }
+    val bugunIsApproximate by viewModel.bugunIsApproximate.collectAsStateWithLifecycle()
+    LaunchedEffect(currentDestination, selectedSection) {
+        val tabName = when (currentDestination) {
+            MainNavDestination.BUGUN -> "BUGUN"
+            MainNavDestination.KANALLAR -> "CHANNELS"
+            MainNavDestination.ARAMA -> "SEARCH"
+            MainNavDestination.GUNDEM -> when (selectedSection) {
+                LeftFrameSection.BUGUN -> "BUGUN"
+                LeftFrameSection.OLAYLAR -> "OLAYLAR"
+                else -> "GUNDEM"
+            }
+            else -> "NONE"
+        }
+        viewModel.setActivePagingTab(tabName)
     }
     val isHeaderVisible = rememberDirectionalHeaderVisibility(activeScrollListState)
     val isDebeActive = currentDestination == MainNavDestination.DEBE_ENLER
@@ -620,6 +635,14 @@ fun MainScaffold(
                         }
 
                         MainNavDestination.BUGUN -> {
+                            if (bugunIsApproximate) {
+                                Text(
+                                    text = "Yaklaşık liste: giriş yapılmadığı için Bugün, gündem ve kanal başlıklarından derlendi. Gerçek Bugün listesi için giriş yapın.",
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = OledTextSecondary
+                                )
+                            }
                             TopicPagingList(
                                 pagingItems = bugunPagingItems,
                                 listState = bugunListState,
@@ -1095,7 +1118,7 @@ private fun DebeAndPeriodicBestsScreenContent(
                     ) {
                         itemsIndexed(
                             items = state.items,
-                            key = { idx, item -> "${idx}_${item.url}" }
+                            key = { _, item -> item.url.ifBlank { item.id } }
                         ) { index, item ->
                             val cleanUrl = item.url.substringBefore('?').trim().lowercase()
                             val titleKey = "title:${item.title.trim().lowercase()}"
@@ -1213,24 +1236,23 @@ private fun rememberDirectionalHeaderVisibility(listState: LazyListState): Boole
     var previousScrollOffset by remember(listState) { mutableIntStateOf(listState.firstVisibleItemScrollOffset) }
     var headerVisible by remember { mutableStateOf(true) }
 
-    return remember(listState) {
-        derivedStateOf {
-            val currentIndex = listState.firstVisibleItemIndex
-            val currentOffset = listState.firstVisibleItemScrollOffset
-
-            if (currentIndex == 0 && currentOffset < 24) {
-                headerVisible = true
-            } else if (currentIndex > previousIndex || (currentIndex == previousIndex && currentOffset > previousScrollOffset + 18)) {
-                headerVisible = false
-            } else if (currentIndex < previousIndex || (currentIndex == previousIndex && currentOffset < previousScrollOffset - 12)) {
-                headerVisible = true
+    LaunchedEffect(listState) {
+        snapshotFlow {
+            listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset
+        }.collect { (currentIndex, currentOffset) ->
+            headerVisible = when {
+                currentIndex == 0 && currentOffset < 24 -> true
+                currentIndex > previousIndex ||
+                    (currentIndex == previousIndex && currentOffset > previousScrollOffset + 18) -> false
+                currentIndex < previousIndex ||
+                    (currentIndex == previousIndex && currentOffset < previousScrollOffset - 12) -> true
+                else -> headerVisible
             }
-
             previousIndex = currentIndex
             previousScrollOffset = currentOffset
-            headerVisible
         }
-    }.value
+    }
+    return headerVisible
 }
 
 /**
@@ -1372,7 +1394,7 @@ private fun SearchScreenContent(
                         // 1) Başlık Önerileri (Titles)
                         itemsIndexed(
                             items = autocompleteState.titleSuggestions,
-                            key = { idx, item -> "ac_title_${idx}_${item.title}" }
+                            key = { _, item -> "ac_title_${item.title}" }
                         ) { _, suggestion ->
                             Row(
                                 modifier = Modifier
@@ -1429,7 +1451,7 @@ private fun SearchScreenContent(
                         // 2) Yazar Önerileri (Nicks)
                         itemsIndexed(
                             items = autocompleteState.nickSuggestions,
-                            key = { idx, nick -> "ac_nick_${idx}_$nick" }
+                            key = { _, nick -> "ac_nick_$nick" }
                         ) { _, nick ->
                             Row(
                                 modifier = Modifier
@@ -1590,7 +1612,11 @@ private fun TopicPagingList(
             ) {
                 items(
                     count = pagingItems.itemCount,
-                    key = { index -> "${index}_${pagingItems.peek(index)?.url ?: "topic"}" }
+                    key = { index ->
+                        pagingItems.peek(index)?.cleanUrl?.ifBlank { null }
+                            ?: pagingItems.peek(index)?.id
+                            ?: "topic_$index"
+                    }
                 ) { index ->
                     val item = pagingItems[index] ?: return@items
                     val savedRead = readStateByUrl[item.cleanUrl]
@@ -1792,7 +1818,6 @@ private fun ProfileAndStudioScreenContent(
     val bookmarks by viewModel.bookmarkedEntries.collectAsStateWithLifecycle()
     val hasCfClearance by viewModel.hasCfClearance.collectAsStateWithLifecycle()
     val currentTheme by viewModel.themeMode.collectAsStateWithLifecycle()
-    val savedGeminiKey by viewModel.geminiApiKey.collectAsStateWithLifecycle()
     val isGeminiKeyConfigured by viewModel.isGeminiKeyConfigured.collectAsStateWithLifecycle()
 
     val selectedModel by viewModel.selectedImageModel.collectAsStateWithLifecycle()
@@ -1800,10 +1825,8 @@ private fun ProfileAndStudioScreenContent(
     val selectedRatio by viewModel.selectedAspectRatio.collectAsStateWithLifecycle()
     val aiImageState by viewModel.aiImageState.collectAsStateWithLifecycle()
 
-    var apiKeyInput by rememberSaveable(savedGeminiKey) {
-        mutableStateOf(savedGeminiKey)
-    }
-    var showApiKeyPlain by rememberSaveable { mutableStateOf(false) }
+    var apiKeyInput by remember { mutableStateOf("") }
+    var showApiKeyPlain by remember { mutableStateOf(false) }
     var apiKeyFeedbackMessage by remember { mutableStateOf<String?>(null) }
 
     var promptInput by rememberSaveable {
@@ -1940,6 +1963,7 @@ private fun ProfileAndStudioScreenContent(
                         OutlinedButton(
                             onClick = {
                                 viewModel.cookieJar.clearAllCookies {
+                                    viewModel.webViewFetchBridge.clearDomVerification()
                                     viewModel.refreshCookieState()
                                 }
                             },
@@ -2008,7 +2032,7 @@ private fun ProfileAndStudioScreenContent(
                     }
 
                     Text(
-                        text = "Başlık içi '✨ AI Özet' (gemini-3.5-flash-lite) özelliği için ücretsiz Google AI Studio API anahtarınızı buraya girin. Anahtarınız yalnızca cihazınızda (SharedPreferences) saklanır.",
+                        text = "Başlık içi '✨ AI Özet' (${com.example.ai.GeminiModels.SUMMARY_DISPLAY_NAME}) için Google AI Studio API anahtarınızı girin. Anahtar düz metin olarak ekranda tutulmaz; Android Keystore ile şifrelenerek cihazda saklanır.",
                         style = MaterialTheme.typography.bodySmall,
                         color = OledTextSecondary
                     )
@@ -2060,7 +2084,8 @@ private fun ProfileAndStudioScreenContent(
                         Button(
                             onClick = {
                                 viewModel.saveGeminiApiKey(apiKeyInput)
-                                apiKeyFeedbackMessage = "Gemini API anahtarı cihazınıza (SharedPreferences) kaydedildi."
+                                apiKeyFeedbackMessage = "Gemini API anahtarı Android Keystore ile şifrelenerek kaydedildi."
+                                apiKeyInput = ""
                             },
                             enabled = apiKeyInput.isNotBlank(),
                             colors = ButtonDefaults.buttonColors(
@@ -2075,7 +2100,7 @@ private fun ProfileAndStudioScreenContent(
                             Text("Anahtarı Kaydet", fontWeight = FontWeight.Bold)
                         }
 
-                        if (savedGeminiKey.isNotBlank() || apiKeyInput.isNotBlank()) {
+                        if (isGeminiKeyConfigured || apiKeyInput.isNotBlank()) {
                             OutlinedButton(
                                 onClick = {
                                     apiKeyInput = ""
@@ -2354,8 +2379,11 @@ private fun ProfileAndStudioScreenContent(
                             }
                         }
                         is AiImageState.Success -> {
+                            val imageBitmap = androidx.compose.runtime.remember(state.bitmap) {
+                                state.bitmap.asImageBitmap()
+                            }
                             Image(
-                                bitmap = state.bitmap.asImageBitmap(),
+                                bitmap = imageBitmap,
                                 contentDescription = "Üretilen Görsel",
                                 modifier = Modifier
                                     .fillMaxWidth()
