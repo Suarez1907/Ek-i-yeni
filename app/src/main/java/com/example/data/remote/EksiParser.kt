@@ -1,13 +1,8 @@
 package com.example.data.remote
 
 import android.net.Uri
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
-import androidx.compose.ui.text.font.FontStyle
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextDecoration
 import com.example.data.model.EksiChannel
 import com.example.data.model.EntryItem
 import com.example.data.model.PeriodicTimeRange
@@ -18,9 +13,8 @@ import com.example.data.model.TopicFilterMode
 import com.example.data.model.TopicItem
 import com.example.data.model.TopicPageData
 import com.example.network.WebViewCookieJar
-import com.example.ui.theme.ActiveThemeState
-import com.example.ui.theme.AppThemeMode
 import org.json.JSONObject
+import java.util.Calendar
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
@@ -307,16 +301,18 @@ class EksiParser @Inject constructor() {
     }
 
     /**
-     * Entry tarihinin (`.entry-date`) içinde bulunduğumuz güncel yıla (2026) ait olup olmadığını kontrol eder.
-     * 2010-2025 gibi eski yıllara ait entry'leri kesin olarak reddeder.
+     * Entry tarihinin içinde bulunulan takvim yılına ait olup olmadığına bakar.
+     * Yıl içermeyen göreli ifadeler (`bugün`, `dün`) güncel kabul edilir.
      */
-    fun isRecent2026EntryDate(dateText: String): Boolean {
+    fun isCurrentYearEntryDate(
+        dateText: String,
+        year: Int = Calendar.getInstance().get(Calendar.YEAR)
+    ): Boolean {
         val createdPart = dateText.substringBefore("~").trim()
         if (createdPart.isBlank()) return false
-        if (OLD_YEARS_REGEX.containsMatchIn(createdPart)) {
-            return false
-        }
-        return createdPart.contains("2026")
+        if (createdPart.contains(year.toString())) return true
+        val lower = createdPart.lowercase()
+        return lower.contains("bugün") || lower.contains("dün") || lower.contains("az önce")
     }
 
     /**
@@ -332,13 +328,15 @@ class EksiParser @Inject constructor() {
         val doc: Document = Jsoup.parse(html, BASE_URL)
         val cleanTargetId = targetEntryId?.trim()?.filter { it.isDigit() }.orEmpty()
 
-        val entrySelector = if (cleanTargetId.isNotBlank()) {
-            "#entry-item-list li[data-id=$cleanTargetId], li#entry-item-$cleanTargetId, #entry-item-list li[data-id], ul#entry-item-list > li"
+        val li = if (cleanTargetId.isNotBlank()) {
+            doc.selectFirst("#entry-item-list li[data-id=$cleanTargetId]")
+                ?: doc.selectFirst("li#entry-item-$cleanTargetId")
+                ?: doc.selectFirst("li[data-id=$cleanTargetId]")
         } else {
-            "#entry-item-list li[data-id], ul#entry-item-list > li, li[id^=entry-item][data-id]"
+            doc.selectFirst("#entry-item-list li[data-id]")
+                ?: doc.selectFirst("ul#entry-item-list > li")
+                ?: doc.selectFirst("li[id^=entry-item][data-id]")
         }
-
-        val li = doc.selectFirst(entrySelector)
         if (li != null) {
             val resolvedEntryId = li.attr("data-id")
                 .ifBlank { li.id().removePrefix("entry-item-") }
@@ -806,7 +804,7 @@ class EksiParser @Inject constructor() {
                     rawEntries.filter {
                         it.author.contains(decodedKw, ignoreCase = true) ||
                             it.plainText.contains(decodedKw, ignoreCase = true)
-                    }.ifEmpty { rawEntries }
+                    }
                 } else {
                     rawEntries
                 }
@@ -1028,30 +1026,17 @@ class EksiParser @Inject constructor() {
             " [✨ bkz]"
         }
 
-        val isLight = ActiveThemeState.currentMode == AppThemeMode.CLASSIC_LIGHT
-        val bkzColor = if (isLight) Color(0xFF2E7D32) else COLOR_BKZ_GREEN
-        val bkzBg = if (isLight) Color(0xFFE8F5E9) else Color(0xFF112415)
-
         val start = builder.length
-        builder.pushStringAnnotation(tag = TAG_HIDDEN_BKZ, annotation = targetQuery)
-        builder.pushStyle(
-            SpanStyle(
-                color = bkzColor,
-                background = bkzBg,
-                fontWeight = FontWeight.SemiBold,
-                fontStyle = FontStyle.Normal
-            )
-        )
         builder.append(label)
-        builder.pop()
-        builder.pop()
         val end = builder.length
-        builder.addStringAnnotation(
-            tag = TAG_BKZ,
-            annotation = targetQuery,
-            start = start,
-            end = end
-        )
+        if (end > start) {
+            builder.addStringAnnotation(
+                tag = TAG_HIDDEN_BKZ,
+                annotation = targetQuery,
+                start = start,
+                end = end
+            )
+        }
     }
 
     private fun appendAnchorAnnotation(
@@ -1062,8 +1047,9 @@ class EksiParser @Inject constructor() {
         val cssClass = anchor.className().lowercase()
         val visibleText = anchor.text()
 
+        val classTokens = cssClass.split(Regex("\\s+")).filter { it.isNotBlank() }
         val isHiddenBkz = anchor.parent()?.hasClass("ab") == true ||
-            visibleText.trim() == "*" && (cssClass.contains("b") || href.contains("?q="))
+            (visibleText.trim() == "*" && (classTokens.contains("b") || href.contains("?q=")))
 
         if (isHiddenBkz) {
             appendHiddenBkzAnnotation(anchor, builder)
@@ -1075,36 +1061,27 @@ class EksiParser @Inject constructor() {
             href.contains("/?q=", ignoreCase = true) ||
             href.startsWith("/entry/", ignoreCase = true)
 
-        val isLight = ActiveThemeState.currentMode == AppThemeMode.CLASSIC_LIGHT
-        val bkzColor = if (isLight) Color(0xFF2E7D32) else COLOR_BKZ_GREEN
-        val extColor = if (isLight) Color(0xFF1565C0) else COLOR_EXTERNAL_LINK
-
         if (isInternalBkz) {
             val targetQuery = extractBkzQueryFromAnchor(anchor)
-            builder.pushStringAnnotation(tag = TAG_BKZ, annotation = targetQuery)
-            builder.pushStyle(
-                SpanStyle(
-                    color = bkzColor,
-                    fontWeight = FontWeight.SemiBold,
-                    textDecoration = TextDecoration.None
-                )
-            )
+            val start = builder.length
             builder.append(visibleText.ifBlank { targetQuery })
-            builder.pop()
-            builder.pop()
+            val end = builder.length
+            if (end > start) {
+                builder.addStringAnnotation(tag = TAG_BKZ, annotation = targetQuery, start = start, end = end)
+            }
         } else {
             val fullExternalUrl = normalizeUrl(href)
-            builder.pushStringAnnotation(tag = TAG_EXTERNAL_URL, annotation = fullExternalUrl)
-            builder.pushStyle(
-                SpanStyle(
-                    color = extColor,
-                    textDecoration = TextDecoration.Underline,
-                    fontWeight = FontWeight.Medium
-                )
-            )
+            val start = builder.length
             builder.append(visibleText.ifBlank { fullExternalUrl })
-            builder.pop()
-            builder.pop()
+            val end = builder.length
+            if (end > start && fullExternalUrl.isNotBlank()) {
+                builder.addStringAnnotation(
+                    tag = TAG_EXTERNAL_URL,
+                    annotation = fullExternalUrl,
+                    start = start,
+                    end = end
+                )
+            }
         }
     }
 
@@ -1155,8 +1132,7 @@ class EksiParser @Inject constructor() {
         val pager = doc.selectFirst("div.pager")
         val currentPage = pager?.attr("data-currentpage")?.toIntOrNull() ?: requestedPage
         val topics = parseLeftFrameTopics(html = html, isTrackedSection = false)
-        val pageCount = pager?.attr("data-pagecount")?.toIntOrNull()
-            ?: if (topics.size >= 10) requestedPage + 1 else requestedPage
+        val pageCount = pager?.attr("data-pagecount")?.toIntOrNull() ?: requestedPage
 
         return SearchPageData(
             query = query,
@@ -1277,6 +1253,15 @@ class EksiParser @Inject constructor() {
 
     fun normalizeUrl(href: String): String {
         val trimmed = href.trim()
+        val lower = trimmed.lowercase()
+        if (
+            lower.startsWith("javascript:") ||
+            lower.startsWith("data:") ||
+            lower.startsWith("mailto:") ||
+            lower.startsWith("blob:")
+        ) {
+            return ""
+        }
         return when {
             trimmed.startsWith("http://") || trimmed.startsWith("https://") -> trimmed
             trimmed.startsWith("//") -> "https:$trimmed"
@@ -1319,11 +1304,5 @@ class EksiParser @Inject constructor() {
         const val TAG_BKZ = "BKZ_TOPIC"
         const val TAG_HIDDEN_BKZ = "HIDDEN_BKZ_TOPIC"
         const val TAG_EXTERNAL_URL = "EXTERNAL_URL"
-
-        private val OLD_YEARS_REGEX = Regex("\\b(199\\d|200\\d|201\\d|202[0-5])\\b")
-
-        private val COLOR_BKZ_GREEN = Color(0xFF81C784)
-        private val COLOR_HIDDEN_BKZ = Color(0xFFFFB74D)
-        private val COLOR_EXTERNAL_LINK = Color(0xFF64B5F6)
     }
 }

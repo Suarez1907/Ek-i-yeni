@@ -71,7 +71,7 @@ import com.example.ui.theme.OledTextSecondary
  * `✨ AI Özet` çipine basıldığında açılan ve başlığın:
  * a) "Başlığı 5 Maddede Özetle"
  * b) "Fikir Ayrılıklarını ve Baskın Görüşü Çıkar"
- * analizlerini doğrudan OkHttp SSE (`:streamGenerateContent?alt=sse`) ile `gemini-3.5-flash-lite`
+ * analizlerini doğrudan OkHttp SSE (`:streamGenerateContent?alt=sse`) ile `${com.example.ai.GeminiModels.SUMMARY_PRIMARY}`
  * (ve otomatik fallback zinciri) üzerinden gösteren alt pencere.
  *
  * API anahtarı cihazda Android Keystore (`AES/GCM/NoPadding`) ile şifrelenerek saklanır ve
@@ -83,7 +83,6 @@ fun GeminiSummaryBottomSheet(
     topicTitle: String,
     streamState: GeminiStreamState,
     hasSavedApiKey: Boolean = true,
-    savedApiKey: String = "",
     keyDecryptionWarning: String? = null,
     onSelectMode: (GeminiAnalysisMode) -> Unit,
     onSaveApiKeyAndSummarize: (String, GeminiAnalysisMode) -> Unit = { _, _ -> },
@@ -103,21 +102,14 @@ fun GeminiSummaryBottomSheet(
         GeminiStreamState.Idle -> GeminiAnalysisMode.FIVE_BULLET_SUMMARY
     }
 
-    var apiKeyInput by rememberSaveable(savedApiKey) { mutableStateOf(savedApiKey) }
+    var apiKeyInput by remember { mutableStateOf("") }
     var showApiKeyPassword by remember { mutableStateOf(false) }
     var manualShowKeyEditor by remember { mutableStateOf(false) }
 
     val isAwaitingApiKey = streamState is GeminiStreamState.AwaitingApiKey ||
-        !hasSavedApiKey ||
-        savedApiKey.isBlank()
+        !hasSavedApiKey
 
     val shouldShowKeyInputSection = isAwaitingApiKey || manualShowKeyEditor
-
-    LaunchedEffect(savedApiKey) {
-        if (savedApiKey.isNotBlank() && apiKeyInput.isBlank()) {
-            apiKeyInput = savedApiKey
-        }
-    }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -150,7 +142,7 @@ fun GeminiSummaryBottomSheet(
                     )
                     Column {
                         Text(
-                            text = "Gemini 3.5 Flash-Lite Canlı Özet",
+                            text = "${com.example.ai.GeminiModels.SUMMARY_DISPLAY_NAME} Canlı Özet",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.ExtraBold,
                             color = EksiNeonGreen
@@ -166,7 +158,7 @@ fun GeminiSummaryBottomSheet(
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (hasSavedApiKey && savedApiKey.isNotBlank()) {
+                    if (hasSavedApiKey) {
                         IconButton(
                             onClick = { manualShowKeyEditor = !manualShowKeyEditor },
                             modifier = Modifier.testTag("gemini_sheet_toggle_key_button")
@@ -253,7 +245,7 @@ fun GeminiSummaryBottomSheet(
                         }
 
                         Text(
-                            text = "Ücretsiz Google AI Studio API anahtarınızı girerek Gemini 3.5 Flash-Lite ile canlı SSE özetlemeyi başlatın. Anahtarınız cihazınızda Android Keystore (AES-GCM) ile şifrelenerek saklanır.",
+                            text = "Ücretsiz Google AI Studio API anahtarınızı girerek ${com.example.ai.GeminiModels.SUMMARY_DISPLAY_NAME} ile canlı SSE özetlemeyi başlatın. Anahtar düz metin olarak saklanmaz; Android Keystore (AES-GCM) ile şifrelenir.",
                             style = MaterialTheme.typography.labelSmall,
                             color = OledTextSecondary
                         )
@@ -372,7 +364,7 @@ fun GeminiSummaryBottomSheet(
                                         strokeWidth = 2.5.dp
                                     )
                                     Text(
-                                        text = "Entry'ler taranıyor, Gemini 3.5 Flash-Lite SSE akışı başlatılıyor...",
+                                        text = "Entry'ler taranıyor, ${com.example.ai.GeminiModels.SUMMARY_DISPLAY_NAME} SSE akışı başlatılıyor...",
                                         style = MaterialTheme.typography.bodyMedium,
                                         color = OledTextSecondary
                                     )
@@ -396,7 +388,7 @@ fun GeminiSummaryBottomSheet(
                                         )
                                         Spacer(modifier = Modifier.width(6.dp))
                                         Text(
-                                            text = "Gemini 3.5 Flash-Lite Canlı SSE Akışı...",
+                                            text = "${com.example.ai.GeminiModels.SUMMARY_DISPLAY_NAME} Canlı SSE Akışı...",
                                             style = MaterialTheme.typography.labelSmall,
                                             color = EksiNeonGreen,
                                             fontWeight = FontWeight.Bold

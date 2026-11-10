@@ -3,18 +3,12 @@ package com.example.di
 import android.content.Context
 import androidx.room.Room
 import com.example.BuildConfig
-import com.example.ai.GeminiHelper
 import com.example.data.local.AppDatabase
 import com.example.data.local.EksinDao
 import com.example.data.local.ReadStateDao
-import com.example.data.remote.EksiParser
-import com.example.data.repository.EksiRepository
-import com.example.network.CloudflareChallengeManager
 import com.example.network.CloudflareInterceptor
 import com.example.network.UserAgentInterceptor
-import com.example.network.UserAgentProvider
 import com.example.network.WebViewCookieJar
-import com.example.network.WebViewFetchBridge
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -28,97 +22,6 @@ import javax.inject.Singleton
 @Module
 @InstallIn(SingletonComponent::class)
 object AppModule {
-
-    @Volatile
-    private var singletonContainer: EksinServiceContainer? = null
-
-    @Volatile
-    private var viewModelCacheCleaner: (() -> Unit)? = null
-
-    fun getContainer(context: Context): EksinServiceContainer {
-        return singletonContainer ?: synchronized(this) {
-            singletonContainer ?: createContainer(context.applicationContext).also {
-                singletonContainer = it
-            }
-        }
-    }
-
-    fun registerViewModelCacheCleaner(cleaner: () -> Unit) {
-        viewModelCacheCleaner = cleaner
-    }
-
-    /**
-     * `EksinApplication.onTrimMemory` tarafından çağrılır.
-     * Eğer `singletonContainer` henüz oluşturulmadıysa zorla başlatmaz; yalnızca başlatılmışsa
-     * bellek içi önbellekleri (`EksiRepository`, `WebViewFetchBridge`, `EksinViewModel`) temizler.
-     */
-    fun clearMemoryCachesIfInitialized() {
-        val current = singletonContainer
-        if (current != null) {
-            current.repository.clearMemoryCaches()
-            current.webViewFetchBridge.clearMemoryCaches()
-        }
-        viewModelCacheCleaner?.invoke()
-    }
-
-    private fun createContainer(appContext: Context): EksinServiceContainer {
-        val cookieJar = WebViewCookieJar()
-        val userAgentProvider = UserAgentProvider(appContext)
-        val cloudflareManager = CloudflareChallengeManager()
-        val webViewFetchBridge = WebViewFetchBridge(
-            appContext = appContext,
-            userAgentProvider = userAgentProvider,
-            cookieJar = cookieJar,
-            cloudflareManager = cloudflareManager
-        )
-        val database = provideAppDatabase(appContext)
-        val readStateDao = provideReadStateDao(database)
-        val eksinDao = provideEksinDao(database)
-        val parser = EksiParser()
-        val repository = EksiRepository(
-            webViewFetchBridge = webViewFetchBridge,
-            eksiParser = parser,
-            readStateDao = readStateDao,
-            eksinDao = eksinDao
-        )
-        val userAgentInterceptor = UserAgentInterceptor(userAgentProvider)
-        val cloudflareInterceptor = CloudflareInterceptor(cloudflareManager)
-        val okHttpClient = provideOkHttpClient(
-            cookieJar = cookieJar,
-            userAgentInterceptor = userAgentInterceptor,
-            cloudflareInterceptor = cloudflareInterceptor
-        )
-        val geminiHelper = GeminiHelper(
-            appContext = appContext,
-            baseOkHttpClient = okHttpClient
-        )
-
-        return EksinServiceContainer(
-            appContext = appContext,
-            repository = repository,
-            cookieJar = cookieJar,
-            userAgentProvider = userAgentProvider,
-            webViewFetchBridge = webViewFetchBridge,
-            cloudflareManager = cloudflareManager,
-            geminiHelper = geminiHelper
-        )
-    }
-
-    @Provides
-    @Singleton
-    fun provideWebViewFetchBridge(
-        @ApplicationContext context: Context,
-        userAgentProvider: UserAgentProvider,
-        cookieJar: WebViewCookieJar,
-        cloudflareManager: CloudflareChallengeManager
-    ): WebViewFetchBridge {
-        return WebViewFetchBridge(
-            appContext = context,
-            userAgentProvider = userAgentProvider,
-            cookieJar = cookieJar,
-            cloudflareManager = cloudflareManager
-        )
-    }
 
     @Provides
     @Singleton
@@ -173,13 +76,3 @@ object AppModule {
     @Singleton
     fun provideEksinDao(database: AppDatabase): EksinDao = database.eksinDao()
 }
-
-data class EksinServiceContainer(
-    val appContext: Context,
-    val repository: EksiRepository,
-    val cookieJar: WebViewCookieJar,
-    val userAgentProvider: UserAgentProvider,
-    val webViewFetchBridge: WebViewFetchBridge,
-    val cloudflareManager: CloudflareChallengeManager,
-    val geminiHelper: GeminiHelper
-)

@@ -182,9 +182,12 @@ fun AuthWebViewScreen(
 
                     var hasRealEksiDom = !isChallengeRunning && (hasTopBar || hasTopicList || hasEntryList);
                     if (forceComplete || hasRealEksiDom) {
+                        var safeHtml = html;
+                        var href = window.location.href || '';
+                        if (href.indexOf('/giris') !== -1) safeHtml = '';
                         window.EksinAuthDomInspector.onDomInspectionResult(
-                            window.location.href || '',
-                            html,
+                            href,
+                            safeHtml,
                             hasRealEksiDom,
                             forceComplete
                         );
@@ -223,8 +226,12 @@ fun AuthWebViewScreen(
     DisposableEffect(Unit) {
         onDispose {
             cookieJar.flush()
+            val view = webViewRef
+            webViewRef = null
             try {
-                webViewRef?.stopLoading()
+                view?.stopLoading()
+                view?.loadUrl("about:blank")
+                view?.destroy()
             } catch (_: Throwable) {
             }
         }
@@ -376,7 +383,6 @@ fun AuthWebViewScreen(
                         FilterChip(
                             selected = isCurrentDomain,
                             onClick = {
-                                webViewFetchBridge.setActiveBaseDomain(domain)
                                 val nextUrl = if (mode == AuthWebViewMode.USER_LOGIN) {
                                     "$domain/giris"
                                 } else {
@@ -467,11 +473,11 @@ fun AuthWebViewScreen(
                                 javaScriptEnabled = true
                                 domStorageEnabled = true
                                 databaseEnabled = true
-                                javaScriptCanOpenWindowsAutomatically = true
+                                javaScriptCanOpenWindowsAutomatically = false
                                 loadsImagesAutomatically = true
                                 useWideViewPort = true
                                 loadWithOverviewMode = true
-                                mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                                mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
                                 cacheMode = WebSettings.LOAD_DEFAULT
                             }
 
@@ -486,7 +492,7 @@ fun AuthWebViewScreen(
                             try {
                                 val cookieManager = CookieManager.getInstance()
                                 cookieManager.setAcceptCookie(true)
-                                cookieManager.setAcceptThirdPartyCookies(this, true)
+                                cookieManager.setAcceptThirdPartyCookies(this, false)
                             } catch (_: Throwable) {
                             }
 
@@ -499,13 +505,15 @@ fun AuthWebViewScreen(
                                         hasRealEksiDom: Boolean,
                                         forceComplete: Boolean
                                     ) {
+                                        if (!com.example.network.EksiWebOrigins.isAllowedNavigation(this@apply.url)) return
+                                        val safeHtml = if (url.contains("/giris", ignoreCase = true)) "" else outerHtml
                                         mainHandler.post {
                                             if (verificationCompleted) return@post
 
                                             if (forceComplete) {
                                                 completeWithDomAndUrl(
                                                     verifiedUrl = url.ifBlank { currentUrl },
-                                                    outerHtml = outerHtml
+                                                    outerHtml = safeHtml
                                                 )
                                                 return@post
                                             }
@@ -516,14 +524,14 @@ fun AuthWebViewScreen(
                                                 if (hasRealEksiDom && leftLoginPage && cookieJar.hasActiveUserSession(url)) {
                                                     completeWithDomAndUrl(
                                                         verifiedUrl = url.ifBlank { currentUrl },
-                                                        outerHtml = outerHtml
+                                                        outerHtml = safeHtml
                                                     )
                                                 }
                                             } else {
                                                 if (hasRealEksiDom) {
                                                     completeWithDomAndUrl(
                                                         verifiedUrl = url.ifBlank { currentUrl },
-                                                        outerHtml = outerHtml
+                                                        outerHtml = safeHtml
                                                     )
                                                 }
                                             }
@@ -536,6 +544,7 @@ fun AuthWebViewScreen(
                                         title: String,
                                         isChallengeRunning: Boolean
                                     ) {
+                                        if (!com.example.network.EksiWebOrigins.isAllowedNavigation(this@apply.url)) return
                                         mainHandler.post {
                                             if (verificationCompleted) return@post
                                             if (isChallengeRunning) {
@@ -559,6 +568,18 @@ fun AuthWebViewScreen(
                             }
 
                             webViewClient = object : WebViewClient() {
+                                override fun shouldOverrideUrlLoading(
+                                    view: WebView?,
+                                    request: WebResourceRequest?
+                                ): Boolean {
+                                    return !com.example.network.EksiWebOrigins.isAllowedNavigation(request?.url?.toString())
+                                }
+
+                                @Deprecated("Deprecated in API 24")
+                                override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean {
+                                    return !com.example.network.EksiWebOrigins.isAllowedNavigation(url)
+                                }
+
                                 override fun onPageStarted(
                                     view: WebView?,
                                     url: String?,

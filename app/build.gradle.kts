@@ -1,15 +1,38 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.ksp)
     alias(libs.plugins.hilt)
-    alias(libs.plugins.secrets.gradle.plugin)
 }
+
+val keystoreProperties = Properties()
+val keystorePropertiesFile = rootProject.file("keystore.properties")
+if (keystorePropertiesFile.exists()) {
+    keystorePropertiesFile.inputStream().use { keystoreProperties.load(it) }
+}
+
+fun releaseSecret(name: String): String? {
+    System.getenv(name)?.takeIf { it.isNotBlank() }?.let { return it }
+    keystoreProperties.getProperty(name)?.takeIf { it.isNotBlank() }?.let { return it }
+    return (findProperty(name) as String?)?.takeIf { it.isNotBlank() }
+}
+
+val releaseStoreFilePath = releaseSecret("RELEASE_STORE_FILE")
+val releaseStorePassword = releaseSecret("RELEASE_STORE_PASSWORD")
+val releaseKeyAlias = releaseSecret("RELEASE_KEY_ALIAS")
+val releaseKeyPassword = releaseSecret("RELEASE_KEY_PASSWORD")
+val releaseStoreFile = releaseStoreFilePath?.let { file(it) }
+val hasReleaseKeystore = releaseStoreFile?.exists() == true &&
+    !releaseStorePassword.isNullOrBlank() &&
+    !releaseKeyAlias.isNullOrBlank() &&
+    !releaseKeyPassword.isNullOrBlank()
 
 android {
     namespace = "com.example"
     compileSdk {
-        version = release(36)
+        version = release(37)
     }
 
     defaultConfig {
@@ -23,35 +46,30 @@ android {
     }
 
     signingConfigs {
-        create("release") {
-            // Do not remove or modify this signingConfig
-            storeFile = file("../debug.keystore")
-            storePassword = "android"
-            keyAlias = "androiddebugkey"
-            keyPassword = "android"
-        }
-        create("debugConfig") {
-            // Do not remove or modify this signingConfig
-            storeFile = file("../debug.keystore")
-            storePassword = "android"
-            keyAlias = "androiddebugkey"
-            keyPassword = "android"
+        if (hasReleaseKeystore) {
+            create("release") {
+                storeFile = releaseStoreFile
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
         }
     }
 
     buildTypes {
         release {
-            // Do not remove or modify the signingConfig below
-            signingConfig = signingConfigs.getByName("release")
-            isMinifyEnabled = false
+            if (hasReleaseKeystore) {
+                signingConfig = signingConfigs.getByName("release")
+            }
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
         }
         debug {
-            // Do not remove or modify the signingConfig below
-            signingConfig = signingConfigs.getByName("debugConfig")
+            // Debug uses the Android Gradle Plugin debug keystore. No secrets required.
         }
     }
     compileOptions {
@@ -70,11 +88,8 @@ android {
     }
 }
 
-secrets {
-    propertiesFileName = ".env"
-    defaultPropertiesFileName = ".env.example"
-    ignoreList.add("keyToIgnore")
-    ignoreList.add("sdk.*")
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
 }
 
 dependencies {
@@ -96,6 +111,7 @@ dependencies {
     implementation(libs.okhttp)
     implementation(libs.logging.interceptor)
     implementation(libs.jsoup)
+    implementation(libs.androidx.webkit)
 
     // Paging 3 (Prefetching)
     implementation(libs.androidx.paging.runtime)
@@ -103,6 +119,7 @@ dependencies {
 
     // Hilt (DI)
     implementation(libs.hilt.android)
+    implementation(libs.hilt.navigation.compose)
     ksp(libs.hilt.compiler)
 
     // Room Database

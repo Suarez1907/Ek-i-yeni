@@ -24,6 +24,9 @@ import com.example.data.model.TopicPageData
 import com.example.data.remote.EksiParser
 import com.example.network.WebViewCookieJar
 import com.example.network.WebViewFetchBridge
+import com.example.util.failureUnlessCancelled
+import com.example.util.runCatchingUnlessCancelled
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -43,6 +46,7 @@ import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -104,6 +108,15 @@ class EksiRepository @Inject constructor(
 
     private val _isBugunLoading = MutableStateFlow(false)
     val isBugunLoading: StateFlow<Boolean> = _isBugunLoading.asStateFlow()
+
+    /**
+     * Giriş yapılmadığında Bugün listesi gündem/kanal başlıklarından türetilir.
+     * UI bu durumda listeyi "yaklaşık" diye etiketler.
+     */
+    private val _bugunIsApproximate = MutableStateFlow(false)
+    val bugunIsApproximate: StateFlow<Boolean> = _bugunIsApproximate.asStateFlow()
+
+    private val bugunGeneration = AtomicInteger(0)
 
     @Volatile
     private var activeBugunPagingSource: BugunTopicsPagingSource? = null
@@ -169,10 +182,13 @@ class EksiRepository @Inject constructor(
      * Normal sekme geçişlerinde bu metot ÇAĞRILMAZ; böylece hafızadaki "Bugün" listesi 0ms'de açılır.
      */
     fun clearBugunCache() {
+        bugunGeneration.incrementAndGet()
         inFlightBugunPageJobs.values.forEach { it.cancel() }
         inFlightBugunPageJobs.clear()
         bugunPageCache.clear()
         _bugunTopics.value = emptyList()
+        _bugunIsApproximate.value = false
+        _isBugunLoading.value = false
     }
 
     /**
@@ -262,23 +278,27 @@ class EksiRepository @Inject constructor(
             WebViewCookieJar.DEFAULT_BASE_URL
         }.trimEnd('/')
 
+        val generation = bugunGeneration.get()
+        fun stillCurrent(): Boolean = bugunGeneration.get() == generation
+
         try {
             // 1b) Kullanıcı giriş yapmışsa doğrudan TEK BİR İSTEKLE `/basliklar/bugun?p={page}` (`isAjax = true`) çek
             if (isUserLoggedIn(baseDomain)) {
                 val bugunUrl = "$baseDomain/basliklar/bugun?p=$safePage&_=${System.currentTimeMillis()}"
-                val bugunHtml = runCatching {
+                val bugunHtml = runCatchingUnlessCancelled {
                     webViewFetchBridge.fetchHtml(rawUrl = bugunUrl, isAjax = true)
                 }.getOrDefault("")
                 val parsedBugun = withContext(Dispatchers.Default) {
                     eksiParser.parseLeftFrameTopics(bugunHtml, isTrackedSection = false)
                 }
                 val filteredBugun = filterAgainstInMemoryGundem(parsedBugun)
-                if (filteredBugun.isNotEmpty()) {
+                if (filteredBugun.isNotEmpty() && stillCurrent()) {
                     cacheKnownTopics(filteredBugun)
                     bugunPageCache[safePage] = BugunPageCacheEntry(
                         items = filteredBugun,
                         isComplete = true
                     )
+                    _bugunIsApproximate.value = false
                     if (safePage == 1) {
                         _bugunTopics.value = filteredBugun
                         _isBugunLoading.value = false
@@ -302,12 +322,13 @@ class EksiRepository @Inject constructor(
             val deeperAgendaPage = (safePage + 1).coerceAtMost(15)
 
             val enrichmentJob = repositoryScope.launch {
+                try {
                 val resultChannel = Channel<List<TopicItem>>(capacity = 2)
 
                 // Paralel Kaynak 1: Gündem'in bir sonraki sayfası (`/basliklar/gundem?p=2` vb., `isAjax = true`)
                 val sourceADeferred = async(Dispatchers.IO) {
                     val deeperUrl = "$baseDomain/basliklar/gundem?p=$deeperAgendaPage&_=${System.currentTimeMillis()}"
-                    val html = runCatching {
+                    val html = runCatchingUnlessCancelled {
                         webViewFetchBridge.fetchHtml(rawUrl = deeperUrl, isAjax = true)
                     }.getOrDefault("")
                     val parsed = withContext(Dispatchers.Default) {
@@ -326,7 +347,7 @@ class EksiRepository @Inject constructor(
                         page = channelPage,
                         useRawTurkishSlug = false
                     )
-                    val html = runCatching {
+                    val html = runCatchingUnlessCancelled {
                         webViewFetchBridge.fetchHtml(rawUrl = channelUrl, isAjax = true)
                     }.getOrDefault("")
                     val parsed = withContext(Dispatchers.Default) {
@@ -340,12 +361,13 @@ class EksiRepository @Inject constructor(
                 // 2. KURAL (ANINDA EKRANA BASMA - PROGRESSIVE LOADING):
                 // Paralel 2 istekten İLK hangisi tamamlanırsa hiç beklemeden UI state'ini güncelle!
                 val firstBatch = resultChannel.receive()
-                if (firstBatch.isNotEmpty()) {
+                if (firstBatch.isNotEmpty() && stillCurrent()) {
                     cacheKnownTopics(firstBatch)
                     bugunPageCache[safePage] = BugunPageCacheEntry(
                         items = firstBatch,
                         isComplete = false
                     )
+                    _bugunIsApproximate.value = true
                     if (safePage == 1) {
                         _bugunTopics.value = firstBatch
                         _isBugunLoading.value = false
@@ -362,13 +384,14 @@ class EksiRepository @Inject constructor(
                     batchB = sourceBDeferred.await()
                 )
 
-                if (mergedItems.isNotEmpty()) {
+                if (mergedItems.isNotEmpty() && stillCurrent()) {
                     cacheKnownTopics(mergedItems)
                     val hadInitialEmission = firstReadyDeferred.isCompleted && firstBatch.isNotEmpty()
                     bugunPageCache[safePage] = BugunPageCacheEntry(
                         items = mergedItems,
                         isComplete = true
                     )
+                    _bugunIsApproximate.value = true
                     if (safePage == 1) {
                         _bugunTopics.value = mergedItems
                         _isBugunLoading.value = false
@@ -377,11 +400,9 @@ class EksiRepository @Inject constructor(
                     if (!firstReadyDeferred.isCompleted) {
                         firstReadyDeferred.complete(mergedItems)
                     } else if (hadInitialEmission && mergedItems.size > firstBatch.size) {
-                        // İlk parti zaten ekrana basılmıştı; şimdi zenginleştirilmiş tam listeyi
-                        // bellekten (0ms) göstermek için PagingSource'u tek seferlik sessizce yenile
                         activeBugunPagingSource?.invalidate()
                     }
-                } else {
+                } else if (stillCurrent()) {
                     if (safePage == 1) {
                         _isBugunLoading.value = false
                     }
@@ -389,16 +410,48 @@ class EksiRepository @Inject constructor(
                         firstReadyDeferred.complete(emptyList())
                     }
                 }
+                } catch (cancelled: CancellationException) {
+                    if (!firstReadyDeferred.isCompleted) {
+                        firstReadyDeferred.cancel(cancelled)
+                    }
+                    throw cancelled
+                } catch (_: Throwable) {
+                    if (!firstReadyDeferred.isCompleted) {
+                        firstReadyDeferred.complete(emptyList())
+                    }
+                } finally {
+                    if (!firstReadyDeferred.isCompleted) {
+                        firstReadyDeferred.complete(emptyList())
+                    }
+                    if (stillCurrent() && safePage == 1) {
+                        _isBugunLoading.value = false
+                    }
+                }
             }
 
             inFlightBugunPageJobs[safePage] = enrichmentJob
             enrichmentJob.invokeOnCompletion {
                 inFlightBugunPageJobs.remove(safePage, enrichmentJob)
+                if (!firstReadyDeferred.isCompleted) {
+                    firstReadyDeferred.complete(emptyList())
+                }
             }
 
-            firstReadyDeferred.await()
-        } catch (e: Throwable) {
-            if (safePage == 1) {
+            try {
+                firstReadyDeferred.await()
+            } catch (cancelled: CancellationException) {
+                if (stillCurrent() && safePage == 1) {
+                    _isBugunLoading.value = false
+                }
+                throw cancelled
+            }
+        } catch (cancelled: CancellationException) {
+            if (stillCurrent() && safePage == 1) {
+                _isBugunLoading.value = false
+            }
+            throw cancelled
+        } catch (_: Throwable) {
+            if (stillCurrent() && safePage == 1) {
                 _isBugunLoading.value = false
             }
             bugunPageCache[safePage]?.items ?: emptyList()
@@ -495,7 +548,7 @@ class EksiRepository @Inject constructor(
 
         try {
             val autocompleteUrl = "$baseDomain/autocomplete/query?q=${Uri.encode(cleanQuery)}&_=${System.currentTimeMillis()}"
-            val rawResponse = runCatching {
+            val rawResponse = runCatchingUnlessCancelled {
                 webViewFetchBridge.fetchHtml(rawUrl = autocompleteUrl, isAjax = true)
             }.getOrDefault("")
 
@@ -511,7 +564,7 @@ class EksiRepository @Inject constructor(
                     filter = SearchFilter(keywords = cleanQuery),
                     page = 1
                 )
-                val searchHtml = runCatching {
+                val searchHtml = runCatchingUnlessCancelled {
                     webViewFetchBridge.fetchHtml(rawUrl = searchFallbackUrl, isAjax = true)
                 }.getOrDefault("")
                 val searchParsed = withContext(Dispatchers.Default) {
@@ -614,6 +667,10 @@ class EksiRepository @Inject constructor(
     }
 
     suspend fun toggleBookmark(entry: EntryItem) {
+        if (eksinDao.isEntryBookmarkedNow(entry.id)) {
+            eksinDao.deleteBookmarkedEntry(entry.id)
+            return
+        }
         eksinDao.upsertBookmarkedEntry(
             BookmarkedEntryEntity(
                 entryId = entry.id,
@@ -710,34 +767,6 @@ class EksiRepository @Inject constructor(
                 )
             }
         ).flow
-    }
-
-    /**
-     * Sol frame başlıklarını (Gündem, Bugün, Debe, Olaylar) [WebViewFetchBridge] ve Paging 3 ile çeker.
-     */
-    fun getLeftFrameTopicsPager(section: LeftFrameSection): Flow<PagingData<TopicItem>> {
-        return when (section) {
-            LeftFrameSection.GUNDEM -> getGundemTopicsPager()
-            LeftFrameSection.BUGUN -> getBugunTopicsPager()
-            LeftFrameSection.OLAYLAR -> getOlaylarTopicsPager()
-            LeftFrameSection.DEBE -> Pager(
-                config = PagingConfig(
-                    pageSize = 25,
-                    prefetchDistance = 20,
-                    initialLoadSize = 25,
-                    enablePlaceholders = false
-                ),
-                pagingSourceFactory = {
-                    LeftFramePagingSource(
-                        section = section,
-                        webViewFetchBridge = webViewFetchBridge,
-                        eksiParser = eksiParser,
-                        gundemPage1UrlCache = gundemPage1UrlCache,
-                        onTopicsLoaded = { items, _ -> cacheKnownTopics(items) }
-                    )
-                }
-            ).flow
-        }
     }
 
     /**
@@ -906,7 +935,8 @@ class EksiRepository @Inject constructor(
                     isDirectEntry = true
                 )
             }
-        } catch (_: Throwable) {
+        } catch (e: Throwable) {
+            if (e is CancellationException) throw e
             // Ağ hatası durumunda mevcut öğeyi koru
         }
         item
@@ -923,7 +953,7 @@ class EksiRepository @Inject constructor(
             }.trimEnd('/')
 
             val fullPageUrl = "$baseDomain/debe?_=${System.currentTimeMillis()}"
-            val fullPageHtml = runCatching {
+            val fullPageHtml = runCatchingUnlessCancelled {
                 webViewFetchBridge.fetchHtml(rawUrl = fullPageUrl, isAjax = false)
             }.getOrDefault("")
             val parsedFull = withContext(Dispatchers.Default) {
@@ -931,7 +961,7 @@ class EksiRepository @Inject constructor(
             }
 
             val ajaxUrl = "$baseDomain/debe?_=${System.currentTimeMillis()}"
-            val ajaxHtml = runCatching {
+            val ajaxHtml = runCatchingUnlessCancelled {
                 webViewFetchBridge.fetchHtml(rawUrl = ajaxUrl, isAjax = true)
             }.getOrDefault("")
             val parsedAjax = withContext(Dispatchers.Default) {
@@ -962,7 +992,7 @@ class EksiRepository @Inject constructor(
             }
             Result.success(parsedFallback.map { applyCachedFavoriteMetadata(it) })
         } catch (e: Throwable) {
-            Result.failure(e)
+            failureUnlessCancelled(e)
         }
     }
 
@@ -979,14 +1009,6 @@ class EksiRepository @Inject constructor(
             }.trimEnd('/')
 
             val isEntriesMode = (rankingTab == PeriodicRankingTab.TOP_ENTRIES)
-
-            if (isEntriesMode && period == PeriodicTimeRange.YESTERDAY) {
-                val yesterdayEntries = compileTopLikedEntriesFallback(
-                    baseDomain = baseDomain,
-                    period = period
-                )
-                return@withContext Result.success(yesterdayEntries)
-            }
 
             val statsPath = if (isEntriesMode) period.entriesStatsPath else period.topicsStatsPath
             val statsUrl = "$baseDomain$statsPath"
@@ -1013,283 +1035,10 @@ class EksiRepository @Inject constructor(
                 return@withContext Result.success(enriched)
             }
 
-            if (isEntriesMode) {
-                val compiledTopEntries = compileTopLikedEntriesFallback(
-                    baseDomain = baseDomain,
-                    period = period
-                )
-                return@withContext Result.success(compiledTopEntries)
-            } else {
-                val compiledTopTopics = compileTopPopularTopicsFallback(
-                    baseDomain = baseDomain,
-                    period = period
-                )
-                return@withContext Result.success(compiledTopTopics)
-            }
+            Result.success(emptyList())
         } catch (e: Throwable) {
-            Result.failure(e)
+            failureUnlessCancelled(e)
         }
-    }
-
-    private suspend fun compileTopLikedEntriesFallback(
-        baseDomain: String,
-        period: PeriodicTimeRange
-    ): List<RankedTopicOrEntryItem> = coroutineScope {
-        val semaphore = Semaphore(4)
-        val collectedByEntryId = ConcurrentHashMap<String, RankedTopicOrEntryItem>()
-
-        val debeDeferred = async(Dispatchers.IO) {
-            runCatching {
-                val debeHtml = webViewFetchBridge.fetchHtml(
-                    rawUrl = "$baseDomain/debe?_=${System.currentTimeMillis()}",
-                    isAjax = true
-                )
-                eksiParser.parseDebeEntriesList(debeHtml).map { applyCachedFavoriteMetadata(it) }
-            }.getOrDefault(emptyList())
-        }
-
-        val gundemPagesToFetch = when (period) {
-            PeriodicTimeRange.YESTERDAY -> listOf(1)
-            PeriodicTimeRange.LAST_WEEK -> listOf(1, 2)
-            PeriodicTimeRange.LAST_MONTH -> listOf(1, 2, 3)
-        }
-
-        val channelsToFetch = when (period) {
-            PeriodicTimeRange.YESTERDAY -> emptyList()
-            PeriodicTimeRange.LAST_WEEK -> listOf(
-                EksiChannel.SIYASET,
-                EksiChannel.EKONOMI,
-                EksiChannel.SPOR,
-                EksiChannel.TEKNOLOJI
-            )
-            PeriodicTimeRange.LAST_MONTH -> listOf(
-                EksiChannel.SINEMA,
-                EksiChannel.ILISKILER,
-                EksiChannel.BILIM,
-                EksiChannel.SAGLIK,
-                EksiChannel.TARIH,
-                EksiChannel.EDEBIYAT
-            )
-        }
-
-        val gundemTopicsDeferred = gundemPagesToFetch.map { pageNum ->
-            async(Dispatchers.IO) {
-                if (pageNum == 1 && _gundemTopics.value.isNotEmpty()) {
-                    _gundemTopics.value
-                } else {
-                    semaphore.withPermit {
-                        runCatching {
-                            val url = "$baseDomain/basliklar/gundem?p=$pageNum&_=${System.currentTimeMillis()}"
-                            val html = webViewFetchBridge.fetchHtml(rawUrl = url, isAjax = true)
-                            eksiParser.parseLeftFrameTopics(html = html, isTrackedSection = false)
-                        }.getOrDefault(emptyList())
-                    }
-                }
-            }
-        }
-
-        val channelTopicsDeferred = channelsToFetch.map { channel ->
-            async(Dispatchers.IO) {
-                semaphore.withPermit {
-                    runCatching {
-                        val url = eksiParser.buildChannelTopicsUrl(
-                            baseDomain = baseDomain,
-                            channel = channel,
-                            page = 1
-                        )
-                        val html = webViewFetchBridge.fetchHtml(rawUrl = url, isAjax = true)
-                        eksiParser.parseChannelTopics(html)
-                    }.getOrDefault(emptyList())
-                }
-            }
-        }
-
-        val allCandidateTopics = (gundemTopicsDeferred.awaitAll().flatten() + channelTopicsDeferred.awaitAll().flatten())
-            .filter { it.cleanUrl.isNotBlank() && !eksiParser.isDirectSingleEntryUrl(it.cleanUrl) }
-            .distinctBy { it.cleanUrl }
-            .distinctBy { it.title.trim().lowercase() }
-            .sortedByDescending { it.entryCount }
-            .take(if (period == PeriodicTimeRange.YESTERDAY) 8 else 14)
-
-        val singleBestEntryPerTopic = allCandidateTopics.map { topic ->
-            async(Dispatchers.IO) {
-                semaphore.withPermit {
-                    runCatching {
-                        val cleanUrl = topic.cleanUrl
-                        val dailyNiceUrl = "$cleanUrl?a=dailynice"
-                        val dailyHtml = webViewFetchBridge.fetchHtml(rawUrl = dailyNiceUrl, isAjax = false)
-                        val parsedDailyPage = eksiParser.parseTopicPage(
-                            html = dailyHtml,
-                            requestedUrl = dailyNiceUrl,
-                            fallbackPage = 1
-                        )
-
-                        var recent2026Entries = parsedDailyPage.entries.filter { entry ->
-                            entry.id.isNotBlank() &&
-                                entry.id.all { it.isDigit() } &&
-                                entry.favoriteCount > 0 &&
-                                eksiParser.isRecent2026EntryDate(entry.date)
-                        }
-                        var resolvedPageTitle = parsedDailyPage.topicTitle
-
-                        if (recent2026Entries.isEmpty()) {
-                            val popularUrl = "$cleanUrl?a=popular"
-                            val popularHtml = webViewFetchBridge.fetchHtml(rawUrl = popularUrl, isAjax = false)
-                            val parsedPopularPage = eksiParser.parseTopicPage(
-                                html = popularHtml,
-                                requestedUrl = popularUrl,
-                                fallbackPage = 1
-                            )
-                            resolvedPageTitle = parsedPopularPage.topicTitle
-                            recent2026Entries = parsedPopularPage.entries.filter { entry ->
-                                entry.id.isNotBlank() &&
-                                    entry.id.all { it.isDigit() } &&
-                                    entry.favoriteCount > 0 &&
-                                    eksiParser.isRecent2026EntryDate(entry.date)
-                            }
-                        }
-
-                        val bestEntry = recent2026Entries.maxByOrNull { it.favoriteCount }
-                        if (bestEntry != null) {
-                            val actualTitle = bestEntry.topicTitle
-                                .takeIf { it.isNotBlank() }
-                                ?: resolvedPageTitle.takeIf { it.isNotBlank() }
-                                ?: topic.title
-                            bestEntry.copy(topicTitle = actualTitle)
-                        } else {
-                            null
-                        }
-                    }.getOrNull()
-                }
-            }
-        }.awaitAll().filterNotNull()
-
-        for (entry in singleBestEntryPerTopic) {
-            val fav = entry.favoriteCount
-            val entryUrl = "$baseDomain/entry/${entry.id}"
-            val item = RankedTopicOrEntryItem(
-                rank = 1,
-                id = entry.id,
-                title = entry.topicTitle,
-                url = entryUrl,
-                badgeText = "♥ $fav",
-                favoriteCount = fav,
-                author = entry.author,
-                entryId = entry.id,
-                snippet = entry.plainText.take(140),
-                isDirectEntry = true
-            )
-            val cacheKey = "entry:${entry.id}"
-            entryFavoriteCountCache[cacheKey] = fav
-            entryAuthorCache[cacheKey] = entry.author
-            entryResolvedIdCache[cacheKey] = entry.id
-            entryTopicTitleCache[cacheKey] = entry.topicTitle
-            collectedByEntryId[entry.id] = item
-        }
-
-        val debeList = debeDeferred.await()
-        val debeSubset = when (period) {
-            PeriodicTimeRange.YESTERDAY -> debeList.take(35)
-            PeriodicTimeRange.LAST_WEEK -> debeList.take(20)
-            PeriodicTimeRange.LAST_MONTH -> debeList.take(15)
-        }
-
-        val enrichedDebeItems = debeSubset.map { debeItem ->
-            async(Dispatchers.IO) {
-                val withCache = applyCachedFavoriteMetadata(debeItem)
-                if (withCache.favoriteCount > 0 && !withCache.entryId.isNullOrBlank()) {
-                    withCache
-                } else {
-                    semaphore.withPermit {
-                        fetchAndCacheEntryFavoriteCount(withCache)
-                    }
-                }
-            }
-        }.awaitAll()
-
-        for (debeItem in enrichedDebeItems) {
-            val validEntryId = debeItem.entryId?.trim()?.filter { it.isDigit() }?.takeIf { it.isNotBlank() }
-            val uniqueKey = validEntryId ?: debeItem.url
-            val existing = collectedByEntryId[uniqueKey]
-            if (existing == null || debeItem.favoriteCount > existing.favoriteCount) {
-                collectedByEntryId[uniqueKey] = debeItem.copy(
-                    id = validEntryId ?: debeItem.id,
-                    url = if (validEntryId != null) "$baseDomain/entry/$validEntryId" else debeItem.url,
-                    entryId = validEntryId,
-                    badgeText = if (debeItem.favoriteCount > 0) "♥ ${debeItem.favoriteCount}" else debeItem.badgeText,
-                    isDirectEntry = true
-                )
-            }
-        }
-
-        collectedByEntryId.values
-            .sortedWith(
-                compareByDescending<RankedTopicOrEntryItem> { it.favoriteCount }
-                    .thenBy { it.rank }
-            )
-            .distinctBy { it.entryId ?: it.url }
-            .distinctBy { it.title.trim().lowercase() }
-            .take(50)
-            .mapIndexed { index, item ->
-                val fav = item.favoriteCount
-                item.copy(
-                    rank = index + 1,
-                    badgeText = if (fav > 0) "♥ $fav" else item.badgeText
-                )
-            }
-    }
-
-    private suspend fun compileTopPopularTopicsFallback(
-        baseDomain: String,
-        period: PeriodicTimeRange
-    ): List<RankedTopicOrEntryItem> = coroutineScope {
-        val pages = when (period) {
-            PeriodicTimeRange.YESTERDAY -> listOf(1, 2)
-            PeriodicTimeRange.LAST_WEEK -> listOf(1, 2, 3)
-            PeriodicTimeRange.LAST_MONTH -> listOf(1, 2, 3, 4)
-        }
-        val semaphore = Semaphore(4)
-        val topics = pages.map { p ->
-            async(Dispatchers.IO) {
-                if (p == 1 && _gundemTopics.value.isNotEmpty()) {
-                    _gundemTopics.value
-                } else {
-                    semaphore.withPermit {
-                        runCatching {
-                            val url = "$baseDomain/basliklar/gundem?p=$p&_=${System.currentTimeMillis()}"
-                            val html = webViewFetchBridge.fetchHtml(rawUrl = url, isAjax = true)
-                            eksiParser.parseLeftFrameTopics(html = html, isTrackedSection = false)
-                        }.getOrDefault(emptyList())
-                    }
-                }
-            }
-        }.awaitAll()
-            .flatten()
-            .filter { it.cleanUrl.isNotBlank() && !eksiParser.isDirectSingleEntryUrl(it.cleanUrl) }
-            .distinctBy { it.cleanUrl }
-            .distinctBy { it.title.trim().lowercase() }
-
-        cacheKnownTopics(topics)
-
-        topics
-            .sortedByDescending { it.entryCount }
-            .take(50)
-            .mapIndexed { idx, topic ->
-                val countLabel = topic.entryCountText.ifBlank {
-                    if (topic.entryCount > 0) topic.entryCount.toString() else "Popüler"
-                }
-                RankedTopicOrEntryItem(
-                    rank = idx + 1,
-                    id = topic.id,
-                    title = topic.title,
-                    url = topic.cleanUrl,
-                    badgeText = "$countLabel entry",
-                    favoriteCount = topic.entryCount,
-                    author = null,
-                    entryId = null,
-                    isDirectEntry = false
-                )
-            }
     }
 
     /**
@@ -1432,15 +1181,18 @@ class EksiRepository @Inject constructor(
             }
 
             val finalPageCount = resultPageData.pageCount.coerceAtLeast(safePage)
+            val fromArchive = webViewFetchBridge.isUrlServedFromWayback(targetUrl) ||
+                webViewFetchBridge.isUrlServedFromWayback(resultPageData.cleanTopicUrl)
             Result.success(
                 resultPageData.copy(
                     currentPage = safePage,
                     pageCount = finalPageCount,
-                    entries = finalEntries
+                    entries = finalEntries,
+                    isFromWaybackArchive = fromArchive
                 )
             )
         } catch (e: Throwable) {
-            Result.failure(e)
+            failureUnlessCancelled(e)
         }
     }
 
@@ -1479,7 +1231,7 @@ class EksiRepository @Inject constructor(
                 firstPageParsed.copy(entries = firstPageParsed.entries.take(5))
             )
         } catch (e: Throwable) {
-            Result.failure(e)
+            failureUnlessCancelled(e)
         }
     }
 }
@@ -1551,11 +1303,12 @@ class LeftFramePagingSource(
             val nextKey = if (items.isEmpty() || !canPaginate || page >= 15) null else page + 1
 
             LoadResult.Page(
-                data = items,
+                data = items.distinctBy { it.cleanUrl.ifBlank { it.id } },
                 prevKey = if (page == 1) null else page - 1,
                 nextKey = nextKey
             )
         } catch (e: Throwable) {
+            if (e is CancellationException) throw e
             LoadResult.Error(e)
         }
     }
@@ -1596,11 +1349,12 @@ class BugunTopicsPagingSource(
             val nextKey = if (items.isEmpty() || page >= 15) null else page + 1
 
             LoadResult.Page(
-                data = items,
+                data = items.distinctBy { it.cleanUrl.ifBlank { it.id } },
                 prevKey = if (page == 1) null else page - 1,
                 nextKey = nextKey
             )
         } catch (e: Throwable) {
+            if (e is CancellationException) throw e
             LoadResult.Error(e)
         }
     }
@@ -1683,11 +1437,12 @@ class ChannelTopicsPagingSource(
             val nextKey = if (items.isEmpty() || page >= 15) null else page + 1
 
             LoadResult.Page(
-                data = items,
+                data = items.distinctBy { it.cleanUrl.ifBlank { it.id } },
                 prevKey = if (page == 1) null else page - 1,
                 nextKey = nextKey
             )
         } catch (e: Throwable) {
+            if (e is CancellationException) throw e
             LoadResult.Error(e)
         }
     }
@@ -1739,11 +1494,12 @@ class SearchTopicsPagingSource(
             }
 
             LoadResult.Page(
-                data = parsedPage.topics,
+                data = parsedPage.topics.distinctBy { it.cleanUrl.ifBlank { it.id } },
                 prevKey = if (page == 1) null else page - 1,
                 nextKey = nextKey
             )
         } catch (e: Throwable) {
+            if (e is CancellationException) throw e
             LoadResult.Error(e)
         }
     }

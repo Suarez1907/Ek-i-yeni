@@ -50,6 +50,8 @@ import com.example.data.model.TopicPageData
 import com.example.ui.components.AuthorMiniAvatar
 import com.example.ui.components.EntryListSkeletonShimmer
 import com.example.ui.theme.EksiNeonGreen
+import com.example.ui.theme.LocalAppThemeMode
+import com.example.ui.theme.withThemedLinks
 import com.example.ui.theme.OledHairlineDivider
 import com.example.ui.theme.OledOnAccentColor
 import com.example.ui.theme.OledPillGreenBg
@@ -80,6 +82,7 @@ sealed interface BkzPreviewUiState {
 @Composable
 fun BkzPreviewBottomSheet(
     state: BkzPreviewUiState,
+    baseDomain: String = "https://eksisozluk.com",
     onDismiss: () -> Unit,
     onOpenFullTopic: (TopicItem) -> Unit
 ) {
@@ -113,7 +116,7 @@ fun BkzPreviewBottomSheet(
                         id = state.bkzQuery,
                         title = state.bkzQuery,
                         slug = state.bkzQuery.replace(" ", "-"),
-                        url = "https://eksisozluk.com/?q=$encoded"
+                        url = "${baseDomain.trimEnd('/')}/?q=$encoded"
                     )
                 )
             }
@@ -124,7 +127,7 @@ fun BkzPreviewBottomSheet(
                         id = state.bkzQuery,
                         title = state.bkzQuery,
                         slug = state.bkzQuery.replace(" ", "-"),
-                        url = "https://eksisozluk.com/?q=$encoded"
+                        url = "${baseDomain.trimEnd('/')}/?q=$encoded"
                     )
                 )
             }
@@ -312,7 +315,11 @@ private fun BkzPreviewEntryCard(entry: EntryItem) {
     ) {
         Column(modifier = Modifier.padding(14.dp)) {
             Text(
-                text = entry.annotatedContent,
+                text = entry.annotatedContent.withThemedLinks(
+                    isLight = LocalAppThemeMode.current.isLight,
+                    onBkzClick = {},
+                    onExternalUrlClick = {}
+                ),
                 style = MaterialTheme.typography.bodyMedium.copy(
                     fontSize = 15.sp,
                     lineHeight = 24.sp

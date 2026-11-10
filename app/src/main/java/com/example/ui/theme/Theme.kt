@@ -7,9 +7,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
 
@@ -143,17 +143,14 @@ fun EksinOledTheme(
     themeMode: AppThemeMode = ActiveThemeState.currentMode,
     content: @Composable () -> Unit
 ) {
-    ActiveThemeState.currentMode = themeMode
     val colorScheme = colorSchemeForMode(themeMode)
 
     val view = LocalView.current
     if (!view.isInEditMode) {
         SideEffect {
+            ActiveThemeState.currentMode = themeMode
             val window = (view.context as? Activity)?.window
             if (window != null) {
-                val barColor = colorScheme.background.toArgb()
-                window.statusBarColor = barColor
-                window.navigationBarColor = barColor
                 val controller = WindowCompat.getInsetsController(window, view)
                 controller.isAppearanceLightStatusBars = themeMode.isLight
                 controller.isAppearanceLightNavigationBars = themeMode.isLight
@@ -161,16 +158,11 @@ fun EksinOledTheme(
         }
     }
 
-    MaterialTheme(
-        colorScheme = colorScheme,
-        typography = Typography,
-        content = content
-    )
-}
-
-@Composable
-fun MyApplicationTheme(
-    content: @Composable () -> Unit
-) {
-    EksinOledTheme(content = content)
+    CompositionLocalProvider(LocalAppThemeMode provides themeMode) {
+        MaterialTheme(
+            colorScheme = colorScheme,
+            typography = Typography,
+            content = content
+        )
+    }
 }

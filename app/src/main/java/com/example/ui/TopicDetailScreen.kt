@@ -79,6 +79,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.SwipeToDismissBox
 import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberSwipeToDismissBoxState
@@ -88,6 +89,7 @@ import androidx.compose.runtime.State
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -119,7 +121,7 @@ import com.example.ui.components.AuthorMiniAvatar
 import com.example.ui.components.EntryListSkeletonShimmer
 import com.example.ui.components.FloatingPagerCapsuleBar
 import com.example.ui.components.ThemeSelectorDialog
-import com.example.ui.components.rememberOledShimmerBrush
+import com.example.ui.components.oledShimmerBackground
 import com.example.ui.sheets.BkzPreviewBottomSheet
 import com.example.ui.sheets.GeminiSummaryBottomSheet
 import com.example.ui.theme.ActiveThemeState
@@ -175,10 +177,8 @@ fun TopicDetailScreen(
     val favoritedIds by viewModel.favoritedEntryIds.collectAsStateWithLifecycle()
     val bkzPreviewState by viewModel.bkzPreviewState.collectAsStateWithLifecycle()
     val geminiStreamState by viewModel.geminiStreamState.collectAsStateWithLifecycle()
-    val geminiApiKey by viewModel.geminiApiKey.collectAsStateWithLifecycle()
     val isGeminiKeyConfigured by viewModel.isGeminiKeyConfigured.collectAsStateWithLifecycle()
     val geminiKeyWarning by viewModel.geminiKeyDecryptionWarning.collectAsStateWithLifecycle()
-    val lastContentSource by viewModel.lastContentSource.collectAsStateWithLifecycle()
     val themeMode by viewModel.themeMode.collectAsStateWithLifecycle()
     val showThemeDialog by viewModel.showThemeDialog.collectAsStateWithLifecycle()
 
@@ -196,8 +196,7 @@ fun TopicDetailScreen(
         metadata?.isSingleEntryView == true ||
         topic.url.contains("/entry/", ignoreCase = true)
 
-    val isWaybackArchiveActive = metadata?.isFromWaybackArchive == true ||
-        lastContentSource == ContentSource.WAYBACK_ARCHIVE
+    val isWaybackArchiveActive = metadata?.isFromWaybackArchive == true
 
     val currentEntries: List<EntryItem> = remember(pageUiState, metadata, authorFilter) {
         val rawEntries = when (val state = pageUiState) {
@@ -252,28 +251,29 @@ fun TopicDetailScreen(
 
     // 3. KURAL: Kullanıcı okurken kalınan yeri Room'a sessizce kaydet (Room Flow dinlenmez, state ezilmez).
     LaunchedEffect(listState, currentEntries, isSingleEntryOrFiltered) {
-        snapshotFlow {
-            listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset
-        }
+        var lastSavedEntryId = ""
+        snapshotFlow { listState.isScrollInProgress }
             .distinctUntilChanged()
-            .debounce(400L)
-            .collect { (firstIndex, offset) ->
-                if (currentEntries.isEmpty()) return@collect
+            .collect { scrolling ->
+                if (scrolling || currentEntries.isEmpty()) return@collect
                 val headerOffset = if (isSingleEntryOrFiltered) 1 else 0
-                val entryIdx = (firstIndex - headerOffset).coerceIn(0, currentEntries.lastIndex)
-                val visibleEntry = currentEntries.getOrNull(entryIdx)
-                if (visibleEntry != null) {
-                    viewModel.saveCurrentScrollPosition(
-                        entry = visibleEntry,
-                        scrollIndex = entryIdx,
-                        scrollOffset = offset
-                    )
-                }
+                val entryIdx = (listState.firstVisibleItemIndex - headerOffset)
+                    .coerceIn(0, currentEntries.lastIndex)
+                val visibleEntry = currentEntries.getOrNull(entryIdx) ?: return@collect
+                val offset = listState.firstVisibleItemScrollOffset
+                if (visibleEntry.id == lastSavedEntryId && offset == 0) return@collect
+                lastSavedEntryId = visibleEntry.id
+                viewModel.saveCurrentScrollPosition(
+                    entry = visibleEntry,
+                    scrollIndex = entryIdx,
+                    scrollOffset = offset
+                )
             }
     }
 
     BkzPreviewBottomSheet(
         state = bkzPreviewState,
+        baseDomain = viewModel.webViewFetchBridge.getActiveBaseDomain(),
         onDismiss = { viewModel.dismissBkzPreview() },
         onOpenFullTopic = { targetTopic ->
             viewModel.dismissBkzPreview()
@@ -285,7 +285,6 @@ fun TopicDetailScreen(
         topicTitle = activeTitle,
         streamState = geminiStreamState,
         hasSavedApiKey = isGeminiKeyConfigured,
-        savedApiKey = geminiApiKey,
         keyDecryptionWarning = geminiKeyWarning,
         onSelectMode = { mode ->
             viewModel.runGeminiAnalysisStream(
@@ -786,7 +785,7 @@ fun TopicDetailScreen(
 
                         itemsIndexed(
                             items = currentEntries,
-                            key = { index, entry -> "${safeCurrentPage}_${index}_${entry.id}" },
+                            key = { _, entry -> "${safeCurrentPage}_${entry.id}" },
                             contentType = { _, _ -> "entry_card" }
                         ) { _, entry ->
                             val isFavorited = favoritedIds.contains(entry.id) || entry.isFavorited
@@ -821,7 +820,16 @@ fun TopicDetailScreen(
                                     }
                                 },
                                 onAuthorClick = { authorName ->
-                                    viewModel.openBkzPreview(authorName)
+                                    val profile = entry.authorProfileUrl.ifBlank {
+                                        val domain = viewModel.webViewFetchBridge.getActiveBaseDomain().trimEnd('/')
+                                        "$domain/biri/${android.net.Uri.encode(authorName)}"
+                                    }
+                                    if (profile.isNotBlank()) {
+                                        try {
+                                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(profile)))
+                                        } catch (_: Exception) {
+                                        }
+                                    }
                                 },
                                 onShareEntry = {
                                     shareEntry(entry)
@@ -913,10 +921,11 @@ private fun rememberDetailHeaderVisibility(listState: LazyListState): State<Bool
     var previousIndex by remember(listState) { mutableIntStateOf(0) }
     var previousScrollOffset by remember(listState) { mutableIntStateOf(0) }
 
-    return remember(listState) {
-        derivedStateOf {
-            val currentIndex = listState.firstVisibleItemIndex
-            val currentOffset = listState.firstVisibleItemScrollOffset
+    val headerVisible = remember { mutableStateOf(true) }
+    LaunchedEffect(listState) {
+        snapshotFlow {
+            listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset
+        }.collect { (currentIndex, currentOffset) ->
             val isScrollingUp = when {
                 currentIndex < previousIndex -> true
                 currentIndex > previousIndex -> false
@@ -924,9 +933,10 @@ private fun rememberDetailHeaderVisibility(listState: LazyListState): State<Bool
             }
             previousIndex = currentIndex
             previousScrollOffset = currentOffset
-            currentIndex == 0 || isScrollingUp
+            headerVisible.value = currentIndex == 0 || isScrollingUp
         }
     }
+    return headerVisible
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -963,7 +973,7 @@ fun SwipeableEntryOledCard(
         extractInlineImageUrls(entry)
     }
 
-    val isLight = ActiveThemeState.currentMode == AppThemeMode.CLASSIC_LIGHT
+    val isLight = com.example.ui.theme.LocalAppThemeMode.current == AppThemeMode.CLASSIC_LIGHT
 
     SwipeToDismissBox(
         state = dismissState,
@@ -1101,38 +1111,18 @@ fun SwipeableEntryOledCard(
 
                 Spacer(modifier = Modifier.height(10.dp))
 
-                ClickableText(
-                    text = entry.annotatedContent,
+                val themedEntry = com.example.ui.theme.rememberThemedEntryText(
+                    source = entry.annotatedContent,
+                    onBkzClick = onBkzClick,
+                    onExternalUrlClick = onExternalUrlClick
+                )
+                Text(
+                    text = themedEntry,
                     style = TextStyle(
                         color = OledTopicUnread,
                         fontSize = 15.sp,
                         lineHeight = 24.sp
-                    ),
-                    onClick = { offset ->
-                        entry.annotatedContent
-                            .getStringAnnotations(tag = EksiParser.TAG_BKZ, start = offset, end = offset)
-                            .firstOrNull()?.let { annotation ->
-                                onBkzClick(annotation.item)
-                                return@ClickableText
-                            }
-
-                        entry.annotatedContent
-                            .getStringAnnotations(tag = EksiParser.TAG_HIDDEN_BKZ, start = offset, end = offset)
-                            .firstOrNull()?.let { annotation ->
-                                onBkzClick(annotation.item)
-                                return@ClickableText
-                            }
-
-                        entry.annotatedContent
-                            .getStringAnnotations(
-                                tag = EksiParser.TAG_EXTERNAL_URL,
-                                start = offset,
-                                end = offset
-                            )
-                            .firstOrNull()?.let { annotation ->
-                                onExternalUrlClick(annotation.item)
-                            }
-                    }
+                    )
                 )
 
                 if (inlineImageUrls.isNotEmpty()) {
@@ -1252,7 +1242,6 @@ private fun InlineEntryImagePreview(
     imageUrl: String,
     onOpenExternal: () -> Unit
 ) {
-    val shimmerBrush = rememberOledShimmerBrush()
     Card(
         shape = RoundedCornerShape(12.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.background),
@@ -1261,7 +1250,18 @@ private fun InlineEntryImagePreview(
             .border(0.5.dp, OledHairlineDivider, RoundedCornerShape(12.dp))
     ) {
         Column {
-            SubcomposeAsyncImage(
+            val host = remember(imageUrl) {
+                runCatching { Uri.parse(imageUrl).host?.lowercase().orEmpty() }.getOrDefault("")
+            }
+            val trustedHost = host.endsWith("eksisozluk.com") ||
+                host.contains("ekstat") ||
+                host.contains("eksiseyler")
+            var revealRemote by remember(imageUrl) { mutableStateOf(trustedHost) }
+            if (!revealRemote) {
+                TextButton(onClick = { revealRemote = true }) {
+                    Text("Üçüncü taraf görseli yükle", color = EksiNeonGreen)
+                }
+            } else SubcomposeAsyncImage(
                 model = imageUrl,
                 contentDescription = "Entry içi görsel önizleme",
                 contentScale = ContentScale.FillWidth,
@@ -1274,7 +1274,7 @@ private fun InlineEntryImagePreview(
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(160.dp)
-                            .background(shimmerBrush)
+                            .oledShimmerBackground()
                     )
                 },
                 error = {
@@ -1369,11 +1369,6 @@ fun extractInlineImageUrls(entry: EntryItem): List<String> {
             lower.contains("picsum.photos/") -> rawUrl
 
             lower.contains("i.imgur.com/") -> rawUrl
-
-            lower.contains("imgur.com/") && !lower.contains("/a/") && !lower.contains("/gallery/") -> {
-                val slug = rawUrl.substringAfterLast("/").substringBefore("?")
-                if (slug.isNotBlank()) "https://i.imgur.com/$slug.jpg" else null
-            }
 
             lower.contains("eksiseyler.com") &&
                 (lower.contains("/img/") || lower.contains("seyler.ekstat.com")) -> rawUrl

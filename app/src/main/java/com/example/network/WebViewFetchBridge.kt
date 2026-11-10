@@ -21,12 +21,17 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
 import com.example.util.PerfLog
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -97,6 +102,7 @@ class WebViewFetchBridge @Inject constructor(
     private val cloudflareManager: CloudflareChallengeManager
 ) {
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val bridgeScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val loadUrlMutex = Mutex()
     private val originInitMutex = Mutex()
 
@@ -332,6 +338,12 @@ class WebViewFetchBridge @Inject constructor(
         return loaded
     }
 
+    fun clearDomVerification() {
+        domVerifiedState.set(false)
+        domVerifiedInitialized.set(true)
+        _lastContentSource.value = ContentSource.LIVE
+    }
+
     fun isDomVerified(): Boolean {
         val domain = getActiveBaseDomain()
         if (domVerifiedInitialized.compareAndSet(false, true)) {
@@ -446,28 +458,20 @@ class WebViewFetchBridge @Inject constructor(
                 createdDeferred
             }
 
-            try {
-                val html = withTimeout(FETCH_HTML_TOTAL_TIMEOUT_MS) {
-                    performNetworkFetchChain(rawUrl = rawUrl, isAjax = isAjax, cacheKey = cacheKey)
+            // The owner runs outside the caller job so one cancelled waiter does not
+            // fail the shared deferred still awaited by other callers.
+            bridgeScope.launch {
+                try {
+                    val html = fetchLiveThenArchive(rawUrl = rawUrl, isAjax = isAjax, cacheKey = cacheKey)
+                    activeDeferred.complete(html)
+                } catch (error: Throwable) {
+                    activeDeferred.completeExceptionally(error)
+                } finally {
+                    inFlightRequests.remove(cacheKey, activeDeferred)
                 }
-                activeDeferred.complete(html)
-                return html
-            } catch (timeoutErr: TimeoutCancellationException) {
-                val ioTimeout = IOException(
-                    "Ekşi Sözlük yanıt süresi 30 saniyeyi aştı (zaman aşımı). Lütfen tekrar deneyin.",
-                    timeoutErr
-                )
-                activeDeferred.completeExceptionally(ioTimeout)
-                throw ioTimeout
-            } catch (cancelErr: CancellationException) {
-                activeDeferred.cancel(cancelErr)
-                throw cancelErr
-            } catch (err: Throwable) {
-                activeDeferred.completeExceptionally(err)
-                throw err
-            } finally {
-                inFlightRequests.remove(cacheKey, activeDeferred)
             }
+
+            return activeDeferred.await()
         } finally {
             PerfLog.logDuration("fetchHtml", SystemClock.elapsedRealtime() - startMs)
         }
@@ -477,7 +481,7 @@ class WebViewFetchBridge @Inject constructor(
         rawUrl: String,
         isAjax: Boolean,
         cacheKey: String
-    ): String {
+    ): String? {
         ensureNetworkAvailable()
 
         val candidateDomains = buildCandidateDomainsList()
@@ -591,17 +595,43 @@ class WebViewFetchBridge @Inject constructor(
             }
         }
 
-        // AŞAMA 4: Doğrudan erişim Cloudflare (403/503) veya emülatör kısıtlamasına takıldığında
-        // gerçek Ekşi Sözlük HTML sayfalarını (`2id_` raw identity mirror) çek.
-        val liveMirrorHtml = executeLiveMirrorArchiveFetch(rawUrl)
-        if (!liveMirrorHtml.isNullOrBlank()) {
-            domVerifiedState.set(true)
+        if (lastSawCloudflareChallenge) {
+            lastLiveFetchSawCloudflare = true
+        }
+        return null
+    }
+
+    @Volatile
+    private var lastLiveFetchSawCloudflare: Boolean = false
+
+    private suspend fun fetchLiveThenArchive(
+        rawUrl: String,
+        isAjax: Boolean,
+        cacheKey: String
+    ): String {
+        lastLiveFetchSawCloudflare = false
+        val live = try {
+            withTimeoutOrNull(LIVE_FETCH_BUDGET_MS) {
+                performNetworkFetchChain(rawUrl = rawUrl, isAjax = isAjax, cacheKey = cacheKey)
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Throwable) {
+            null
+        }
+        if (!live.isNullOrBlank()) return live
+
+        val archive = withTimeoutOrNull(ARCHIVE_FETCH_BUDGET_MS) {
+            executeLiveMirrorArchiveFetch(rawUrl)
+        }
+        if (!archive.isNullOrBlank()) {
+            // Archive HTML is real archived markup, but it is not a live DOM verification.
             recordUrlContentSource(rawUrl, ContentSource.WAYBACK_ARCHIVE)
-            putTtlCachedEntry(cacheKey, liveMirrorHtml, ContentSource.WAYBACK_ARCHIVE)
-            return liveMirrorHtml
+            putTtlCachedEntry(cacheKey, archive, ContentSource.WAYBACK_ARCHIVE)
+            return archive
         }
 
-        if (lastSawCloudflareChallenge) {
+        if (lastLiveFetchSawCloudflare) {
             domVerifiedState.set(false)
             cloudflareManager.emitChallenge(
                 CloudflareChallengeEvent(
@@ -612,7 +642,6 @@ class WebViewFetchBridge @Inject constructor(
             )
             throw IOException("Cloudflare güvenlik doğrulaması gerekiyor. Lütfen 'Doğrula' butonuna dokunun.")
         }
-
         throw IOException("Ekşi Sözlük sunucusundan gerçek zamanlı yanıt alınamadı. İnternet bağlantınızı kontrol edip tekrar deneyin.")
     }
 
@@ -763,6 +792,7 @@ class WebViewFetchBridge @Inject constructor(
 
         val jsCode = """
             (function() {
+                ${bridgePostFunction()}
                 var reqId = $quotedRequestId;
                 var url = $quotedUrl;
                 try {
@@ -775,15 +805,15 @@ class WebViewFetchBridge @Inject constructor(
                         var status = response.status || 200;
                         var finalUrl = response.url || url;
                         return response.text().then(function(bodyText) {
-                            window.$JS_INTERFACE_NAME.onFetchCompleted(reqId, status, finalUrl, bodyText || '');
+                            eksinPost({op:'fetchCompleted', requestId:reqId, statusCode:status, finalUrl:finalUrl, bodyHtml:bodyText || ''});
                         });
                     })
                     .catch(function(error) {
                         var msg = (error && error.message) ? error.message : String(error);
-                        window.$JS_INTERFACE_NAME.onFetchFailed(reqId, msg);
+                        eksinPost({op:'fetchFailed', requestId:reqId, errorMessage:msg});
                     });
                 } catch (outerErr) {
-                    window.$JS_INTERFACE_NAME.onFetchFailed(reqId, String(outerErr));
+                    eksinPost({op:'fetchFailed', requestId:reqId, errorMessage:String(outerErr)});
                 }
             })();
         """.trimIndent()
@@ -898,7 +928,7 @@ class WebViewFetchBridge @Inject constructor(
                 blockNetworkImage = true
                 useWideViewPort = true
                 loadWithOverviewMode = true
-                mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
                 cacheMode = WebSettings.LOAD_DEFAULT
             }
 
@@ -912,13 +942,23 @@ class WebViewFetchBridge @Inject constructor(
             try {
                 val cm = CookieManager.getInstance()
                 cm.setAcceptCookie(true)
-                cm.setAcceptThirdPartyCookies(this, true)
+                cm.setAcceptThirdPartyCookies(this, false)
             } catch (_: Throwable) {
             }
 
-            addJavascriptInterface(JsBridgeCallback(), JS_INTERFACE_NAME)
+            installOriginRestrictedBridge(this)
 
             webViewClient = object : WebViewClient() {
+                override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                    val target = request?.url?.toString()
+                    return !EksiWebOrigins.isAllowedNavigation(target)
+                }
+
+                @Deprecated("Deprecated in API 24")
+                override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean {
+                    return !EksiWebOrigins.isAllowedNavigation(url)
+                }
+
                 override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                     super.onPageStarted(view, url, favicon)
                 }
@@ -989,6 +1029,7 @@ class WebViewFetchBridge @Inject constructor(
         val quotedId = JSONObject.quote(requestId)
         val jsExtract = """
             (function() {
+                ${bridgePostFunction()}
                 var html = document.documentElement ? document.documentElement.outerHTML : '';
                 var hasEksiDom = document.querySelector('#top-bar, .topic-list, #entry-item-list, #title, .sub-navigation') !== null;
                 var titleText = (document.title || '').toLowerCase();
@@ -1000,58 +1041,168 @@ class WebViewFetchBridge @Inject constructor(
                     document.getElementById('cf-challenge-running') !== null ||
                     html.indexOf('cf-browser-verification') !== -1 ||
                     (html.indexOf('__cf_chl_') !== -1 && !hasEksiDom);
-                window.$JS_INTERFACE_NAME.onOuterHtmlExtracted(
-                    $quotedId,
-                    window.location.href || '',
-                    html,
-                    hasEksiDom,
-                    isChallenge,
-                    $attempt
-                );
+                eksinPost({
+                    op: 'outerHtml',
+                    requestId: $quotedId,
+                    finalUrl: window.location.href || '',
+                    bodyHtml: html,
+                    hasEksiDom: hasEksiDom,
+                    isChallenge: isChallenge,
+                    attempt: $attempt
+                });
             })();
         """.trimIndent()
 
         webView.evaluateJavascript(jsExtract, null)
     }
 
-    inner class JsBridgeCallback {
+    private fun bridgePostFunction(): String = """
+        function eksinPost(payload) {
+            var bridge = window.$JS_INTERFACE_NAME;
+            if (!bridge) return;
+            if (typeof bridge.postMessage === 'function') {
+                bridge.postMessage(JSON.stringify(payload));
+                return;
+            }
+            if (payload.op === 'fetchCompleted' && bridge.onFetchCompleted) {
+                bridge.onFetchCompleted(payload.requestId, payload.statusCode || 0, payload.finalUrl || '', payload.bodyHtml || '');
+            } else if (payload.op === 'fetchFailed' && bridge.onFetchFailed) {
+                bridge.onFetchFailed(payload.requestId, payload.errorMessage || '');
+            } else if (payload.op === 'outerHtml' && bridge.onOuterHtmlExtracted) {
+                bridge.onOuterHtmlExtracted(
+                    payload.requestId,
+                    payload.finalUrl || '',
+                    payload.bodyHtml || '',
+                    !!payload.hasEksiDom,
+                    !!payload.isChallenge,
+                    payload.attempt || 0
+                );
+            }
+        }
+    """.trimIndent()
+
+    private fun installOriginRestrictedBridge(webView: WebView) {
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
+            WebViewCompat.addWebMessageListener(
+                webView,
+                JS_INTERFACE_NAME,
+                EksiWebOrigins.MESSAGE_LISTENER_RULES
+            ) { _, message, sourceOrigin, _, _ ->
+                if (!EksiWebOrigins.isAllowedOrigin(sourceOrigin)) return@addWebMessageListener
+                dispatchBridgeMessage(message.data ?: return@addWebMessageListener)
+            }
+        } else {
+            webView.addJavascriptInterface(JsBridgeCallback(webView), JS_INTERFACE_NAME)
+        }
+    }
+
+    private fun dispatchBridgeMessage(json: String) {
+        val payload = try {
+            JSONObject(json)
+        } catch (_: Throwable) {
+            return
+        }
+        when (payload.optString("op")) {
+            "fetchCompleted" -> handleFetchCompleted(
+                requestId = payload.optString("requestId"),
+                statusCode = payload.optInt("statusCode"),
+                finalUrl = payload.optString("finalUrl"),
+                bodyHtml = payload.optString("bodyHtml")
+            )
+            "fetchFailed" -> handleFetchFailed(payload.optString("requestId"))
+            "outerHtml" -> handleOuterHtml(
+                requestId = payload.optString("requestId"),
+                finalUrl = payload.optString("finalUrl"),
+                outerHtml = payload.optString("bodyHtml"),
+                hasEksiDom = payload.optBoolean("hasEksiDom"),
+                isChallenge = payload.optBoolean("isChallenge"),
+                attempt = payload.optInt("attempt")
+            )
+        }
+    }
+
+    private fun handleFetchCompleted(
+        requestId: String,
+        statusCode: Int,
+        finalUrl: String,
+        bodyHtml: String
+    ) {
+        val deferred = pendingFetchRequests.remove(requestId) ?: return
+        val hasValidDom = hasEksiDomElements(bodyHtml)
+        val isChallenge = isCloudflareChallengeHtml(bodyHtml, statusCode, hasValidDom)
+        deferred.complete(
+            FetchBridgeResult(
+                statusCode = statusCode,
+                finalUrl = finalUrl,
+                html = bodyHtml,
+                hasValidEksiDom = hasValidDom,
+                isCloudflareChallenge = isChallenge
+            )
+        )
+    }
+
+    private fun handleFetchFailed(requestId: String) {
+        val deferred = pendingFetchRequests.remove(requestId) ?: return
+        deferred.complete(
+            FetchBridgeResult(
+                statusCode = 0,
+                finalUrl = getActiveBaseDomain(),
+                html = "",
+                hasValidEksiDom = false,
+                isCloudflareChallenge = false
+            )
+        )
+    }
+
+    private fun handleOuterHtml(
+        requestId: String,
+        finalUrl: String,
+        outerHtml: String,
+        hasEksiDom: Boolean,
+        isChallenge: Boolean,
+        attempt: Int
+    ) {
+        if (requestId != pendingPageLoadRequestId) return
+        val deferred = pendingPageLoadDeferred ?: return
+
+        if (isChallenge && !hasEksiDom && attempt < 5) {
+            mainHandler.postDelayed({
+                val view = backgroundWebView
+                if (view != null && requestId == pendingPageLoadRequestId) {
+                    extractOuterHtmlFromWebView(view, requestId, attempt + 1)
+                }
+            }, 850L)
+            return
+        }
+
+        deferred.complete(
+            FetchBridgeResult(
+                statusCode = if (isChallenge && !hasEksiDom) 403 else 200,
+                finalUrl = finalUrl,
+                html = outerHtml,
+                hasValidEksiDom = hasEksiDom || hasEksiDomElements(outerHtml),
+                isCloudflareChallenge = isChallenge && !hasEksiDom
+            )
+        )
+    }
+
+    /**
+     * Fallback for WebViews that cannot install an origin-checked message listener.
+     * Methods no-op unless the main frame is still an allowed Ekşi origin.
+     */
+    inner class JsBridgeCallback(private val webView: WebView) {
+        private fun originAllowed(): Boolean = EksiWebOrigins.isAllowedNavigation(webView.url)
 
         @JavascriptInterface
-        fun onFetchCompleted(
-            requestId: String,
-            statusCode: Int,
-            finalUrl: String,
-            bodyHtml: String
-        ) {
-            val deferred = pendingFetchRequests.remove(requestId) ?: return
-            val hasValidDom = hasEksiDomElements(bodyHtml)
-            val isChallenge = isCloudflareChallengeHtml(bodyHtml, statusCode, hasValidDom)
-            deferred.complete(
-                FetchBridgeResult(
-                    statusCode = statusCode,
-                    finalUrl = finalUrl,
-                    html = bodyHtml,
-                    hasValidEksiDom = hasValidDom,
-                    isCloudflareChallenge = isChallenge
-                )
-            )
+        fun onFetchCompleted(requestId: String, statusCode: Int, finalUrl: String, bodyHtml: String) {
+            if (!originAllowed()) return
+            handleFetchCompleted(requestId, statusCode, finalUrl, bodyHtml)
         }
 
         @JavascriptInterface
-        fun onFetchFailed(
-            requestId: String,
-            errorMessage: String
-        ) {
-            val deferred = pendingFetchRequests.remove(requestId) ?: return
-            deferred.complete(
-                FetchBridgeResult(
-                    statusCode = 0,
-                    finalUrl = getActiveBaseDomain(),
-                    html = "",
-                    hasValidEksiDom = false,
-                    isCloudflareChallenge = false
-                )
-            )
+        fun onFetchFailed(requestId: String, errorMessage: String) {
+            if (!originAllowed()) return
+            handleFetchFailed(requestId)
         }
 
         @JavascriptInterface
@@ -1063,28 +1214,8 @@ class WebViewFetchBridge @Inject constructor(
             isChallenge: Boolean,
             attempt: Int
         ) {
-            if (requestId != pendingPageLoadRequestId) return
-            val deferred = pendingPageLoadDeferred ?: return
-
-            if (isChallenge && !hasEksiDom && attempt < 5) {
-                mainHandler.postDelayed({
-                    val view = backgroundWebView
-                    if (view != null && requestId == pendingPageLoadRequestId) {
-                        extractOuterHtmlFromWebView(view, requestId, attempt + 1)
-                    }
-                }, 850L)
-                return
-            }
-
-            deferred.complete(
-                FetchBridgeResult(
-                    statusCode = if (isChallenge && !hasEksiDom) 403 else 200,
-                    finalUrl = finalUrl,
-                    html = outerHtml,
-                    hasValidEksiDom = hasEksiDom || hasEksiDomElements(outerHtml),
-                    isCloudflareChallenge = isChallenge && !hasEksiDom
-                )
-            )
+            if (!originAllowed()) return
+            handleOuterHtml(requestId, finalUrl, outerHtml, hasEksiDom, isChallenge, attempt)
         }
     }
 
@@ -1143,7 +1274,6 @@ class WebViewFetchBridge @Inject constructor(
         hasValidDom: Boolean
     ): Boolean {
         if (hasValidDom && statusCode in 200..299) return false
-        if (statusCode == 403 || statusCode == 503) return true
         val lower = html.lowercase()
         return lower.contains("just a moment...") ||
             lower.contains("bir dakika lütfen") ||
@@ -1287,27 +1417,18 @@ class WebViewFetchBridge @Inject constructor(
                     return@withContext EMPTY_LEFT_FRAME_HTML
                 }
 
+                val archiveTarget = "https://eksisozluk.com$path"
                 if (path.contains("debe")) {
                     cachedRealDebeHtml?.let { if (hasTopicListElements(it)) return@withContext it }
-                    val debeHtml = fetchRawWaybackHtml("https://eksisozluk.com/debe")
-                    if (!debeHtml.isNullOrBlank() && hasTopicListElements(debeHtml)) {
-                        cachedRealDebeHtml = debeHtml
-                        return@withContext debeHtml
-                    }
                 }
-
-                val gundemHtml = cachedRealGundemHtml?.takeIf { hasTopicListElements(it) }
-                    ?: fetchRawWaybackHtml("https://eksisozluk.com/basliklar/gundem")
-                        ?.takeIf { hasTopicListElements(it) }
-                    ?: fetchRawWaybackHtml("https://eksisozluk.com/")
-                        ?.takeIf { hasTopicListElements(it) }
-
-                if (!gundemHtml.isNullOrBlank()) {
-                    cachedRealGundemHtml = gundemHtml
-                    if (path.contains("/olay")) {
-                        return@withContext gundemHtml.replace("?a=popular", "?a=tracked")
-                    }
-                    return@withContext gundemHtml
+                if (path.contains("/basliklar/gundem")) {
+                    cachedRealGundemHtml?.let { if (hasTopicListElements(it)) return@withContext it }
+                }
+                val archived = fetchRawWaybackHtml(archiveTarget)
+                if (!archived.isNullOrBlank() && hasTopicListElements(archived)) {
+                    if (path.contains("debe")) cachedRealDebeHtml = archived
+                    if (path.contains("/basliklar/gundem")) cachedRealGundemHtml = archived
+                    return@withContext archived
                 }
                 return@withContext null
             }
@@ -1340,12 +1461,6 @@ class WebViewFetchBridge @Inject constructor(
                         return@withContext html
                     }
                 }
-                val fallbackHome = cachedRealGundemHtml
-                    ?: fetchRawWaybackHtml("https://eksisozluk.com/")
-                if (!fallbackHome.isNullOrBlank() && hasEntryListElements(fallbackHome)) {
-                    cachedRealGundemHtml = fallbackHome
-                    return@withContext fallbackHome
-                }
                 return@withContext null
             }
 
@@ -1368,13 +1483,6 @@ class WebViewFetchBridge @Inject constructor(
             if (!topicHtml.isNullOrBlank() && hasEntryListElements(topicHtml)) {
                 recordUrlContentSource(cleanTopicUrl, ContentSource.WAYBACK_ARCHIVE)
                 return@withContext topicHtml
-            }
-
-            val fallbackHome = cachedRealGundemHtml
-                ?: fetchRawWaybackHtml("https://eksisozluk.com/")
-            if (!fallbackHome.isNullOrBlank() && hasEntryListElements(fallbackHome)) {
-                cachedRealGundemHtml = fallbackHome
-                return@withContext fallbackHome
             }
             null
         } catch (e: Throwable) {
@@ -1414,6 +1522,8 @@ class WebViewFetchBridge @Inject constructor(
                 markWaybackNegative(cleanEksiUrl)
                 null
             }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (_: Throwable) {
             markWaybackNegative(cleanEksiUrl)
             null
@@ -1421,43 +1531,45 @@ class WebViewFetchBridge @Inject constructor(
     }
 
     private fun findRealTopicHrefByQuery(query: String): String? {
-        val gundem = cachedRealGundemHtml
-            ?: fetchRawWaybackHtml("https://eksisozluk.com/basliklar/gundem")
-            ?: fetchRawWaybackHtml("https://eksisozluk.com/")
+        val cachedGundem = cachedRealGundemHtml
+        val fetchedGundem = if (cachedGundem != null) null else fetchRawWaybackHtml("https://eksisozluk.com/basliklar/gundem")
+        if (!fetchedGundem.isNullOrBlank()) {
+            cachedRealGundemHtml = fetchedGundem
+        }
+        val gundem = cachedGundem ?: fetchedGundem ?: fetchRawWaybackHtml("https://eksisozluk.com/")
         if (gundem.isNullOrBlank()) return null
-        cachedRealGundemHtml = gundem
 
         return try {
             val doc = Jsoup.parse(gundem, PRIMARY_DOMAIN)
             val links = doc.select("ul.topic-list li a[href]")
             val normalizedQuery = query.trim().lowercase()
-            val exactOrPartial = links.firstOrNull { a ->
-                val text = a.ownText().ifBlank { a.text() }.trim().lowercase()
-                text == normalizedQuery || text.contains(normalizedQuery) || normalizedQuery.contains(text)
-            } ?: links.firstOrNull()
-            exactOrPartial?.attr("href")
+            val pairs = links.map { anchor ->
+                val text = anchor.ownText().ifBlank { anchor.text() }
+                text to anchor.attr("href")
+            }
+            ArchiveMatch.selectTopicHref(pairs, normalizedQuery)
         } catch (_: Throwable) {
             null
         }
     }
 
     private fun buildRealSearchHtmlFromMirror(keywords: String): String? {
-        val gundem = cachedRealGundemHtml
-            ?: fetchRawWaybackHtml("https://eksisozluk.com/basliklar/gundem")
-            ?: fetchRawWaybackHtml("https://eksisozluk.com/")
+        val cachedGundem = cachedRealGundemHtml
+        val fetchedGundem = if (cachedGundem != null) null else fetchRawWaybackHtml("https://eksisozluk.com/basliklar/gundem")
+        if (!fetchedGundem.isNullOrBlank()) {
+            cachedRealGundemHtml = fetchedGundem
+        }
+        val gundem = cachedGundem ?: fetchedGundem ?: fetchRawWaybackHtml("https://eksisozluk.com/")
         if (gundem.isNullOrBlank()) return null
-        cachedRealGundemHtml = gundem
 
         return try {
             val doc = Jsoup.parse(gundem, PRIMARY_DOMAIN)
             val allLis = doc.select("ul.topic-list li:has(a[href])")
             val cleanQuery = keywords.trim().lowercase()
-            val matched = if (cleanQuery.isBlank()) {
-                allLis
-            } else {
-                allLis.filter { li ->
-                    li.text().lowercase().contains(cleanQuery)
-                }.ifEmpty { allLis.take(15) }
+            val matchedIndexes = ArchiveMatch.matchingIndexes(allLis.map { it.text() }, cleanQuery)
+            val matched = matchedIndexes.map { allLis[it] }
+            if (matched.isEmpty()) {
+                return EMPTY_SEARCH_HTML
             }
 
             val itemsHtml = matched.joinToString("\n") { it.outerHtml() }
@@ -1493,7 +1605,8 @@ class WebViewFetchBridge @Inject constructor(
             "https://eksisozluk1923.com"
         )
 
-        private const val FETCH_HTML_TOTAL_TIMEOUT_MS = 30_000L
+        private const val LIVE_FETCH_BUDGET_MS = 28_000L
+        private const val ARCHIVE_FETCH_BUDGET_MS = 12_000L
         private const val RESPONSE_TTL_MS = 90_000L
         private const val WAYBACK_NEGATIVE_TTL_MS = 5 * 60_000L
         private const val WEBVIEW_IDLE_TIMEOUT_MS = 5 * 60_000L

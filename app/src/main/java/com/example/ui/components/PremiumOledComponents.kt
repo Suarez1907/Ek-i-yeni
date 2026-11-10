@@ -67,7 +67,8 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
-import com.example.ui.theme.ActiveThemeState
+import androidx.compose.ui.draw.drawBehind
+import com.example.ui.theme.LocalAppThemeMode
 import com.example.ui.theme.AppThemeMode
 import com.example.ui.theme.EksiNeonGreen
 import com.example.ui.theme.OledCardSurface
@@ -82,9 +83,9 @@ import com.example.ui.theme.OledTextSecondary
  * Aktif temaya (OLED Siyah, Koyu Gri, Klasik Beyaz) duyarlı Skeleton Shimmer fırçası.
  */
 @Composable
-fun rememberOledShimmerBrush(): Brush {
+fun Modifier.oledShimmerBackground(): Modifier {
     val transition = rememberInfiniteTransition(label = "oled_skeleton_shimmer")
-    val translateAnim by transition.animateFloat(
+    val translateAnim = transition.animateFloat(
         initialValue = -300f,
         targetValue = 1200f,
         animationSpec = infiniteRepeatable(
@@ -93,8 +94,7 @@ fun rememberOledShimmerBrush(): Brush {
         ),
         label = "shimmer_translate"
     )
-
-    val shimmerColors = when (ActiveThemeState.currentMode) {
+    val shimmerColors = when (LocalAppThemeMode.current) {
         AppThemeMode.OLED_BLACK -> listOf(
             Color(0xFF0E0E0E),
             Color(0xFF1A221B),
@@ -118,11 +118,16 @@ fun rememberOledShimmerBrush(): Brush {
         )
     }
 
-    return Brush.linearGradient(
-        colors = shimmerColors,
-        start = Offset(x = translateAnim - 250f, y = 0f),
-        end = Offset(x = translateAnim + 250f, y = 180f)
-    )
+    return this.drawBehind {
+        val x = translateAnim.value
+        drawRect(
+            brush = Brush.linearGradient(
+                colors = shimmerColors,
+                start = Offset(x = x - 250f, y = 0f),
+                end = Offset(x = x + 250f, y = 180f)
+            )
+        )
+    }
 }
 
 /**
@@ -135,7 +140,6 @@ fun TopicListSkeletonShimmer(
     itemCount: Int = 11,
     modifier: Modifier = Modifier
 ) {
-    val brush = rememberOledShimmerBrush()
     val widthFractions = remember {
         listOf(0.76f, 0.58f, 0.84f, 0.64f, 0.72f, 0.52f, 0.80f, 0.68f, 0.60f, 0.75f, 0.62f)
     }
@@ -164,7 +168,7 @@ fun TopicListSkeletonShimmer(
                             .fillMaxWidth(fraction)
                             .height(15.dp)
                             .clip(RoundedCornerShape(6.dp))
-                            .background(brush)
+                            .oledShimmerBackground()
                     )
                     if (idx % 3 == 0) {
                         Box(
@@ -172,7 +176,7 @@ fun TopicListSkeletonShimmer(
                                 .fillMaxWidth(0.38f)
                                 .height(10.dp)
                                 .clip(RoundedCornerShape(4.dp))
-                                .background(brush)
+                                .oledShimmerBackground()
                         )
                     }
                 }
@@ -182,7 +186,7 @@ fun TopicListSkeletonShimmer(
                         .width(42.dp)
                         .height(24.dp)
                         .clip(RoundedCornerShape(50))
-                        .background(brush)
+                        .oledShimmerBackground()
                 )
             }
             HorizontalDivider(color = OledHairlineDivider, thickness = 0.5.dp)
@@ -199,8 +203,6 @@ fun EntryListSkeletonShimmer(
     cardCount: Int = 4,
     modifier: Modifier = Modifier
 ) {
-    val brush = rememberOledShimmerBrush()
-
     Column(
         modifier = modifier
             .fillMaxWidth()
@@ -226,21 +228,21 @@ fun EntryListSkeletonShimmer(
                             .fillMaxWidth(0.95f)
                             .height(14.dp)
                             .clip(RoundedCornerShape(5.dp))
-                            .background(brush)
+                            .oledShimmerBackground()
                     )
                     Box(
                         modifier = Modifier
                             .fillMaxWidth(0.88f)
                             .height(14.dp)
                             .clip(RoundedCornerShape(5.dp))
-                            .background(brush)
+                            .oledShimmerBackground()
                     )
                     Box(
                         modifier = Modifier
                             .fillMaxWidth(if (idx % 2 == 0) 0.72f else 0.54f)
                             .height(14.dp)
                             .clip(RoundedCornerShape(5.dp))
-                            .background(brush)
+                            .oledShimmerBackground()
                     )
 
                     Spacer(modifier = Modifier.height(6.dp))
@@ -256,7 +258,7 @@ fun EntryListSkeletonShimmer(
                                 .width(64.dp)
                                 .height(26.dp)
                                 .clip(RoundedCornerShape(50))
-                                .background(brush)
+                                .oledShimmerBackground()
                         )
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
@@ -266,7 +268,7 @@ fun EntryListSkeletonShimmer(
                                 modifier = Modifier
                                     .size(26.dp)
                                     .clip(CircleShape)
-                                    .background(brush)
+                                    .oledShimmerBackground()
                             )
                             Column(
                                 horizontalAlignment = Alignment.End,
@@ -277,14 +279,14 @@ fun EntryListSkeletonShimmer(
                                         .width(84.dp)
                                         .height(12.dp)
                                         .clip(RoundedCornerShape(4.dp))
-                                        .background(brush)
+                                        .oledShimmerBackground()
                                 )
                                 Box(
                                     modifier = Modifier
                                         .width(60.dp)
                                         .height(10.dp)
                                         .clip(RoundedCornerShape(4.dp))
-                                        .background(brush)
+                                        .oledShimmerBackground()
                                 )
                             }
                         }
@@ -364,7 +366,7 @@ fun FloatingPagerCapsuleBar(
         )
     }
 
-    val isLight = ActiveThemeState.currentMode == AppThemeMode.CLASSIC_LIGHT
+    val isLight = LocalAppThemeMode.current == AppThemeMode.CLASSIC_LIGHT
     val frostedGlassBrush = if (isLight) {
         Brush.verticalGradient(
             colors = listOf(

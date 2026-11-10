@@ -7,9 +7,15 @@ import coil.ImageLoader
 import coil.ImageLoaderFactory
 import coil.disk.DiskCache
 import coil.memory.MemoryCache
-import com.example.di.AppModule
+import com.example.data.repository.EksiRepository
+import com.example.di.ViewModelCacheCleaner
+import com.example.network.WebViewFetchBridge
 import com.example.util.PerfLog
+import dagger.hilt.android.EntryPointAccessors
+import dagger.hilt.EntryPoint
+import dagger.hilt.InstallIn
 import dagger.hilt.android.HiltAndroidApp
+import dagger.hilt.components.SingletonComponent
 
 @HiltAndroidApp
 class EksinApplication : Application(), ComponentCallbacks2, ImageLoaderFactory {
@@ -18,8 +24,6 @@ class EksinApplication : Application(), ComponentCallbacks2, ImageLoaderFactory 
         val startMs = SystemClock.elapsedRealtime()
         appLaunchStartRealtimeMs = startMs
         super.onCreate()
-        // Cold start performansını korumak için AppModule.getContainer(this) burada ÇAĞRILMAZ.
-        // Bağımlılıklar ilk erişimde tembel (lazy) olarak başlatılır.
         PerfLog.logDuration("Application.onCreate", SystemClock.elapsedRealtime() - startMs)
     }
 
@@ -29,13 +33,20 @@ class EksinApplication : Application(), ComponentCallbacks2, ImageLoaderFactory 
             level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL ||
             level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW
         ) {
-            AppModule.clearMemoryCachesIfInitialized()
+            clearMemoryCaches()
         }
     }
 
     override fun onLowMemory() {
         super.onLowMemory()
-        AppModule.clearMemoryCachesIfInitialized()
+        clearMemoryCaches()
+    }
+
+    private fun clearMemoryCaches() {
+        val entryPoint = EntryPointAccessors.fromApplication(this, CacheEntryPoint::class.java)
+        entryPoint.repository().clearMemoryCaches()
+        entryPoint.webViewFetchBridge().clearMemoryCaches()
+        entryPoint.viewModelCacheCleaner().clear()
     }
 
     override fun newImageLoader(): ImageLoader {
@@ -52,7 +63,7 @@ class EksinApplication : Application(), ComponentCallbacks2, ImageLoaderFactory 
                     .build()
             }
             .crossfade(true)
-            .respectCacheHeaders(false)
+            .respectCacheHeaders(true)
             .build()
     }
 
@@ -60,4 +71,12 @@ class EksinApplication : Application(), ComponentCallbacks2, ImageLoaderFactory 
         @Volatile
         var appLaunchStartRealtimeMs: Long = SystemClock.elapsedRealtime()
     }
+}
+
+@EntryPoint
+@InstallIn(SingletonComponent::class)
+interface CacheEntryPoint {
+    fun repository(): EksiRepository
+    fun webViewFetchBridge(): WebViewFetchBridge
+    fun viewModelCacheCleaner(): ViewModelCacheCleaner
 }

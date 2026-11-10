@@ -102,4 +102,66 @@ class ExampleUnitTest {
         assertNotNull(firstEntry.annotatedContent)
         assertTrue(firstEntry.plainText.contains("jetpack compose"))
     }
+
+    @Test
+    fun inTopicSearch_doesNotInventEntriesWhenNothingMatches() {
+        val html = """
+            <div id="topic"><h1 id="title" data-title="test" data-id="1"><a href="/test--1">test</a></h1>
+            <ul id="entry-item-list">
+              <li data-id="10" data-author="a" data-favorite-count="1">
+                <div class="content">kediler hakkında bir entry</div>
+              </li>
+            </ul></div>
+        """.trimIndent()
+        val page = parser.parseTopicPage(
+            html = html,
+            requestedUrl = "https://eksisozluk.com/test--1?a=search&keywords=zzzz-yok",
+            fallbackPage = 1
+        )
+        assertTrue(page.entries.isEmpty())
+    }
+
+    @Test
+    fun normalizeUrl_doesNotPrefixJavascript() {
+        assertEquals("", parser.normalizeUrl("javascript:alert(1)"))
+        assertTrue(parser.normalizeUrl("/entry/10").startsWith("https://eksisozluk.com/entry/10"))
+    }
+
+    @Test
+    fun parseEntryDetailMetadata_selectsRequestedEntryNotFirstInDocument() {
+        val html = """
+            <div id="topic"><h1 id="title" data-title="başlık">başlık</h1>
+            <ul id="entry-item-list">
+              <li data-id="111" data-author="ilk" data-favorite-count="3"><div class="content">a</div></li>
+              <li data-id="222" data-author="ikinci" data-favorite-count="9"><div class="content">b</div></li>
+            </ul></div>
+        """.trimIndent()
+        val metadata = parser.parseEntryDetailMetadata(html, targetEntryId = "222")
+        assertNotNull(metadata)
+        assertEquals("222", metadata!!.entryId)
+        assertEquals(9, metadata.favoriteCount)
+        assertEquals("ikinci", metadata.author)
+    }
+
+    @Test
+    fun hiddenBkz_requiresClassTokenNotSubstring() {
+        val html = """
+            <div id="topic"><h1 id="title" data-title="başlık" data-id="1"><a href="/x--1">başlık</a></h1>
+            <ul id="entry-item-list">
+              <li data-id="10" data-author="a" data-favorite-count="1">
+                <div class="content">
+                  <a class="subtitle" href="https://example.com">*</a>
+                  <sup class="ab"><a class="b" href="/?q=gercek">*</a></sup>
+                </div>
+              </li>
+            </ul></div>
+        """.trimIndent()
+        val page = parser.parseTopicPage(html, "https://eksisozluk.com/x--1", 1)
+        val annotations = page.entries.first().annotatedContent.getStringAnnotations(
+            0,
+            page.entries.first().annotatedContent.length
+        )
+        assertTrue(annotations.any { it.tag == EksiParser.TAG_HIDDEN_BKZ && it.item.contains("gercek") })
+        assertTrue(annotations.none { it.tag == EksiParser.TAG_HIDDEN_BKZ && it.item.contains("example") })
+    }
 }
