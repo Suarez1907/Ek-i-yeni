@@ -177,10 +177,6 @@ class GeminiHelper @Inject constructor(
         .writeTimeout(25, TimeUnit.SECONDS)
         .build()
 
-    init {
-        migrateLegacyPlainTextKeyIfNeeded()
-    }
-
     /**
      * Eski sürümde düz metin (`gemini_api_key`) olarak kaydedilmiş bir anahtar varsa,
      * ilk okumada Android Keystore (`AES/GCM/NoPadding`) ile şifrelenmiş formata taşır

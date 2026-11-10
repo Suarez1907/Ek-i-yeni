@@ -111,6 +111,8 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import coil.compose.SubcomposeAsyncImage
+import coil.request.ImageRequest
+import coil.size.Precision
 import com.example.ai.GeminiAnalysisMode
 import com.example.data.model.EntryItem
 import com.example.data.model.TopicFilterMode
@@ -1262,7 +1264,12 @@ private fun InlineEntryImagePreview(
                     Text("Üçüncü taraf görseli yükle", color = EksiNeonGreen)
                 }
             } else SubcomposeAsyncImage(
-                model = imageUrl,
+                model = ImageRequest.Builder(LocalContext.current)
+                    .data(imageUrl)
+                    .size(1080, 720)
+                    .precision(Precision.INEXACT)
+                    .crossfade(false)
+                    .build(),
                 contentDescription = "Entry içi görsel önizleme",
                 contentScale = ContentScale.FillWidth,
                 modifier = Modifier

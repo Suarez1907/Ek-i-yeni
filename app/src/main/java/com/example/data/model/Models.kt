@@ -1,10 +1,12 @@
 package com.example.data.model
 
+import androidx.compose.runtime.Immutable
 import androidx.compose.ui.text.AnnotatedString
 
 /**
  * Sol frame (Gündem, Bugün, Debe, Olaylar, Kanallar) ve Arama sonuçlarındaki başlık modeli.
  */
+@Immutable
 data class TopicItem(
     val id: String,
     val title: String,
@@ -17,10 +19,9 @@ data class TopicItem(
 ) {
     /**
      * Sorgu parametrelerinden (`?a=popular`, `?a=tracked`, `?p=...`) arındırılmış
-     * kanonik başlık URL'si.
+     * kanonik başlık URL'si. Stored so list scrolling does not allocate it again.
      */
-    val cleanUrl: String
-        get() = url.substringBefore('?')
+    val cleanUrl: String = url.substringBefore('?')
 }
 
 /**
@@ -30,6 +31,7 @@ data class TopicItem(
  * - [date]: Oluşturulma tarihi
  * - [editDate]: Varsa düzenlenme tarihi (`~` sonrası kısım), yoksa `null`
  */
+@Immutable
 data class EntryItem(
     val id: String,
     val contentHtml: String,
@@ -176,6 +178,7 @@ enum class PeriodicRankingTab(val title: String) {
 /**
  * DEBE veya Dönemsel Enler listesinde gösterilen sıralı entry/başlık öğesi.
  */
+@Immutable
 data class RankedTopicOrEntryItem(
     val rank: Int,
     val id: String,
