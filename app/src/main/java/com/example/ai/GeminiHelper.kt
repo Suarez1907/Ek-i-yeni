@@ -85,6 +85,10 @@ enum class GeminiAnalysisMode(val title: String, val subtitle: String) {
     PERSONAL_LABEL(
         title = "Gündem etiketi",
         subtitle = "Yerel okuma sırasındaki başlıklara kısa bir ad verir"
+    ),
+    SOCIAL_DISCUSSION(
+        title = "Sosyal tartışma özeti",
+        subtitle = "Reddit veya X gönderilerini 5 maddede Türkçe özetler"
     )
 }
 
@@ -1007,6 +1011,10 @@ class GeminiHelper @Inject constructor(
                 entries.firstOrNull() ?: return "Açıklanacak entry yok."
             )
             GeminiAnalysisMode.PERSONAL_LABEL -> AiPrompts.personalLabel(listOf(topicTitle))
+            GeminiAnalysisMode.SOCIAL_DISCUSSION -> AiPrompts.socialSummary(
+                topicTitle,
+                entries.map { it.plainText }
+            )
         }
     }
 

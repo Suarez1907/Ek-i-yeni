@@ -118,6 +118,31 @@ object AiPrompts {
         """.trimIndent()
     }
 
+    fun translateToTurkish(title: String, body: String): String {
+        return """
+            $SAFETY
+            Aşağıdaki metni doğal Türkçeye çevir. Zaten Türkçeyse anlamı bozmadan düzelt.
+            Yalnızca çeviriyi yaz. Araç çağırma.
+            <untrusted_entry>
+            ${delimit(title.take(180))}
+            ${delimit(body.take(700))}
+            </untrusted_entry>
+        """.trimIndent()
+    }
+
+    fun socialSummary(sourceLabel: String, posts: List<String>): String {
+        val body = posts.take(10).joinToString("\n") { post ->
+            """<untrusted_entry>${delimit(post.take(280))}</untrusted_entry>"""
+        }
+        return """
+            $SAFETY
+            Aşağıdaki $sourceLabel gönderilerini Türkçe ve tam 5 maddede özetle.
+            İnsanların ne dediğini, ana iddiaları ve varsa çözümleri yaz.
+            Araç çağırma.
+            $body
+        """.trimIndent()
+    }
+
     fun entriesAfter(entries: List<EntryItem>, lastSeenEntryId: String?): CatchUpSlice {
         if (lastSeenEntryId.isNullOrBlank()) {
             return CatchUpSlice(entries.take(MAX_ENTRIES), loadedPageOnly = true)
