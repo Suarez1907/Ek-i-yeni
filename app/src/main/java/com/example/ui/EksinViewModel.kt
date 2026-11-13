@@ -49,12 +49,18 @@ import com.example.ai.GeminiModels
 import com.example.data.repository.EksiRepository
 import com.example.di.ViewModelCacheCleaner
 import com.example.network.CloudflareChallengeEvent
+import com.example.network.RedditCommentsPage
+import com.example.network.SocialFeedHelper
+import com.example.network.SocialFeedKind
+import com.example.network.extractSmartSearchQuery
 import com.example.network.CloudflareChallengeManager
 import com.example.network.ContentSource
 import com.example.network.UserAgentProvider
 import com.example.network.WebViewCookieJar
 import com.example.network.WebViewFetchBridge
 import com.example.ui.auth.AuthWebViewMode
+import com.example.ui.social.CardTranslation
+import com.example.ui.social.SocialFeedUi
 import com.example.ui.sheets.BkzPreviewUiState
 import com.example.ui.theme.AppThemeMode
 import com.example.ui.theme.ThemePreferencesManager
@@ -180,6 +186,7 @@ class EksinViewModel @Inject constructor(
     private val aiGateway: AiTextGateway,
     private val secretStore: EncryptedSecretStore,
     private val onDevicePrompt: OnDevicePromptAssistant,
+    private val socialFeedHelper: SocialFeedHelper,
     private val viewModelCacheCleaner: ViewModelCacheCleaner,
     private val savedStateHandle: SavedStateHandle
 ) : ViewModel() {
@@ -330,6 +337,14 @@ class EksinViewModel @Inject constructor(
 
     private val _naturalLanguageStatus = MutableStateFlow<String?>(null)
     val naturalLanguageStatus: StateFlow<String?> = _naturalLanguageStatus.asStateFlow()
+
+    private val _socialFeed = MutableStateFlow<SocialFeedUi?>(null)
+    val socialFeed: StateFlow<SocialFeedUi?> = _socialFeed.asStateFlow()
+
+    private val _socialTranslations = MutableStateFlow<Map<String, CardTranslation>>(emptyMap())
+    val socialTranslations: StateFlow<Map<String, CardTranslation>> = _socialTranslations.asStateFlow()
+    private var socialJob: Job? = null
+    private val socialTranslationJobs = HashMap<String, Job>()
 
     private val filterHideCache = ConcurrentHashMap<String, Boolean>()
 
@@ -891,6 +906,7 @@ class EksinViewModel @Inject constructor(
         topic: TopicItem,
         preferTodayMode: Boolean = true
     ) {
+        closeSocialFeed()
         openTopicJob?.cancel()
         activePageLoadJob?.cancel()
         activePrefetchJob?.cancel()
@@ -1234,6 +1250,7 @@ class EksinViewModel @Inject constructor(
      * "TÜMÜNÜ GÖSTER (İlk Entry'den İtibaren Tüm Başlığı Yükle)" Butonu Aksiyonu:
      */
     fun showAllTopicEntriesFromFirstPage() {
+        closeSocialFeed()
         val current = _selectedTopic.value ?: return
         val metadata = _activeTopicMetadata.value
         val resolvedCleanUrl = metadata?.cleanTopicUrl?.takeIf {
@@ -1385,6 +1402,7 @@ class EksinViewModel @Inject constructor(
     }
 
     fun selectTopicFilterMode(mode: TopicFilterMode) {
+        closeSocialFeed()
         if (mode == TopicFilterMode.ALL) {
             showAllTopicEntriesFromFirstPage()
             return
@@ -1416,6 +1434,7 @@ class EksinViewModel @Inject constructor(
     }
 
     fun closeTopicDetail() {
+        closeSocialFeed()
         activePageLoadJob?.cancel()
         activePrefetchJob?.cancel()
         pageMemoryCache.clear()
@@ -1814,6 +1833,210 @@ class EksinViewModel @Inject constructor(
             topicTitle = topicTitle,
             entries = entries
         )
+    }
+
+    fun openSocialFeed(kind: SocialFeedKind, topicTitle: String, entryTexts: List<String>) {
+        if (_socialFeed.value?.kind == kind) {
+            closeSocialFeed()
+            return
+        }
+        val query = _socialFeed.value?.query?.takeIf { it.isNotBlank() }
+            ?: extractSmartSearchQuery(topicTitle)
+        startSocialLoad(kind, query, entryTexts, force = false)
+    }
+
+    fun updateSocialQueryDraft(draft: String) {
+        val current = _socialFeed.value ?: return
+        _socialFeed.value = current.copy(queryDraft = draft)
+    }
+
+    fun refreshSocialFeed(entryTexts: List<String>) {
+        val current = _socialFeed.value ?: return
+        val query = current.queryDraft.trim().ifBlank { current.query }
+        if (query.isBlank()) return
+        startSocialLoad(current.kind, query, entryTexts, force = true)
+    }
+
+    fun closeSocialFeed() {
+        socialJob?.cancel()
+        socialJob = null
+        socialTranslationJobs.values.forEach { it.cancel() }
+        socialTranslationJobs.clear()
+        _socialFeed.value = null
+        _socialTranslations.value = emptyMap()
+    }
+
+    suspend fun loadRedditComments(permalink: String): RedditCommentsPage {
+        return socialFeedHelper.fetchRedditComments(permalink)
+    }
+
+    fun toggleSocialTranslation(postId: String, title: String, body: String) {
+        val current = _socialTranslations.value[postId]
+        if (current?.loading == true) {
+            socialTranslationJobs.remove(postId)?.cancel()
+            putSocialTranslation(postId, current.copy(loading = false))
+            return
+        }
+        if (!current?.text.isNullOrBlank()) {
+            putSocialTranslation(postId, current!!.copy(showing = !current.showing, error = null))
+            return
+        }
+        val config = _aiConfig.value
+        val ready = when (config.provider) {
+            AiProviderId.GEMINI -> geminiHelper.hasValidApiKey()
+            AiProviderId.OPENAI_COMPATIBLE -> secretStore.has(AiTextGateway.OPENAI_SECRET)
+        }
+        if (!ready) {
+            val message = if (config.provider == AiProviderId.GEMINI) {
+                "Gemini anahtarı yok."
+            } else {
+                "OpenAI uyumlu anahtar yok."
+            }
+            putSocialTranslation(postId, CardTranslation(error = message))
+            return
+        }
+        socialTranslationJobs[postId]?.cancel()
+        socialTranslationJobs[postId] = viewModelScope.launch {
+            putSocialTranslation(postId, CardTranslation(loading = true))
+            val buffer = StringBuilder()
+            var lastPaint = 0L
+            try {
+                aiGateway.stream(AiPrompts.translateToTurkish(title, body)).collect { chunk ->
+                    when (chunk) {
+                        is AiTextChunk.Delta -> {
+                            buffer.append(chunk.text)
+                            val now = android.os.SystemClock.elapsedRealtime()
+                            if (now - lastPaint >= 80L) {
+                                lastPaint = now
+                                putSocialTranslation(
+                                    postId,
+                                    CardTranslation(loading = true, text = buffer.toString(), showing = true)
+                                )
+                            }
+                        }
+                        is AiTextChunk.Done -> {
+                            val full = buffer.toString().trim()
+                            putSocialTranslation(
+                                postId,
+                                CardTranslation(
+                                    text = full.ifBlank { null },
+                                    showing = full.isNotBlank(),
+                                    error = if (full.isBlank()) "Çeviri boş döndü." else null
+                                )
+                            )
+                        }
+                        is AiTextChunk.Failure -> {
+                            putSocialTranslation(postId, CardTranslation(error = chunk.message))
+                        }
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                putSocialTranslation(postId, CardTranslation(error = error.message ?: "Çeviri alınamadı."))
+            }
+        }
+    }
+
+    fun summarizeSocialFeed() {
+        val feed = _socialFeed.value ?: return
+        val lines = if (feed.kind == SocialFeedKind.REDDIT) {
+            feed.reddit.posts.map { post -> "${post.title}\n${post.selfText}" }
+        } else {
+            (feed.x.shared + feed.x.recent).map { post -> "${post.author}: ${post.text}" }
+        }
+        if (lines.isEmpty()) {
+            _geminiStreamState.value = GeminiStreamState.Error(
+                mode = GeminiAnalysisMode.SOCIAL_DISCUSSION,
+                message = "Özetlenecek gönderi yok."
+            )
+            return
+        }
+        val label = if (feed.kind == SocialFeedKind.REDDIT) "Reddit" else "X"
+        launchTextStream(
+            mode = GeminiAnalysisMode.SOCIAL_DISCUSSION,
+            prompt = AiPrompts.socialSummary(label, lines),
+            cacheKey = "social|$label|${feed.query}|${lines.size}"
+        )
+    }
+
+    private fun startSocialLoad(
+        kind: SocialFeedKind,
+        query: String,
+        entryTexts: List<String>,
+        force: Boolean
+    ) {
+        socialJob?.cancel()
+        val texts = entryTexts
+        val previousDraft = _socialFeed.value?.queryDraft
+        _socialFeed.value = SocialFeedUi(
+            kind = kind,
+            query = query,
+            queryDraft = previousDraft?.takeIf { _socialFeed.value?.kind == kind } ?: query,
+            loading = true,
+            reddit = if (kind == SocialFeedKind.REDDIT) {
+                _socialFeed.value?.reddit ?: com.example.network.RedditPage()
+            } else {
+                com.example.network.RedditPage()
+            },
+            x = if (kind == SocialFeedKind.X) {
+                _socialFeed.value?.x ?: com.example.network.XFeedResult()
+            } else {
+                com.example.network.XFeedResult()
+            }
+        )
+        socialJob = viewModelScope.launch {
+            try {
+                when (kind) {
+                    SocialFeedKind.REDDIT -> {
+                        val page = socialFeedHelper.fetchRedditPosts(query, force)
+                        val draft = _socialFeed.value?.queryDraft ?: query
+                        if (_socialFeed.value?.kind != SocialFeedKind.REDDIT) return@launch
+                        _socialFeed.value = SocialFeedUi(
+                            kind = kind,
+                            query = query,
+                            queryDraft = draft,
+                            loading = false,
+                            reddit = page
+                        )
+                    }
+                    SocialFeedKind.X -> {
+                        val feed = socialFeedHelper.fetchXPosts(query, texts, force)
+                        val draft = _socialFeed.value?.queryDraft ?: query
+                        if (_socialFeed.value?.kind != SocialFeedKind.X) return@launch
+                        _socialFeed.value = SocialFeedUi(
+                            kind = kind,
+                            query = query,
+                            queryDraft = draft,
+                            loading = false,
+                            x = feed
+                        )
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                val current = _socialFeed.value ?: return@launch
+                val message = error.message ?: "Sosyal akış alınamadı."
+                _socialFeed.value = if (kind == SocialFeedKind.REDDIT) {
+                    current.copy(
+                        loading = false,
+                        reddit = current.reddit.copy(
+                            error = message,
+                            openUrl = com.example.network.redditSearchUrl(query)
+                        )
+                    )
+                } else {
+                    current.copy(loading = false, x = current.x.copy(recentNote = message))
+                }
+            }
+        }
+    }
+
+    private fun putSocialTranslation(postId: String, value: CardTranslation) {
+        _socialTranslations.value = _socialTranslations.value.toMutableMap().apply {
+            this[postId] = value
+        }
     }
 
     fun clearGeminiStream() {

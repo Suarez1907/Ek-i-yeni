@@ -120,6 +120,7 @@ import coil.size.Precision
 import com.example.ai.AiPrompts
 import com.example.ai.AiProviderId
 import com.example.ai.GeminiAnalysisMode
+import com.example.network.SocialFeedKind
 import com.example.data.model.EntryItem
 import com.example.data.model.TopicFilterMode
 import com.example.data.model.TopicItem
@@ -132,6 +133,7 @@ import com.example.ui.components.ThemeSelectorDialog
 import com.example.ui.components.oledShimmerBackground
 import com.example.ui.sheets.BkzPreviewBottomSheet
 import com.example.ui.sheets.GeminiSummaryBottomSheet
+import com.example.ui.social.SocialFeedPane
 import com.example.ui.theme.ActiveThemeState
 import com.example.ui.theme.AppThemeMode
 import com.example.ui.theme.EksiDeepGreen
@@ -191,6 +193,8 @@ fun TopicDetailScreen(
     val discussionPoints by viewModel.discussionPoints.collectAsStateWithLifecycle()
     val catchUpAvailable by viewModel.catchUpAvailable.collectAsStateWithLifecycle()
     val catchUpAnchorEntryId by viewModel.catchUpAnchorEntryId.collectAsStateWithLifecycle()
+    val socialFeed by viewModel.socialFeed.collectAsStateWithLifecycle()
+    val socialTranslations by viewModel.socialTranslations.collectAsStateWithLifecycle()
     val geminiKeyWarning by viewModel.geminiKeyDecryptionWarning.collectAsStateWithLifecycle()
     val themeMode by viewModel.themeMode.collectAsStateWithLifecycle()
     val showThemeDialog by viewModel.showThemeDialog.collectAsStateWithLifecycle()
@@ -495,10 +499,16 @@ fun TopicDetailScreen(
                     )
 
                     chipItems.forEach { (mode, label) ->
-                        val isSelected = activeFilterMode == mode
+                        val isSelected = socialFeed == null && activeFilterMode == mode
                         FilterChip(
                             selected = isSelected,
-                            onClick = { viewModel.selectTopicFilterMode(mode) },
+                            onClick = {
+                                if (socialFeed != null && activeFilterMode == mode) {
+                                    viewModel.closeSocialFeed()
+                                } else {
+                                    viewModel.selectTopicFilterMode(mode)
+                                }
+                            },
                             shape = RoundedCornerShape(50),
                             label = {
                                 Text(
@@ -522,6 +532,47 @@ fun TopicDetailScreen(
                             modifier = Modifier.testTag("topic_filter_${mode.name.lowercase()}")
                         )
                     }
+
+                    FilterChip(
+                        selected = socialFeed?.kind == SocialFeedKind.X,
+                        onClick = {
+                            viewModel.openSocialFeed(
+                                kind = SocialFeedKind.X,
+                                topicTitle = activeTitle,
+                                entryTexts = currentEntries.map { entry ->
+                                    entry.contentHtml + "\n" + entry.plainText
+                                }
+                            )
+                        },
+                        shape = RoundedCornerShape(50),
+                        label = {
+                            Text(
+                                text = "🐦 X",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        },
+                        modifier = Modifier.testTag("chip_social_x")
+                    )
+                    FilterChip(
+                        selected = socialFeed?.kind == SocialFeedKind.REDDIT,
+                        onClick = {
+                            viewModel.openSocialFeed(
+                                kind = SocialFeedKind.REDDIT,
+                                topicTitle = activeTitle,
+                                entryTexts = emptyList()
+                            )
+                        },
+                        shape = RoundedCornerShape(50),
+                        label = {
+                            Text(
+                                text = "👽 Reddit",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        },
+                        modifier = Modifier.testTag("chip_social_reddit")
+                    )
 
                     // ✨ AI Özet Çipi
                     AssistChip(
@@ -815,7 +866,29 @@ fun TopicDetailScreen(
                 }
 
                 else -> {
-                    LazyColumn(
+                    val feed = socialFeed
+                    if (feed != null) {
+                        SocialFeedPane(
+                            state = feed,
+                            translations = socialTranslations,
+                            userAgent = viewModel.userAgentProvider.getUserAgent(),
+                            onQueryDraft = viewModel::updateSocialQueryDraft,
+                            onRefresh = {
+                                viewModel.refreshSocialFeed(
+                                    if (feed.kind == SocialFeedKind.X) {
+                                        currentEntries.map { entry ->
+                                            entry.contentHtml + "\n" + entry.plainText
+                                        }
+                                    } else {
+                                        emptyList()
+                                    }
+                                )
+                            },
+                            onTranslate = viewModel::toggleSocialTranslation,
+                            onSummarize = viewModel::summarizeSocialFeed,
+                            loadRedditComments = viewModel::loadRedditComments
+                        )
+                    } else LazyColumn(
                         state = listState,
                         modifier = Modifier
                             .fillMaxSize()
@@ -1019,7 +1092,10 @@ fun TopicDetailScreen(
             // Kullanıcı hangi sayfayı seçerse (İlk, Önceki, Sayfa X, Sonraki, Son)
             // doğrudan `viewModel.goToPage(targetPage)` çağrılır ve veri yüklendiğinde
             // `LaunchedEffect(latestLoadSequence)` ile liste en üste (`scrollToItem(0)`) sarılır.
-            if (metadata?.isSingleEntryView != true && !topic.url.contains("/entry/", ignoreCase = true)) {
+            if (socialFeed == null &&
+                metadata?.isSingleEntryView != true &&
+                !topic.url.contains("/entry/", ignoreCase = true)
+            ) {
                 FloatingPagerCapsuleBar(
                     currentPage = safeCurrentPage,
                     totalPages = safeTotalPages,
