@@ -192,8 +192,11 @@ fun MainScaffold(
     val channelPagingItems = viewModel.channelTopicsPagingFlow.collectAsLazyPagingItems()
     val searchPagingItems = viewModel.searchTopicsPagingFlow.collectAsLazyPagingItems()
 
-    LaunchedEffect(gundemPagingItems.itemCount, bugunPagingItems.itemCount) {
-        if (gundemPagingItems.itemCount > 0 || bugunPagingItems.itemCount > 0) {
+    // Çerez durumu her sayfa eklemesinde değil, yalnızca listeler ilk kez dolduğunda yenilenir.
+    val hasGundemItems = gundemPagingItems.itemCount > 0
+    val hasBugunItems = bugunPagingItems.itemCount > 0
+    LaunchedEffect(hasGundemItems, hasBugunItems) {
+        if (hasGundemItems || hasBugunItems) {
             viewModel.refreshCookieState()
         }
     }
@@ -212,6 +215,21 @@ fun MainScaffold(
     }
     val isHeaderVisible = rememberDirectionalHeaderVisibility(activeScrollListState)
     val isDebeActive = currentDestination == MainNavDestination.DEBE_ENLER
+
+    // Sekme akışları yalnızca ilk kez görüntülendiklerinde ağ isteği başlatır (soğuk açılışta
+    // Bugün/Olaylar/Kanallar/Arama/DEBE için gereksiz paralel istekler atılmaz).
+    LaunchedEffect(currentDestination, selectedSection) {
+        when (currentDestination) {
+            MainNavDestination.GUNDEM -> if (selectedSection == LeftFrameSection.OLAYLAR) {
+                viewModel.activateFeed(TopicFeed.OLAYLAR)
+            }
+            MainNavDestination.BUGUN -> viewModel.activateFeed(TopicFeed.BUGUN)
+            MainNavDestination.KANALLAR -> viewModel.activateFeed(TopicFeed.KANALLAR)
+            MainNavDestination.ARAMA -> viewModel.activateFeed(TopicFeed.ARAMA)
+            MainNavDestination.DEBE_ENLER -> viewModel.ensureDebeAndStatsLoaded()
+            MainNavDestination.PROFIL -> Unit
+        }
+    }
 
     // 1. KURAL: Alt veya üst bardaki "Gündem" butonuna tıklandığında:
     // - Başka sekmedeyse Gündem sekmesine geçer.

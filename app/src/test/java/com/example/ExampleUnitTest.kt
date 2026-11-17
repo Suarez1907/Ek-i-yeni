@@ -102,4 +102,19 @@ class ExampleUnitTest {
         assertNotNull(firstEntry.annotatedContent)
         assertTrue(firstEntry.plainText.contains("jetpack compose"))
     }
+
+    @Test
+    fun isRecentEntryDate_acceptsRecentDatesRegardlessOfCalendarYear() {
+        // 10 Ocak 2027 "bugün" kabul edildiğinde, Aralık 2026 entry'leri hâlâ güncel sayılmalı
+        // (eski sürümde yıl "2026" olarak sabit kodlandığı için 2027'de liste boş kalıyordu).
+        val now = java.util.Calendar.getInstance().apply {
+            clear()
+            set(2027, java.util.Calendar.JANUARY, 10, 12, 0)
+        }.timeInMillis
+
+        assertTrue(parser.isRecentEntryDate("09.01.2027 21:15", nowMillis = now))
+        assertTrue(parser.isRecentEntryDate("20.12.2026 08:00 ~ 21.12.2026 09:00", nowMillis = now))
+        assertFalse(parser.isRecentEntryDate("05.11.2019 21:15", nowMillis = now))
+        assertFalse(parser.isRecentEntryDate("", nowMillis = now))
+    }
 }

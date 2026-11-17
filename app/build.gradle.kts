@@ -43,7 +43,9 @@ android {
         release {
             // Do not remove or modify the signingConfig below
             signingConfig = signingConfigs.getByName("release")
-            isMinifyEnabled = false
+            // R8 kod küçültme/optimizasyonu: daha küçük APK ve belirgin şekilde daha hızlı Compose çalışma zamanı.
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

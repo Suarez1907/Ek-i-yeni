@@ -4,7 +4,6 @@ import android.annotation.SuppressLint
 import android.graphics.Bitmap
 import android.os.Handler
 import android.os.Looper
-import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
@@ -223,8 +222,14 @@ fun AuthWebViewScreen(
     DisposableEffect(Unit) {
         onDispose {
             cookieJar.flush()
+            // Ekran her kapandığında WebView (ve Chromium render süreci) bellekte kalmasın.
+            val view = webViewRef
+            webViewRef = null
             try {
-                webViewRef?.stopLoading()
+                view?.stopLoading()
+                view?.removeJavascriptInterface("EksinAuthDomInspector")
+                (view?.parent as? ViewGroup)?.removeView(view)
+                view?.destroy()
             } catch (_: Throwable) {
             }
         }
@@ -457,7 +462,8 @@ fun AuthWebViewScreen(
                         .testTag("auth_webview"),
                     factory = { context ->
                         WebView(context).apply {
-                            setLayerType(View.LAYER_TYPE_SOFTWARE, null)
+                            // Görünür WebView'da yazılım katmanı Cloudflare/Turnstile animasyonlarını
+                            // yavaşlatır; donanım hızlandırma varsayılanı kullanılır.
                             layoutParams = ViewGroup.LayoutParams(
                                 ViewGroup.LayoutParams.MATCH_PARENT,
                                 ViewGroup.LayoutParams.MATCH_PARENT
