@@ -117,7 +117,9 @@ sealed class GeminiImageGenerationResult {
 
 private data class RestImageAttemptResult(
     val bitmap: Bitmap?,
-    val failureReason: String?
+    val failureReason: String?,
+    /** `true` ise bir sonraki yedek görsel modeli denenebilir (404/429/5xx veya görselsiz yanıt). */
+    val canFallback: Boolean = false
 )
 
 /**
@@ -171,9 +173,16 @@ class GeminiHelper @Inject constructor(
         .writeTimeout(25, TimeUnit.SECONDS)
         .build()
 
-    init {
-        migrateLegacyPlainTextKeyIfNeeded()
-    }
+    /**
+     * Çözülmüş API anahtarının bellek içi kopyası. Her çağrıda Android Keystore ile şifre çözmek
+     * (özellikle ana iş parçacığında) maliyetli olduğundan yalnızca ilk okumada çözülür.
+     * `null` = henüz okunmadı, `""` = kayıtlı anahtar yok.
+     */
+    @Volatile
+    private var cachedDecryptedApiKey: String? = null
+
+    @Volatile
+    private var legacyMigrationChecked = false
 
     /**
      * Eski sürümde düz metin (`gemini_api_key`) olarak kaydedilmiş bir anahtar varsa,
@@ -181,6 +190,8 @@ class GeminiHelper @Inject constructor(
      * ve düz metin kaydını kalıcı olarak siler.
      */
     private fun migrateLegacyPlainTextKeyIfNeeded() {
+        if (legacyMigrationChecked) return
+        legacyMigrationChecked = true
         try {
             val legacyPlain = prefs.getString(KEY_LEGACY_PLAIN_API_KEY, null)?.trim()
             if (!legacyPlain.isNullOrBlank()) {
@@ -240,6 +251,7 @@ class GeminiHelper @Inject constructor(
                 .putString(KEY_ENCRYPTED_API_KEY_IV, encodedIv)
                 .remove(KEY_LEGACY_PLAIN_API_KEY)
                 .apply()
+            cachedDecryptedApiKey = plainApiKey.trim()
             _keyDecryptionWarning.value = null
             true
         } catch (e: Throwable) {
@@ -255,16 +267,18 @@ class GeminiHelper @Inject constructor(
      * anahtarı boş kabul eder ve kullanıcıya uyarı mesajı yayınlar.
      */
     fun getUserSavedApiKey(): String {
+        cachedDecryptedApiKey?.let { return it }
         migrateLegacyPlainTextKeyIfNeeded()
 
         val encodedCipher = prefs.getString(KEY_ENCRYPTED_API_KEY_CIPHERTEXT, null)
         val encodedIv = prefs.getString(KEY_ENCRYPTED_API_KEY_IV, null)
 
         if (encodedCipher.isNullOrBlank() || encodedIv.isNullOrBlank()) {
+            cachedDecryptedApiKey = ""
             return ""
         }
 
-        return try {
+        val decrypted = try {
             val cipherBytes = Base64.decode(encodedCipher, Base64.NO_WRAP)
             val ivBytes = Base64.decode(encodedIv, Base64.NO_WRAP)
 
@@ -284,9 +298,12 @@ class GeminiHelper @Inject constructor(
                 "Kayıtlı API anahtarının şifresi çözülemediği için güvenlik amacıyla sıfırlandı. Lütfen anahtarınızı tekrar girin."
             ""
         }
+        cachedDecryptedApiKey = decrypted
+        return decrypted
     }
 
     private fun clearCorruptedEncryptedKeyEntries() {
+        cachedDecryptedApiKey = ""
         try {
             prefs.edit()
                 .remove(KEY_ENCRYPTED_API_KEY_CIPHERTEXT)
@@ -314,6 +331,7 @@ class GeminiHelper @Inject constructor(
      * Kayıtlı Gemini API anahtarını `eksin_gemini_prefs` içinden temizler.
      */
     fun clearUserApiKey() {
+        cachedDecryptedApiKey = ""
         _keyDecryptionWarning.value = null
         prefs.edit()
             .remove(KEY_ENCRYPTED_API_KEY_CIPHERTEXT)
@@ -449,7 +467,7 @@ class GeminiHelper @Inject constructor(
                                 val apiErrorMessage = extractApiErrorMessage(errorBody, code, modelName)
                                 lastErrorMessage = apiErrorMessage
 
-                                val canFallback = (code == 404 || code == 429 || code == 503) &&
+                                val canFallback = code in FALLBACK_HTTP_CODES &&
                                     index < FALLBACK_MODELS.lastIndex
                                 if (canFallback) {
                                     Log.w(
@@ -641,6 +659,8 @@ class GeminiHelper @Inject constructor(
     suspend fun generateImageFromPrompt(
         promptText: String,
         modelId: String = IMAGE_MODEL_DEFAULT,
+        aspectRatio: String? = null,
+        imageSize: String? = null,
         targetWidth: Int = 1024,
         targetHeight: Int = 1024
     ): GeminiImageGenerationResult = withContext(Dispatchers.Default) {
@@ -652,16 +672,27 @@ class GeminiHelper @Inject constructor(
         }
 
         val endpointModel = if (modelId.isBlank()) IMAGE_MODEL_DEFAULT else modelId
-        val restAttempt = tryGenerateImageViaRest(
-            apiKey = apiKey,
-            promptText = promptText,
-            modelId = endpointModel
-        )
+        // Seçilen model bulunamazsa (404) veya kota/servis hatası verirse bilinen görsel modellerine sırayla düş.
+        val modelChain = (listOf(endpointModel) + IMAGE_FALLBACK_MODELS).distinct()
+        var restAttempt = RestImageAttemptResult(bitmap = null, failureReason = null)
+        var usedModel = endpointModel
+        for (candidateModel in modelChain) {
+            currentCoroutineContext().ensureActive()
+            usedModel = candidateModel
+            restAttempt = tryGenerateImageViaRest(
+                apiKey = apiKey,
+                promptText = promptText,
+                modelId = candidateModel,
+                aspectRatio = aspectRatio,
+                imageSize = imageSize
+            )
+            if (restAttempt.bitmap != null || !restAttempt.canFallback) break
+        }
 
         if (restAttempt.bitmap != null) {
             return@withContext GeminiImageGenerationResult.Success(
                 bitmap = restAttempt.bitmap,
-                modelUsed = endpointModel
+                modelUsed = usedModel
             )
         }
 
@@ -685,7 +716,9 @@ class GeminiHelper @Inject constructor(
     private suspend fun tryGenerateImageViaRest(
         apiKey: String,
         promptText: String,
-        modelId: String
+        modelId: String,
+        aspectRatio: String?,
+        imageSize: String?
     ): RestImageAttemptResult = withContext(Dispatchers.IO) {
         try {
             val endpointModel = if (modelId.isBlank()) IMAGE_MODEL_DEFAULT else modelId
@@ -702,6 +735,19 @@ class GeminiHelper @Inject constructor(
                         }
                     )
                 )
+                // Görsel modellerinin metin yerine görsel döndürmesi için çıktı modaliteleri ve
+                // kullanıcının Stüdyo'da seçtiği en-boy oranı / çözünürlük isteğe eklenir.
+                val generationConfig = JSONObject().put(
+                    "responseModalities",
+                    JSONArray().put("TEXT").put("IMAGE")
+                )
+                val imageConfig = JSONObject()
+                if (!aspectRatio.isNullOrBlank()) imageConfig.put("aspectRatio", aspectRatio)
+                if (!imageSize.isNullOrBlank() && endpointModel.contains("pro", ignoreCase = true)) {
+                    imageConfig.put("imageSize", imageSize)
+                }
+                if (imageConfig.length() > 0) generationConfig.put("imageConfig", imageConfig)
+                put("generationConfig", generationConfig)
             }
             val request = Request.Builder()
                 .url(url)
@@ -717,7 +763,8 @@ class GeminiHelper @Inject constructor(
                     Log.w(TAG, "tryGenerateImageViaRest başarısız ($endpointModel): $errReason")
                     return@withContext RestImageAttemptResult(
                         bitmap = null,
-                        failureReason = errReason
+                        failureReason = errReason,
+                        canFallback = response.code in FALLBACK_HTTP_CODES || response.code == 400
                     )
                 }
 
@@ -730,7 +777,7 @@ class GeminiHelper @Inject constructor(
                 if (parts == null || parts.length() == 0) {
                     val msg = "Model ($endpointModel) yanıtında görsel verisi bulunamadı."
                     Log.w(TAG, msg)
-                    return@withContext RestImageAttemptResult(bitmap = null, failureReason = msg)
+                    return@withContext RestImageAttemptResult(bitmap = null, failureReason = msg, canFallback = true)
                 }
 
                 for (i in 0 until parts.length()) {
@@ -738,7 +785,7 @@ class GeminiHelper @Inject constructor(
                     val b64 = inlineData?.optString("data").orEmpty()
                     if (b64.isNotBlank()) {
                         val bytes = Base64.decode(b64, Base64.DEFAULT)
-                        val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                        val decoded = decodeDownsampledBitmap(bytes, MAX_DECODED_IMAGE_DIMENSION)
                         if (decoded != null) {
                             return@withContext RestImageAttemptResult(
                                 bitmap = decoded,
@@ -752,7 +799,8 @@ class GeminiHelper @Inject constructor(
                 Log.w(TAG, textFallbackNote)
                 RestImageAttemptResult(
                     bitmap = null,
-                    failureReason = textFallbackNote
+                    failureReason = textFallbackNote,
+                    canFallback = true
                 )
             }
         } catch (e: CancellationException) {
@@ -764,6 +812,36 @@ class GeminiHelper @Inject constructor(
                 bitmap = null,
                 failureReason = reason
             )
+        }
+    }
+
+    /**
+     * 2K/4K görselleri tam çözünürlükte (4096x4096 ARGB ≈ 64 MB) belleğe açmak OutOfMemoryError
+     * riski taşır. Ekranda gösterim için görsel [maxDimension] sınırına kadar örneklenerek açılır.
+     */
+    private fun decodeDownsampledBitmap(bytes: ByteArray, maxDimension: Int): Bitmap? {
+        return try {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+            var sampleSize = 1
+            val largestSide = maxOf(bounds.outWidth, bounds.outHeight)
+            while (largestSide > 0 && largestSide / sampleSize > maxDimension) {
+                sampleSize *= 2
+            }
+            val options = BitmapFactory.Options().apply { inSampleSize = sampleSize }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+        } catch (oom: OutOfMemoryError) {
+            Log.w(TAG, "Görsel belleğe sığmadı, örnekleme oranı artırılıyor.")
+            try {
+                BitmapFactory.decodeByteArray(
+                    bytes,
+                    0,
+                    bytes.size,
+                    BitmapFactory.Options().apply { inSampleSize = 4 }
+                )
+            } catch (_: OutOfMemoryError) {
+                null
+            }
         }
     }
 
@@ -987,6 +1065,13 @@ class GeminiHelper @Inject constructor(
         )
         const val IMAGE_MODEL_DEFAULT = "gemini-3.5-flash-lite"
         const val IMAGE_MODEL_PRO = "gemini-3.5-flash-lite"
+        /** Görsel modeli bulunamadığında (404) veya kota/servis hatasında sırayla denenen modeller. */
+        val IMAGE_FALLBACK_MODELS = listOf(
+            "gemini-3-pro-image-preview",
+            "gemini-2.5-flash-image"
+        )
+        private val FALLBACK_HTTP_CODES = setOf(404, 429, 500, 502, 503, 504)
+        private const val MAX_DECODED_IMAGE_DIMENSION = 2048
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
         private const val MAX_ENTRIES_FOR_CONTEXT = 40
         private const val MAX_CHARS_PER_ENTRY = 1200

@@ -24,7 +24,10 @@ import com.example.data.model.TopicPageData
 import com.example.data.remote.EksiParser
 import com.example.network.WebViewCookieJar
 import com.example.network.WebViewFetchBridge
+import android.util.Log
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -33,6 +36,8 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -72,7 +77,15 @@ class EksiRepository @Inject constructor(
     private val eksinDao: EksinDao
 ) {
 
-    private val repositoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    /**
+     * Arka plan zenginleştirme işleri için kapsam. Ayrıştırma (Jsoup) veya ağ katmanında beklenmeyen
+     * bir istisna oluşursa uygulamanın çökmesini engellemek için [CoroutineExceptionHandler] eklenmiştir.
+     */
+    private val repositoryScope = CoroutineScope(
+        SupervisorJob() + Dispatchers.IO + CoroutineExceptionHandler { _, throwable ->
+            Log.w(TAG, "Arka plan işi başarısız oldu: ${throwable.javaClass.simpleName}")
+        }
+    )
 
     /**
      * DEBE ve Dönemsel Enler entry'lerinin beğeni (`data-favorite-count`) ve yazar bilgilerini
@@ -99,6 +112,12 @@ class EksiRepository @Inject constructor(
      */
     private val bugunPageCache = ConcurrentHashMap<Int, BugunPageCacheEntry>()
     private val inFlightBugunPageJobs = ConcurrentHashMap<Int, Job>()
+
+    /**
+     * Aynı "Bugün" sayfası için eşzamanlı gelen istekleri (ör. arka plan ön yüklemesi ile
+     * PagingSource yüklemesi) tek bir ağ çağrısında birleştirir.
+     */
+    private val inFlightBugunFirstResults = ConcurrentHashMap<Int, CompletableDeferred<List<TopicItem>>>()
     private val _bugunTopics = MutableStateFlow<List<TopicItem>>(emptyList())
     val bugunTopics: StateFlow<List<TopicItem>> = _bugunTopics.asStateFlow()
 
@@ -171,6 +190,7 @@ class EksiRepository @Inject constructor(
     fun clearBugunCache() {
         inFlightBugunPageJobs.values.forEach { it.cancel() }
         inFlightBugunPageJobs.clear()
+        inFlightBugunFirstResults.clear()
         bugunPageCache.clear()
         _bugunTopics.value = emptyList()
     }
@@ -254,6 +274,17 @@ class EksiRepository @Inject constructor(
             }
         }
 
+        if (!forceRefresh) {
+            inFlightBugunFirstResults[safePage]?.let { sharedResult ->
+                return@withContext try {
+                    sharedResult.await()
+                } catch (e: CancellationException) {
+                    currentCoroutineContext().ensureActive()
+                    bugunPageCache[safePage]?.items ?: emptyList()
+                }
+            }
+        }
+
         if (safePage == 1) {
             _isBugunLoading.value = true
         }
@@ -261,6 +292,9 @@ class EksiRepository @Inject constructor(
         val baseDomain = webViewFetchBridge.getActiveBaseDomain().ifBlank {
             WebViewCookieJar.DEFAULT_BASE_URL
         }.trimEnd('/')
+
+        val firstReadyDeferred = CompletableDeferred<List<TopicItem>>()
+        inFlightBugunFirstResults[safePage] = firstReadyDeferred
 
         try {
             // 1b) Kullanıcı giriş yapmışsa doğrudan TEK BİR İSTEKLE `/basliklar/bugun?p={page}` (`isAjax = true`) çek
@@ -283,6 +317,7 @@ class EksiRepository @Inject constructor(
                         _bugunTopics.value = filteredBugun
                         _isBugunLoading.value = false
                     }
+                    firstReadyDeferred.complete(filteredBugun)
                     return@withContext filteredBugun
                 }
             }
@@ -290,7 +325,6 @@ class EksiRepository @Inject constructor(
             // 1c & 2) Anonim modda (veya `/basliklar/bugun` Gündem ile aynı döndüğünde):
             // EN FAZLA 2 hızlı kaynağı (`isAjax = true`) TAMAMEN PARALEL başlat.
             // İlk tamamlanan kaynağı ANINDA ekrana bas, ikinci tamamlandığında sessizce zenginleştir!
-            val firstReadyDeferred = CompletableDeferred<List<TopicItem>>()
 
             val primaryFastChannel = when ((safePage - 1) % 4) {
                 0 -> EksiChannel.SPOR
@@ -394,14 +428,32 @@ class EksiRepository @Inject constructor(
             inFlightBugunPageJobs[safePage] = enrichmentJob
             enrichmentJob.invokeOnCompletion {
                 inFlightBugunPageJobs.remove(safePage, enrichmentJob)
+                // İş iptal edilir (ör. "Yenile" ile `clearBugunCache`) veya beklenmeyen bir hata ile biterse
+                // bekleyen PagingSource'un sonsuza kadar asılı kalmaması için sonucu her durumda tamamla.
+                if (!firstReadyDeferred.isCompleted) {
+                    if (safePage == 1) {
+                        _isBugunLoading.value = false
+                    }
+                    firstReadyDeferred.complete(bugunPageCache[safePage]?.items ?: emptyList())
+                }
             }
 
             firstReadyDeferred.await()
+        } catch (e: CancellationException) {
+            if (safePage == 1) {
+                _isBugunLoading.value = false
+            }
+            throw e
         } catch (e: Throwable) {
             if (safePage == 1) {
                 _isBugunLoading.value = false
             }
+            if (!firstReadyDeferred.isCompleted) {
+                firstReadyDeferred.complete(bugunPageCache[safePage]?.items ?: emptyList())
+            }
             bugunPageCache[safePage]?.items ?: emptyList()
+        } finally {
+            inFlightBugunFirstResults.remove(safePage, firstReadyDeferred)
         }
     }
 
@@ -922,20 +974,30 @@ class EksiRepository @Inject constructor(
                 WebViewCookieJar.DEFAULT_BASE_URL
             }.trimEnd('/')
 
-            val fullPageUrl = "$baseDomain/debe?_=${System.currentTimeMillis()}"
-            val fullPageHtml = runCatching {
-                webViewFetchBridge.fetchHtml(rawUrl = fullPageUrl, isAjax = false)
-            }.getOrDefault("")
-            val parsedFull = withContext(Dispatchers.Default) {
-                eksiParser.parseDebeEntriesList(fullPageHtml)
-            }
-
-            val ajaxUrl = "$baseDomain/debe?_=${System.currentTimeMillis()}"
-            val ajaxHtml = runCatching {
-                webViewFetchBridge.fetchHtml(rawUrl = ajaxUrl, isAjax = true)
-            }.getOrDefault("")
-            val parsedAjax = withContext(Dispatchers.Default) {
-                eksiParser.parseDebeEntriesList(ajaxHtml)
+            // Tam sayfa ve AJAX varyantları sıralı yerine PARALEL çekilir (DEBE açılış süresi ~yarıya iner).
+            val debeUrl = "$baseDomain/debe?_=${System.currentTimeMillis()}"
+            val (parsedFull, parsedAjax) = coroutineScope {
+                val fullDeferred = async {
+                    val html = try {
+                        webViewFetchBridge.fetchHtml(rawUrl = debeUrl, isAjax = false)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (_: Throwable) {
+                        ""
+                    }
+                    withContext(Dispatchers.Default) { eksiParser.parseDebeEntriesList(html) }
+                }
+                val ajaxDeferred = async {
+                    val html = try {
+                        webViewFetchBridge.fetchHtml(rawUrl = debeUrl, isAjax = true)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (_: Throwable) {
+                        ""
+                    }
+                    withContext(Dispatchers.Default) { eksiParser.parseDebeEntriesList(html) }
+                }
+                fullDeferred.await() to ajaxDeferred.await()
             }
 
             val fullEntryCount = parsedFull.count { !it.entryId.isNullOrBlank() }
@@ -961,6 +1023,8 @@ class EksiRepository @Inject constructor(
                 eksiParser.parseDebeEntriesList(fallbackHtml)
             }
             Result.success(parsedFallback.map { applyCachedFavoriteMetadata(it) })
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Throwable) {
             Result.failure(e)
         }
@@ -1026,6 +1090,8 @@ class EksiRepository @Inject constructor(
                 )
                 return@withContext Result.success(compiledTopTopics)
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Throwable) {
             Result.failure(e)
         }
@@ -1128,7 +1194,7 @@ class EksiRepository @Inject constructor(
                             entry.id.isNotBlank() &&
                                 entry.id.all { it.isDigit() } &&
                                 entry.favoriteCount > 0 &&
-                                eksiParser.isRecent2026EntryDate(entry.date)
+                                eksiParser.isRecentEntryDate(entry.date)
                         }
                         var resolvedPageTitle = parsedDailyPage.topicTitle
 
@@ -1145,7 +1211,7 @@ class EksiRepository @Inject constructor(
                                 entry.id.isNotBlank() &&
                                     entry.id.all { it.isDigit() } &&
                                     entry.favoriteCount > 0 &&
-                                    eksiParser.isRecent2026EntryDate(entry.date)
+                                    eksiParser.isRecentEntryDate(entry.date)
                             }
                         }
 
@@ -1439,6 +1505,8 @@ class EksiRepository @Inject constructor(
                     entries = finalEntries
                 )
             )
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Throwable) {
             Result.failure(e)
         }
@@ -1478,9 +1546,15 @@ class EksiRepository @Inject constructor(
             Result.success(
                 firstPageParsed.copy(entries = firstPageParsed.entries.take(5))
             )
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Throwable) {
             Result.failure(e)
         }
+    }
+
+    private companion object {
+        const val TAG = "EksiRepository"
     }
 }
 
@@ -1555,6 +1629,8 @@ class LeftFramePagingSource(
                 prevKey = if (page == 1) null else page - 1,
                 nextKey = nextKey
             )
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Throwable) {
             LoadResult.Error(e)
         }
@@ -1600,6 +1676,8 @@ class BugunTopicsPagingSource(
                 prevKey = if (page == 1) null else page - 1,
                 nextKey = nextKey
             )
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Throwable) {
             LoadResult.Error(e)
         }
@@ -1687,6 +1765,8 @@ class ChannelTopicsPagingSource(
                 prevKey = if (page == 1) null else page - 1,
                 nextKey = nextKey
             )
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Throwable) {
             LoadResult.Error(e)
         }
@@ -1743,6 +1823,8 @@ class SearchTopicsPagingSource(
                 prevKey = if (page == 1) null else page - 1,
                 nextKey = nextKey
             )
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Throwable) {
             LoadResult.Error(e)
         }

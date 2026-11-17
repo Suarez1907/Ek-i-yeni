@@ -48,6 +48,18 @@ object AppModule {
     }
 
     /**
+     * ViewModel temizlendiğinde (`onCleared`) çağrılır; statik referansın ViewModel'i bellekte
+     * tutmasını (memory leak) engeller.
+     */
+    fun unregisterViewModelCacheCleaner(cleaner: () -> Unit) {
+        synchronized(this) {
+            if (viewModelCacheCleaner === cleaner) {
+                viewModelCacheCleaner = null
+            }
+        }
+    }
+
+    /**
      * `EksinApplication.onTrimMemory` tarafından çağrılır.
      * Eğer `singletonContainer` henüz oluşturulmadıysa zorla başlatmaz; yalnızca başlatılmışsa
      * bellek içi önbellekleri (`EksiRepository`, `WebViewFetchBridge`, `EksinViewModel`) temizler.

@@ -27,6 +27,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -236,7 +238,7 @@ class WebViewFetchBridge @Inject constructor(
 
     private fun normalizeSourceKey(url: String): String {
         return url.trim()
-            .replace(Regex("([?&])_=\\d+"), "")
+            .replace(CACHE_BUSTER_REGEX, "")
             .trimEnd('?', '&')
     }
 
@@ -428,23 +430,40 @@ class WebViewFetchBridge @Inject constructor(
                 }
             }
 
-            if (!bypassCache) {
-                inFlightRequests[cacheKey]?.let { existingDeferred ->
-                    return existingDeferred.await()
+            // Aynı URL için eşzamanlı istekleri tek ağ çağrısında birleştir (deduplication).
+            // İsteği başlatan coroutine iptal edilirse (ör. sayfa ön yüklemesi iptal edildi) bekleyen
+            // diğer çağıranlara iptal hatası yansıtılmaz; bunun yerine istek onlar adına yeniden başlatılır.
+            var claimedDeferred: CompletableDeferred<String>? = null
+            while (claimedDeferred == null) {
+                val createdDeferred = CompletableDeferred<String>()
+                if (bypassCache) {
+                    inFlightRequests[cacheKey] = createdDeferred
+                    claimedDeferred = createdDeferred
+                    continue
                 }
-            }
-
-            val createdDeferred = CompletableDeferred<String>()
-            val activeDeferred = if (!bypassCache) {
                 val prior = inFlightRequests.putIfAbsent(cacheKey, createdDeferred)
-                if (prior != null) {
-                    return prior.await()
+                if (prior == null) {
+                    claimedDeferred = createdDeferred
+                    continue
                 }
-                createdDeferred
-            } else {
-                inFlightRequests[cacheKey] = createdDeferred
-                createdDeferred
+                if (prior.isCancelled) {
+                    if (inFlightRequests.replace(cacheKey, prior, createdDeferred)) {
+                        claimedDeferred = createdDeferred
+                    }
+                    continue
+                }
+                try {
+                    return prior.await()
+                } catch (sharedCancel: CancellationException) {
+                    // Kendi coroutine'imiz iptal edildiyse iptali yay; değilse isteği kendimiz tekrarla.
+                    currentCoroutineContext().ensureActive()
+                    getValidTtlCachedEntry(cacheKey)?.let { cached ->
+                        recordUrlContentSource(rawUrl, cached.contentSource)
+                        return cached.html
+                    }
+                }
             }
+            val activeDeferred: CompletableDeferred<String> = checkNotNull(claimedDeferred)
 
             try {
                 val html = withTimeout(FETCH_HTML_TOTAL_TIMEOUT_MS) {
@@ -789,10 +808,12 @@ class WebViewFetchBridge @Inject constructor(
         """.trimIndent()
 
         return try {
-            withContext(Dispatchers.Main) {
-                val webView = getOrCreateBackgroundWebViewOnMain()
-                webView?.evaluateJavascript(jsCode, null)
+            val dispatched = withContext(Dispatchers.Main) {
+                val webView = getOrCreateBackgroundWebViewOnMain() ?: return@withContext false
+                webView.evaluateJavascript(jsCode, null)
+                true
             }
+            if (!dispatched) return null
             withTimeoutOrNull(JS_FETCH_TIMEOUT_MS) {
                 deferred.await()
             }
@@ -967,6 +988,18 @@ class WebViewFetchBridge @Inject constructor(
                     }
                     backgroundWebView = null
                     initializedOriginDomain = ""
+                    // Render süreci çöktüğünde bekleyen JS fetch() isteklerini zaman aşımını beklemeden sonlandır.
+                    val orphanedFetches = pendingFetchRequests.values.toList()
+                    pendingFetchRequests.clear()
+                    orphanedFetches.forEach { it.complete(
+                        FetchBridgeResult(
+                            statusCode = 503,
+                            finalUrl = getActiveBaseDomain(),
+                            html = "",
+                            hasValidEksiDom = false,
+                            isCloudflareChallenge = false
+                        )
+                    ) }
                     pendingPageLoadDeferred?.complete(
                         FetchBridgeResult(
                             statusCode = 503,
@@ -1481,6 +1514,7 @@ class WebViewFetchBridge @Inject constructor(
 
     companion object {
         private const val TAG = "WebViewFetchBridge"
+        private val CACHE_BUSTER_REGEX = Regex("([?&])_=\\d+")
         private const val PREFS_NAME = "eksin_network_prefs"
         private const val KEY_ACTIVE_DOMAIN = "active_base_domain"
 

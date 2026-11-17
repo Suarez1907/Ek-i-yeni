@@ -255,7 +255,7 @@ class EksiParser @Inject constructor() {
                 clone.text().trim()
             }
             val cleanedTitle = rawTitle
-                .replace(Regex("""^#\d+\s*[-–—:]?\s*"""), "")
+                .replace(RANK_PREFIX_REGEX, "")
                 .trim()
             if (cleanedTitle.isBlank()) continue
 
@@ -307,16 +307,35 @@ class EksiParser @Inject constructor() {
     }
 
     /**
-     * Entry tarihinin (`.entry-date`) içinde bulunduğumuz güncel yıla (2026) ait olup olmadığını kontrol eder.
-     * 2010-2025 gibi eski yıllara ait entry'leri kesin olarak reddeder.
+     * Entry'nin oluşturulma tarihinin (`.entry-date`, ör. `17.11.2026 14:32`) güncel olup olmadığını kontrol eder.
+     * Eskiden yıl "2026" olarak sabit kodlanmıştı; bu, takvim yılı değiştiğinde "Dönemsel Enler" listesinin
+     * tamamen boş kalmasına yol açıyordu. Artık cihazın güncel tarihine göre son [maxAgeDays] gün kabul edilir.
      */
-    fun isRecent2026EntryDate(dateText: String): Boolean {
+    fun isRecentEntryDate(
+        dateText: String,
+        maxAgeDays: Int = RECENT_ENTRY_MAX_AGE_DAYS,
+        nowMillis: Long = System.currentTimeMillis()
+    ): Boolean {
         val createdPart = dateText.substringBefore("~").trim()
         if (createdPart.isBlank()) return false
-        if (OLD_YEARS_REGEX.containsMatchIn(createdPart)) {
-            return false
+
+        val match = ENTRY_DATE_REGEX.find(createdPart)
+        if (match != null) {
+            val (day, month, year) = match.destructured
+            val calendar = java.util.Calendar.getInstance().apply {
+                clear()
+                set(year.toInt(), month.toInt() - 1, day.toInt())
+            }
+            val ageMillis = nowMillis - calendar.timeInMillis
+            val maxAgeMillis = maxAgeDays.toLong() * 24L * 60L * 60L * 1000L
+            // Saat dilimi farkları için 1 günlük tolerans (gelecek tarih) bırakılır.
+            return ageMillis in -DAY_MILLIS..maxAgeMillis
         }
-        return createdPart.contains("2026")
+
+        // Tarih biçimi çözülemezse yalnızca güncel takvim yılını içeren tarihleri kabul et.
+        val currentYear = java.util.Calendar.getInstance().apply { timeInMillis = nowMillis }
+            .get(java.util.Calendar.YEAR)
+        return createdPart.contains(currentYear.toString())
     }
 
     /**
@@ -1320,7 +1339,10 @@ class EksiParser @Inject constructor() {
         const val TAG_HIDDEN_BKZ = "HIDDEN_BKZ_TOPIC"
         const val TAG_EXTERNAL_URL = "EXTERNAL_URL"
 
-        private val OLD_YEARS_REGEX = Regex("\\b(199\\d|200\\d|201\\d|202[0-5])\\b")
+        private val ENTRY_DATE_REGEX = Regex("""(\d{1,2})\.(\d{1,2})\.(\d{4})""")
+        private val RANK_PREFIX_REGEX = Regex("""^#\d+\s*[-–—:]?\s*""")
+        private const val RECENT_ENTRY_MAX_AGE_DAYS = 45
+        private const val DAY_MILLIS = 24L * 60L * 60L * 1000L
 
         private val COLOR_BKZ_GREEN = Color(0xFF81C784)
         private val COLOR_HIDDEN_BKZ = Color(0xFFFFB74D)

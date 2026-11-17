@@ -55,9 +55,12 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.take
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
@@ -118,6 +121,18 @@ enum class StudioAspectRatio(val label: String) {
 enum class StudioImageModel(val modelId: String, val displayName: String) {
     PRO_STUDIO("gemini-3-pro-image", "Gemini 3 Pro Image (Stüdyo 1K/2K/4K)"),
     NANO_BANANA("gemini-nano-banana-2.1", "Gemini Nano Banana 2.1 (Hızlı)")
+}
+
+/**
+ * Ana ekrandaki bağımsız başlık akışları. Her akış yalnızca kullanıcı ilgili sekmeyi ilk kez
+ * açtığında ağ isteği başlatır; böylece soğuk açılışta 5 paralel istek yerine yalnızca Gündem yüklenir.
+ */
+enum class TopicFeed {
+    GUNDEM,
+    BUGUN,
+    OLAYLAR,
+    KANALLAR,
+    ARAMA
 }
 
 data class ActiveAuthSheet(
@@ -246,20 +261,23 @@ class EksinViewModel @Inject constructor(
     val bkzPreviewState: StateFlow<BkzPreviewUiState> = _bkzPreviewState.asStateFlow()
     private var activeBkzJob: Job? = null
 
-    private val _hasCfClearance = MutableStateFlow(webViewFetchBridge.isDomVerified())
+    // CookieManager ilk erişimde WebView motorunu yüklediği için bu değerler ana iş parçacığında
+    // değil, `init` bloğunda arka planda hesaplanır (soğuk açılış hızlandırması).
+    private val _hasCfClearance = MutableStateFlow(false)
     val hasCfClearance: StateFlow<Boolean> = _hasCfClearance.asStateFlow()
 
-    private val _hasUserSession = MutableStateFlow(cookieJar.hasActiveUserSession())
+    private val _hasUserSession = MutableStateFlow(false)
     val hasUserSession: StateFlow<Boolean> = _hasUserSession.asStateFlow()
 
     private val _geminiStreamState = MutableStateFlow<GeminiStreamState>(GeminiStreamState.Idle)
     val geminiStreamState: StateFlow<GeminiStreamState> = _geminiStreamState.asStateFlow()
     private var activeGeminiJob: Job? = null
 
-    private val _geminiApiKey = MutableStateFlow(geminiHelper.getUserSavedApiKey())
+    // Android Keystore şifre çözme işlemi ana iş parçacığını bloklamaması için `init` içinde arka planda yapılır.
+    private val _geminiApiKey = MutableStateFlow("")
     val geminiApiKey: StateFlow<String> = _geminiApiKey.asStateFlow()
 
-    private val _isGeminiKeyConfigured = MutableStateFlow(geminiHelper.hasValidApiKey())
+    private val _isGeminiKeyConfigured = MutableStateFlow(false)
     val isGeminiKeyConfigured: StateFlow<Boolean> = _isGeminiKeyConfigured.asStateFlow()
 
     val geminiKeyDecryptionWarning: StateFlow<String?> = geminiHelper.keyDecryptionWarning
@@ -300,6 +318,24 @@ class EksinViewModel @Inject constructor(
             initialValue = emptyList()
         )
 
+    private val _activatedFeeds = MutableStateFlow(setOf(TopicFeed.GUNDEM))
+
+    /**
+     * Sekme ilk kez görüntülendiğinde çağrılır. Akış bir kez etkinleştirildikten sonra
+     * `cachedIn` sayesinde verisi ve kaydırma konumu korunur.
+     */
+    fun activateFeed(feed: TopicFeed) {
+        if (feed !in _activatedFeeds.value) {
+            _activatedFeeds.update { it + feed }
+        }
+    }
+
+    private fun feedActivation(feed: TopicFeed): Flow<Unit> =
+        _activatedFeeds
+            .filter { feed in it }
+            .take(1)
+            .map { }
+
     /**
      * Gündem, Bugün ve Olaylar sekmeleri birbirinden tamamen bağımsız StateFlow / PagingFlow
      * olarak tutulur; böylece sekme değiştirildiğinde veya başlık detayından geri dönüldüğünde
@@ -313,14 +349,16 @@ class EksinViewModel @Inject constructor(
             .cachedIn(viewModelScope)
 
     val bugunTopicsPagingFlow: Flow<PagingData<TopicItem>> =
-        combine(_bugunRefreshTrigger, _refreshTrigger) { b, r -> b + r }
+        feedActivation(TopicFeed.BUGUN)
+            .flatMapLatest { combine(_bugunRefreshTrigger, _refreshTrigger) { b, r -> b + r } }
             .flatMapLatest {
                 repository.getBugunTopicsPager()
             }
             .cachedIn(viewModelScope)
 
     val olaylarTopicsPagingFlow: Flow<PagingData<TopicItem>> =
-        combine(_olaylarRefreshTrigger, _refreshTrigger) { o, r -> o + r }
+        feedActivation(TopicFeed.OLAYLAR)
+            .flatMapLatest { combine(_olaylarRefreshTrigger, _refreshTrigger) { o, r -> o + r } }
             .flatMapLatest {
                 repository.getOlaylarTopicsPager()
             }
@@ -337,24 +375,39 @@ class EksinViewModel @Inject constructor(
      * 1. KANALLAR Paging 3 Akışı (`https://eksisozluk.com/basliklar/kanal/{kanal_slug}?p={page}`).
      */
     val channelTopicsPagingFlow: Flow<PagingData<TopicItem>> =
-        combine(_selectedChannel, _refreshTrigger) { channel, _ -> channel }
+        feedActivation(TopicFeed.KANALLAR)
+            .flatMapLatest { combine(_selectedChannel, _refreshTrigger) { channel, _ -> channel } }
             .flatMapLatest { channel ->
                 repository.getChannelTopicsPager(channel)
             }
             .cachedIn(viewModelScope)
 
     val searchTopicsPagingFlow: Flow<PagingData<TopicItem>> =
-        combine(_submittedSearchFilter, _refreshTrigger) { filter, _ -> filter }
+        feedActivation(TopicFeed.ARAMA)
+            .flatMapLatest { combine(_submittedSearchFilter, _refreshTrigger) { filter, _ -> filter } }
             .flatMapLatest { filter ->
                 repository.getSearchTopicsPager(filter)
             }
             .cachedIn(viewModelScope)
 
+    private val viewModelCacheCleaner: () -> Unit = { pageMemoryCache.clear() }
+
+    /** DEBE ekranı en az bir kez açıldıysa `true`; açılmadıysa yenilemede gereksiz DEBE isteği atılmaz. */
+    private val debeAndStatsRequested = AtomicBoolean(false)
+
+    private var activeOpenTopicJob: Job? = null
+
     init {
-        AppModule.registerViewModelCacheCleaner {
-            pageMemoryCache.clear()
+        AppModule.registerViewModelCacheCleaner(viewModelCacheCleaner)
+
+        viewModelScope.launch(Dispatchers.IO) {
+            val savedKey = geminiHelper.getUserSavedApiKey()
+            _geminiApiKey.value = savedKey
+            _isGeminiKeyConfigured.value = savedKey.isNotBlank()
         }
-        repository.setUserLoggedInState(_hasUserSession.value)
+        viewModelScope.launch(Dispatchers.IO) {
+            refreshCookieStateBlocking()
+        }
 
         // 3. KURAL: Uygulama ilk açıldığında Gündem yüklendikten hemen 500ms sonra arka planda
         // sessizce "Bugün" listesini (`prefetchBugunTopics()`) hazırla!
@@ -367,7 +420,23 @@ class EksinViewModel @Inject constructor(
                 _pendingCloudflareChallenge.value = event
             }
         }
-        loadDebeAndStats()
+        // DEBE listesi artık açılışta değil, DEBE ekranı ilk kez açıldığında yüklenir.
+    }
+
+    override fun onCleared() {
+        AppModule.unregisterViewModelCacheCleaner(viewModelCacheCleaner)
+        super.onCleared()
+    }
+
+    /**
+     * DEBE ekranı görüntülendiğinde (ör. süreç yeniden başlatılıp doğrudan DEBE sekmesine dönüldüğünde)
+     * liste henüz hiç yüklenmediyse yüklemeyi başlatır.
+     */
+    fun ensureDebeAndStatsLoaded() {
+        val isJobRunning = activeDebeStatsJob?.isActive == true
+        if (!isJobRunning && _debeAndStatsUiState.value !is DebeAndStatsUiState.Success) {
+            loadDebeAndStats()
+        }
     }
 
     /**
@@ -532,6 +601,7 @@ class EksinViewModel @Inject constructor(
     }
 
     fun loadDebeAndStats() {
+        debeAndStatsRequested.set(true)
         activeDebeStatsJob?.cancel()
         val category = _debeAndStatsCategory.value
         val period = _periodicTimeRange.value
@@ -779,7 +849,9 @@ class EksinViewModel @Inject constructor(
         _selectedTopic.value = topic
         loadedTopicSessionKey = "${topic.id}|${topic.url}"
 
-        viewModelScope.launch {
+        // Arka arkaya hızlı tıklamalarda önceki başlığın başlangıç sayfası hesaplaması yeni başlığı ezmesin.
+        activeOpenTopicJob?.cancel()
+        activeOpenTopicJob = viewModelScope.launch {
             val isDirectEntry = topic.url.contains("/entry/", ignoreCase = true) ||
                 topic.url.contains("a=debe", ignoreCase = true)
 
@@ -1120,6 +1192,17 @@ class EksinViewModel @Inject constructor(
     ) {
         val currentTopic = _selectedTopic.value ?: return
         val metadata = _activeTopicMetadata.value
+        // "Kaldığın yerden devam" yalnızca başlığın tüm entry'leri (TÜMÜ modu) sayfalanırken anlamlıdır.
+        // Bugün/Şükela/arama/yazar filtrelerindeki sayfa numarası gerçek sayfayla eşleşmez ve
+        // kayıtlı okuma konumunu yanlış sayfayla ezer.
+        if (_topicFilterMode.value != TopicFilterMode.ALL ||
+            _authorFilterInTopic.value != null ||
+            metadata?.isSingleEntryView == true ||
+            currentTopic.url.contains("/entry/", ignoreCase = true) ||
+            entry.id.isBlank()
+        ) {
+            return
+        }
         val canonicalUrl = metadata?.cleanTopicUrl?.ifBlank { null } ?: currentTopic.cleanUrl
         val totalPages = _totalPages.value.coerceAtLeast(1)
         val activePage = _currentPage.value.coerceAtLeast(1)
@@ -1187,6 +1270,7 @@ class EksinViewModel @Inject constructor(
     }
 
     fun closeTopicDetail() {
+        activeOpenTopicJob?.cancel()
         activePageLoadJob?.cancel()
         activePrefetchJob?.cancel()
         pageMemoryCache.clear()
@@ -1236,11 +1320,21 @@ class EksinViewModel @Inject constructor(
     }
 
     fun refreshCookieState() {
-        val activeDomain = webViewFetchBridge.getActiveBaseDomain()
-        _hasCfClearance.value = webViewFetchBridge.isDomVerified()
-        val loggedIn = cookieJar.hasActiveUserSession(activeDomain)
-        _hasUserSession.value = loggedIn
-        repository.setUserLoggedInState(loggedIn)
+        viewModelScope.launch(Dispatchers.IO) {
+            refreshCookieStateBlocking()
+        }
+    }
+
+    private fun refreshCookieStateBlocking() {
+        try {
+            val activeDomain = webViewFetchBridge.getActiveBaseDomain()
+            _hasCfClearance.value = webViewFetchBridge.isDomVerified()
+            val loggedIn = cookieJar.hasActiveUserSession(activeDomain)
+            _hasUserSession.value = loggedIn
+            repository.setUserLoggedInState(loggedIn)
+        } catch (e: Throwable) {
+            Log.w(TAG, "Çerez durumu okunamadı: ${e.javaClass.simpleName}")
+        }
     }
 
     fun triggerRefresh() {
@@ -1248,7 +1342,9 @@ class EksinViewModel @Inject constructor(
         initialBugunPrefetchScheduled.set(false)
         repository.clearBugunCache()
         _refreshTrigger.value += 1
-        loadDebeAndStats()
+        if (debeAndStatsRequested.get()) {
+            loadDebeAndStats()
+        }
         if (_selectedTopic.value != null) {
             refreshCurrentTopicPage()
         }
@@ -1272,14 +1368,14 @@ class EksinViewModel @Inject constructor(
         entries: List<EntryItem>
     ) {
         activeGeminiJob?.cancel()
-        val savedKey = geminiHelper.getUserSavedApiKey()
-        _geminiApiKey.value = savedKey
-        _isGeminiKeyConfigured.value = savedKey.isNotBlank()
-        if (savedKey.isBlank()) {
-            _geminiStreamState.value = GeminiStreamState.AwaitingApiKey(mode)
-            return
-        }
         activeGeminiJob = viewModelScope.launch {
+            val savedKey = withContext(Dispatchers.IO) { geminiHelper.getUserSavedApiKey() }
+            _geminiApiKey.value = savedKey
+            _isGeminiKeyConfigured.value = savedKey.isNotBlank()
+            if (savedKey.isBlank()) {
+                _geminiStreamState.value = GeminiStreamState.AwaitingApiKey(mode)
+                return@launch
+            }
             geminiHelper.executeStreamingAnalysis(
                 mode = mode,
                 topicTitle = topicTitle,
@@ -1354,7 +1450,9 @@ class EksinViewModel @Inject constructor(
                 when (
                     val imgResult = geminiHelper.generateImageFromPrompt(
                         promptText = cleanPrompt,
-                        modelId = chosenModel.modelId
+                        modelId = chosenModel.modelId,
+                        aspectRatio = chosenRatio.label,
+                        imageSize = chosenSize.label
                     )
                 ) {
                     is GeminiImageGenerationResult.Success -> {
