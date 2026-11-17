@@ -2,6 +2,8 @@ package com.example.network
 
 import android.net.Uri
 import android.util.LruCache
+import android.util.Base64
+import com.example.ai.AiSettingsRepository
 import com.example.util.await
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -14,8 +16,10 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import org.jsoup.Jsoup
@@ -83,6 +87,7 @@ interface XRecentSearchSource {
 }
 
 private const val SOCIAL_UA = "Ek-i-yeni/1.0 (Android; social-feed; +https://eksisozluk.com)"
+private const val REDDIT_OAUTH_UA = "android:com.aistudio.eksinoled.trkxqp:v1.0 (by /u/eksin-app)"
 private const val SOCIAL_UA_HEADER = "X-Ek-Social-Ua"
 
 private val STOPWORDS = setOf(
@@ -311,7 +316,9 @@ private fun canonicalStatusUrl(url: String): String? {
  */
 @Singleton
 class SocialFeedHelper @Inject constructor(
-    httpClient: OkHttpClient
+    httpClient: OkHttpClient,
+    private val webViewFetchBridge: WebViewFetchBridge,
+    private val settingsRepository: AiSettingsRepository
 ) {
     private val socialClient: OkHttpClient by lazy {
         httpClient.newBuilder()
@@ -337,6 +344,8 @@ class SocialFeedHelper @Inject constructor(
     private val oembedCache = LruCache<String, XPost>(48)
     private val recentCache = LruCache<String, XFeedResult>(16)
     private val oembedSlots = Semaphore(3)
+    @Volatile private var redditToken: String? = null
+    @Volatile private var redditTokenUntilMs: Long = 0L
 
     suspend fun fetchRedditPosts(query: String, force: Boolean = false): RedditPage = withContext(Dispatchers.IO) {
         val cleaned = query.trim()
@@ -348,6 +357,7 @@ class SocialFeedHelper @Inject constructor(
         val openUrl = redditSearchUrl(cleaned)
         val hosts = listOf("https://www.reddit.com", "https://old.reddit.com")
         var lastError = "Reddit yanıt vermedi."
+        var lastCode = 0
         for (host in hosts) {
             currentCoroutineContext().ensureActive()
             val url = "$host/search.json?q=${Uri.encode(cleaned)}&sort=relevance&t=year&limit=25"
@@ -355,6 +365,7 @@ class SocialFeedHelper @Inject constructor(
             val page = response.fold(
                 onSuccess = { http ->
                     http.use { resp ->
+                        lastCode = resp.code
                         when (resp.code) {
                             200 -> {
                                 val body = resp.body?.string().orEmpty()
@@ -394,7 +405,98 @@ class SocialFeedHelper @Inject constructor(
             }
             lastError = page.error
         }
-        RedditPage(error = lastError, openUrl = openUrl)
+        val clientId = settingsRepository.load().redditClientId
+        if (clientId.isNotBlank() && (lastCode == 403 || lastCode == 429 || lastCode == 0)) {
+            val oauthPage = fetchRedditWithInstalledApp(cleaned, clientId, openUrl)
+            if (oauthPage.error == null) {
+                redditCache.put(key, oauthPage)
+                return@withContext oauthPage
+            }
+            lastError = oauthPage.error
+        }
+        if (lastCode == 403 || lastCode == 429) {
+            val jsonUrl = "https://www.reddit.com/search.json?q=${Uri.encode(cleaned)}&sort=relevance&t=year&limit=25"
+            val document = runCatching { webViewFetchBridge.fetchExternalDocument(jsonUrl) }.getOrNull()
+            val posts = document?.let { parseRedditPosts(it) }.orEmpty()
+            if (posts.isNotEmpty()) {
+                val page = RedditPage(posts = posts, openUrl = openUrl)
+                redditCache.put(key, page)
+                return@withContext page
+            }
+        }
+        val codeNote = if (lastCode > 0) " HTTP $lastCode." else ""
+        RedditPage(error = lastError + codeNote, openUrl = openUrl)
+    }
+
+    private suspend fun fetchRedditWithInstalledApp(
+        query: String,
+        clientId: String,
+        openUrl: String
+    ): RedditPage {
+        val token = redditInstalledToken(clientId) ?: return RedditPage(
+            error = "Reddit uygulama anahtarı ile oturum açılamadı.",
+            openUrl = openUrl
+        )
+        val url = "https://oauth.reddit.com/search?q=${Uri.encode(query)}&sort=relevance&t=year&limit=25&raw_json=1"
+        val response = runCatching {
+            val request = Request.Builder()
+                .url(url)
+                .header(SOCIAL_UA_HEADER, REDDIT_OAUTH_UA)
+                .header("Authorization", "Bearer $token")
+                .header("Accept", "application/json")
+                .build()
+            withTimeout(12_000) { socialClient.newCall(request).await() }
+        }
+        return response.fold(
+            onSuccess = { http ->
+                http.use { resp ->
+                    if (!resp.isSuccessful) {
+                        RedditPage(
+                            error = "Reddit OAuth araması başarısız (HTTP ${resp.code}).",
+                            openUrl = openUrl
+                        )
+                    } else {
+                        RedditPage(posts = parseRedditPosts(resp.body?.string().orEmpty()), openUrl = openUrl)
+                    }
+                }
+            },
+            onFailure = { error ->
+                if (error is CancellationException) throw error
+                RedditPage(error = "Reddit OAuth aramasına bağlanılamadı.", openUrl = openUrl)
+            }
+        )
+    }
+
+    private suspend fun redditInstalledToken(clientId: String): String? {
+        val now = System.currentTimeMillis()
+        redditToken?.let { token ->
+            if (now < redditTokenUntilMs) return token
+        }
+        val basic = Base64.encodeToString("$clientId:".toByteArray(), Base64.NO_WRAP)
+        val body = "grant_type=${Uri.encode("https://oauth.reddit.com/grants/installed_client")}" +
+            "&device_id=${Uri.encode(settingsRepository.redditDeviceId())}"
+        val request = Request.Builder()
+            .url("https://www.reddit.com/api/v1/access_token")
+            .header(SOCIAL_UA_HEADER, REDDIT_OAUTH_UA)
+            .header("Authorization", "Basic $basic")
+            .header("Accept", "application/json")
+            .post(body.toRequestBody("application/x-www-form-urlencoded".toMediaType()))
+            .build()
+        return runCatching {
+            withTimeout(12_000) { socialClient.newCall(request).await() }.use { response ->
+                if (!response.isSuccessful) return@use null
+                val json = JSONObject(response.body?.string().orEmpty())
+                val token = json.optString("access_token")
+                val expires = json.optLong("expires_in", 3600L)
+                if (token.isBlank()) return@use null
+                redditToken = token
+                redditTokenUntilMs = System.currentTimeMillis() + (expires - 30).coerceAtLeast(30) * 1000L
+                token
+            }
+        }.getOrElse { error ->
+            if (error is CancellationException) throw error
+            null
+        }
     }
 
     suspend fun fetchRedditComments(permalink: String): RedditCommentsPage = withContext(Dispatchers.IO) {

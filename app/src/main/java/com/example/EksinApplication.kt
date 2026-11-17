@@ -81,7 +81,7 @@ class EksinApplication : Application(), ComponentCallbacks2, ImageLoaderFactory 
                     .maxSizeBytes(100L * 1024L * 1024L)
                     .build()
             }
-            .crossfade(true)
+            .crossfade(false)
             .respectCacheHeaders(true)
             .build()
     }

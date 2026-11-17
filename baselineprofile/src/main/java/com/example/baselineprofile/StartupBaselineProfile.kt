@@ -27,6 +27,29 @@ class StartupBaselineProfile {
         pressHome()
         startActivityAndWait()
         device.wait(Until.hasObject(By.pkg(TARGET_PACKAGE)), 5_000)
+        // First fling of the visible list (Gündem on a cold start).
+        repeat(3) {
+            device.swipe(
+                device.displayWidth / 2,
+                device.displayHeight * 3 / 4,
+                device.displayWidth / 2,
+                device.displayHeight / 5,
+                40
+            )
+            device.waitForIdle()
+        }
+        listOf("Bugün", "Kanallar", "DEBE").forEach { label ->
+            device.findObject(By.textContains(label))?.click()
+            device.waitForIdle()
+            device.swipe(
+                device.displayWidth / 2,
+                device.displayHeight * 3 / 4,
+                device.displayWidth / 2,
+                device.displayHeight / 5,
+                40
+            )
+            device.waitForIdle()
+        }
     }
 
     private companion object {

@@ -38,8 +38,10 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.coroutines.resume
 import okhttp3.Cache
 import okhttp3.ConnectionPool
 import okhttp3.OkHttpClient
@@ -148,6 +150,7 @@ class WebViewFetchBridge @Inject constructor(
 
     @Volatile
     private var backgroundWebView: WebView? = null
+    private var externalWebView: WebView? = null
 
     @Volatile
     private var initializedOriginDomain: String = ""
@@ -1680,6 +1683,68 @@ class WebViewFetchBridge @Inject constructor(
             """.trimIndent()
         } catch (_: Throwable) {
             null
+        }
+    }
+
+    /**
+     * Loads one absolute https URL in a separate WebView so a site that blocks
+     * OkHttp (Reddit JSON) can be read with the real browser user agent and
+     * CookieManager. The Ekşi WebView, its origin check, and the verification
+     * flag are left alone.
+     */
+    @SuppressLint("SetJavaScriptEnabled")
+    suspend fun fetchExternalDocument(rawUrl: String): String? {
+        if (!rawUrl.startsWith("https://")) return null
+        if (!WebViewCookieJar.isHardwareWebViewSupported()) return null
+        return withTimeoutOrNull(12_000) {
+            withContext(Dispatchers.Main) {
+                val webView = getOrCreateExternalWebViewOnMain() ?: return@withContext null
+                suspendCancellableCoroutine { continuation ->
+                    webView.webViewClient = object : WebViewClient() {
+                        override fun onPageFinished(view: WebView?, url: String?) {
+                            view?.evaluateJavascript(
+                                "(function(){return document.body?document.body.innerText:'';})()"
+                            ) { raw ->
+                                if (!continuation.isActive) return@evaluateJavascript
+                                val text = decodeJsString(raw)
+                                continuation.resume(text.ifBlank { null })
+                            }
+                        }
+                    }
+                    continuation.invokeOnCancellation { webView.stopLoading() }
+                    webView.loadUrl(rawUrl, mapOf("Accept" to "application/json, text/plain;q=0.9"))
+                }
+            }
+        }
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun getOrCreateExternalWebViewOnMain(): WebView? {
+        if (!WebViewCookieJar.isHardwareWebViewSupported()) return null
+        externalWebView?.let { return it }
+        val webView = WebView(appContext).apply {
+            settings.javaScriptEnabled = true
+            settings.domStorageEnabled = true
+            settings.loadsImagesAutomatically = false
+            settings.blockNetworkImage = true
+            settings.userAgentString = userAgentProvider.getUserAgent()
+            try {
+                CookieManager.getInstance().setAcceptCookie(true)
+                CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+            } catch (_: Throwable) {
+            }
+        }
+        externalWebView = webView
+        return webView
+    }
+
+    private fun decodeJsString(raw: String?): String {
+        val value = raw?.trim().orEmpty()
+        if (value.isEmpty() || value == "null") return ""
+        return try {
+            JSONObject("{\"v\":$value}").optString("v")
+        } catch (_: Throwable) {
+            value.removeSurrounding("\"")
         }
     }
 

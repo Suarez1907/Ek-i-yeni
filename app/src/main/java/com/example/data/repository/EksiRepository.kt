@@ -24,8 +24,12 @@ import com.example.data.model.TopicPageData
 import com.example.data.remote.EksiParser
 import com.example.network.WebViewCookieJar
 import com.example.network.WebViewFetchBridge
+import com.example.util.await
 import com.example.util.failureUnlessCancelled
 import com.example.util.runCatchingUnlessCancelled
+import kotlinx.coroutines.withTimeoutOrNull
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -73,7 +77,8 @@ class EksiRepository @Inject constructor(
     private val webViewFetchBridge: WebViewFetchBridge,
     private val eksiParser: EksiParser,
     private val readStateDao: ReadStateDao,
-    private val eksinDao: EksinDao
+    private val eksinDao: EksinDao,
+    private val okHttpClient: OkHttpClient
 ) {
 
     private val repositoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -875,6 +880,14 @@ class EksiRepository @Inject constructor(
             WebViewCookieJar.DEFAULT_BASE_URL
         }.trimEnd('/')
 
+        val quickId = item.entryId?.filter { it.isDigit() }.orEmpty()
+        if (quickId.isNotBlank()) {
+            val quickCount = readFavoriteCountOverHttp(baseDomain, quickId)
+            if (quickCount != null && quickCount > 0) {
+                return@withContext rememberFavorite(item, key, quickCount, quickId, item.author, item.title, baseDomain)
+            }
+        }
+
         try {
             val targetFetchUrl = if (!item.entryId.isNullOrBlank()) {
                 "$baseDomain/entry/${item.entryId.trim().filter { it.isDigit() }}"
@@ -924,15 +937,14 @@ class EksiRepository @Inject constructor(
                         entryTopicTitleCache[entryKey] = resolvedTitle
                     }
                 }
-                return@withContext item.copy(
-                    id = resolvedEntryId.ifBlank { item.id },
-                    title = resolvedTitle,
-                    url = resolvedUrl,
-                    favoriteCount = favCount,
-                    badgeText = "♥ $favCount",
+                return@withContext rememberFavorite(
+                    item = item,
+                    key = key,
+                    favCount = favCount,
+                    entryId = resolvedEntryId,
                     author = item.author ?: metadata.author,
-                    entryId = resolvedEntryId.takeIf { it.isNotBlank() },
-                    isDirectEntry = true
+                    title = resolvedTitle,
+                    baseDomain = baseDomain
                 )
             }
         } catch (e: Throwable) {
@@ -940,6 +952,61 @@ class EksiRepository @Inject constructor(
             // Ağ hatası durumunda mevcut öğeyi koru
         }
         item
+    }
+
+    private fun rememberFavorite(
+        item: RankedTopicOrEntryItem,
+        key: String,
+        favCount: Int,
+        entryId: String,
+        author: String?,
+        title: String,
+        baseDomain: String
+    ): RankedTopicOrEntryItem {
+        val resolvedEntryId = entryId.filter { it.isDigit() }
+        val resolvedTitle = title.ifBlank { item.title }
+        val resolvedUrl = if (resolvedEntryId.isNotBlank()) {
+            "$baseDomain/entry/$resolvedEntryId"
+        } else {
+            item.url
+        }
+        entryFavoriteCountCache[key] = favCount
+        if (!author.isNullOrBlank()) entryAuthorCache[key] = author
+        if (resolvedTitle.isNotBlank()) entryTopicTitleCache[key] = resolvedTitle
+        if (resolvedEntryId.isNotBlank()) {
+            val entryKey = "entry:$resolvedEntryId"
+            entryResolvedIdCache[key] = resolvedEntryId
+            entryResolvedIdCache[entryKey] = resolvedEntryId
+            entryFavoriteCountCache[entryKey] = favCount
+            if (!author.isNullOrBlank()) entryAuthorCache[entryKey] = author
+            if (resolvedTitle.isNotBlank()) entryTopicTitleCache[entryKey] = resolvedTitle
+        }
+        return item.copy(
+            id = resolvedEntryId.ifBlank { item.id },
+            title = resolvedTitle,
+            url = resolvedUrl,
+            favoriteCount = favCount,
+            badgeText = "♥ $favCount",
+            author = item.author ?: author,
+            entryId = resolvedEntryId.takeIf { it.isNotBlank() },
+            isDirectEntry = true
+        )
+    }
+
+    private suspend fun readFavoriteCountOverHttp(baseDomain: String, entryId: String): Int? {
+        val request = Request.Builder()
+            .url("${baseDomain.trimEnd('/')}/entry/$entryId")
+            .header("Accept", "text/html")
+            .build()
+        return withTimeoutOrNull(8_000) {
+            runCatchingUnlessCancelled {
+                okHttpClient.newCall(request).await().use { response ->
+                    if (!response.isSuccessful) return@use null
+                    val html = response.body?.string().orEmpty()
+                    eksiParser.parseEntryDetailMetadata(html, entryId)?.favoriteCount?.takeIf { it > 0 }
+                }
+            }.getOrNull()
+        }
     }
 
     /**
