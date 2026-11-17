@@ -471,7 +471,7 @@ class GeminiHelper @Inject constructor(
                                 val apiErrorMessage = extractApiErrorMessage(errorBody, code, modelName)
                                 lastErrorMessage = apiErrorMessage
 
-                                val canFallback = (code == 404 || code == 429 || code == 503) &&
+                                val canFallback = (code == 400 || code == 404 || code == 429 || code == 503) &&
                                     index < FALLBACK_MODELS.lastIndex
                                 if (canFallback) {
                                     Log.w(

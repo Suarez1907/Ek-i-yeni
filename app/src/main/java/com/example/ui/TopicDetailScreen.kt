@@ -118,7 +118,6 @@ import coil.compose.SubcomposeAsyncImage
 import coil.request.ImageRequest
 import coil.size.Precision
 import com.example.ai.AiPrompts
-import com.example.ai.AiProviderId
 import com.example.ai.GeminiAnalysisMode
 import com.example.network.SocialFeedKind
 import com.example.data.model.EntryItem
@@ -330,7 +329,7 @@ fun TopicDetailScreen(
     GeminiSummaryBottomSheet(
         topicTitle = activeTitle,
         streamState = geminiStreamState,
-        hasSavedApiKey = if (aiConfig.provider == AiProviderId.GEMINI) isGeminiKeyConfigured else true,
+        hasSavedApiKey = isGeminiKeyConfigured,
         keyDecryptionWarning = geminiKeyWarning,
         onSelectMode = { mode ->
             viewModel.runGeminiAnalysisStream(

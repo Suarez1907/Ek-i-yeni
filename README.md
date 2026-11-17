@@ -14,7 +14,9 @@ Debug does not need a release keystore or API secrets. The Android Gradle Plugin
 
 The Gemini API key is entered in the app and stored with the Android Keystore. It is not compiled into the APK.
 
-Text AI uses the provider selected in Profil. Gemini is the default. The OpenAI-compatible provider defaults to DeepSeek (`https://api.deepseek.com`, model `deepseek-flash`, thinking disabled) and its key is stored in a separate Keystore entry. Image generation stays on Gemini and the studio button is disabled for the other provider. Smart filter and the optional cloud batch are off until enabled in Profil. No AI key is a GitHub secret, and no AI call runs at startup.
+Text AI uses Gemini only. A previously saved DeepSeek or OpenAI-compatible choice is switched back to Gemini and that extra key is dropped. The summary chain starts with `gemini-4-hydrogen` and falls back to the older Gemini models on HTTP 400 or 404. Smart filter and the optional cloud batch stay off until enabled in Profil. No AI key is a GitHub secret, and no AI call runs at startup.
+
+Reddit can use an optional installed-app client id from Profil. Without it, a 403 from the public JSON API is retried in the in-app WebView. The Programlama channel uses `https://eksisozluk.com/basliklar/kanal/programlama`.
 
 X and Reddit load only after the topic chips are tapped. They reuse the same text provider for Turkish translation and the 5-bullet summary. `gemini-3.5-flash-lite` is already the first model in that chain.
 

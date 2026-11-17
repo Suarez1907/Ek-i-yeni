@@ -113,8 +113,6 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.paging.LoadState
 import androidx.paging.compose.LazyPagingItems
 import androidx.paging.compose.collectAsLazyPagingItems
-import com.example.ai.AiProviderId
-import com.example.ai.DeepSeekPreset
 import com.example.ai.PersonalGundemRanker
 import com.example.data.local.BookmarkedEntryEntity
 import com.example.data.local.TopicReadStateEntity
@@ -810,11 +808,10 @@ fun MainScaffold(
         if (selectedTopic == null) {
             val textStream by viewModel.geminiStreamState.collectAsStateWithLifecycle()
             val geminiReady by viewModel.isGeminiKeyConfigured.collectAsStateWithLifecycle()
-            val providerConfig by viewModel.aiConfig.collectAsStateWithLifecycle()
             GeminiSummaryBottomSheet(
                 topicTitle = "Sana göre",
                 streamState = textStream,
-                hasSavedApiKey = if (providerConfig.provider == AiProviderId.GEMINI) geminiReady else true,
+                hasSavedApiKey = geminiReady,
                 onSelectMode = {},
                 onDismiss = { viewModel.clearGeminiStream() }
             )
@@ -1961,7 +1958,6 @@ private fun ProfileAndStudioScreenContent(
     val currentTheme by viewModel.themeMode.collectAsStateWithLifecycle()
     val isGeminiKeyConfigured by viewModel.isGeminiKeyConfigured.collectAsStateWithLifecycle()
     val aiConfig by viewModel.aiConfig.collectAsStateWithLifecycle()
-    val hasOpenAiKey by viewModel.hasOpenAiKey.collectAsStateWithLifecycle()
 
     val selectedModel by viewModel.selectedImageModel.collectAsStateWithLifecycle()
     val selectedSize by viewModel.selectedImageSize.collectAsStateWithLifecycle()
@@ -1971,9 +1967,7 @@ private fun ProfileAndStudioScreenContent(
     var apiKeyInput by remember { mutableStateOf("") }
     var showApiKeyPlain by remember { mutableStateOf(false) }
     var apiKeyFeedbackMessage by remember { mutableStateOf<String?>(null) }
-    var openAiKeyInput by remember { mutableStateOf("") }
-    var openAiBaseInput by remember(aiConfig.openAiBaseUrl) { mutableStateOf(aiConfig.openAiBaseUrl) }
-    var openAiModelInput by remember(aiConfig.openAiModel) { mutableStateOf(aiConfig.openAiModel) }
+    var redditClientInput by remember(aiConfig.redditClientId) { mutableStateOf(aiConfig.redditClientId) }
 
     var promptInput by rememberSaveable {
         mutableStateOf("Gece yarısı OLED siyah ekranda yeşil neon ışıklarla aydınlanan fütüristik sözlük kütüphanesi")
@@ -2286,81 +2280,30 @@ private fun ProfileAndStudioScreenContent(
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     Text(
-                        text = "Metin sağlayıcısı",
+                        text = "Gemini ve Reddit",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold,
                         color = EksiNeonGreen
                     )
                     Text(
-                        text = "Gemini varsayılan. OpenAI uyumlu seçenek DeepSeek ön ayarıyla gelir (api.deepseek.com, deepseek-flash). Anahtar Keystore'da durur ve çerez gönderilmez. Görsel üretim yalnızca Gemini'de açıktır.",
+                        text = "Metin özeti ve çeviri yalnızca Gemini kullanır. Eski bir DeepSeek seçimi varsa Gemini'ye döner. Reddit JSON engellenirse, isteğe bağlı installed-app client id ile oauth.reddit.com denenir.",
                         style = MaterialTheme.typography.bodySmall,
                         color = OledTextSecondary
                     )
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        AiProviderId.entries.forEach { provider ->
-                            FilterChip(
-                                selected = aiConfig.provider == provider,
-                                onClick = { viewModel.selectAiProvider(provider) },
-                                label = { Text(provider.label) }
-                            )
-                        }
-                    }
                     OutlinedTextField(
-                        value = openAiKeyInput,
-                        onValueChange = { openAiKeyInput = it },
+                        value = redditClientInput,
+                        onValueChange = { redditClientInput = it },
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true,
-                        label = { Text(if (hasOpenAiKey) "Yeni OpenAI uyumlu anahtar (kayıtlı)" else "OpenAI uyumlu API anahtarı") },
-                        visualTransformation = PasswordVisualTransformation()
+                        label = { Text("Reddit client id (isteğe bağlı)") }
                     )
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(
-                            onClick = {
-                                viewModel.saveOpenAiCompatibleKey(openAiKeyInput)
-                                openAiKeyInput = ""
-                            },
-                            enabled = openAiKeyInput.isNotBlank(),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = EksiNeonGreen,
-                                contentColor = OledOnAccentColor
-                            )
-                        ) { Text("Anahtarı kaydet") }
-                        if (hasOpenAiKey) {
-                            OutlinedButton(onClick = { viewModel.clearOpenAiCompatibleKey() }) {
-                                Text("Temizle")
-                            }
-                        }
-                    }
-                    OutlinedTextField(
-                        value = openAiBaseInput,
-                        onValueChange = { openAiBaseInput = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        label = { Text("Base URL") }
-                    )
-                    OutlinedTextField(
-                        value = openAiModelInput,
-                        onValueChange = { openAiModelInput = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        label = { Text("Model") }
-                    )
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(
-                            onClick = {
-                                openAiBaseInput = DeepSeekPreset.BASE_URL
-                                openAiModelInput = DeepSeekPreset.MODEL
-                                viewModel.updateOpenAiEndpoint(DeepSeekPreset.BASE_URL, DeepSeekPreset.MODEL)
-                            }
-                        ) { Text("DeepSeek ön ayarı") }
-                        Button(
-                            onClick = { viewModel.updateOpenAiEndpoint(openAiBaseInput, openAiModelInput) },
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = EksiNeonGreen,
-                                contentColor = OledOnAccentColor
-                            )
-                        ) { Text("Adresi kaydet") }
-                    }
+                    Button(
+                        onClick = { viewModel.saveRedditClientId(redditClientInput) },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = EksiNeonGreen,
+                            contentColor = OledOnAccentColor
+                        )
+                    ) { Text("Reddit kimliğini kaydet") }
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,

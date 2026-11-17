@@ -35,8 +35,7 @@ import javax.inject.Singleton
 @Singleton
 class AiTextGateway @Inject constructor(
     private val geminiHelper: GeminiHelper,
-    private val settingsRepository: AiSettingsRepository,
-    private val secretStore: EncryptedSecretStore
+    private val settingsRepository: AiSettingsRepository
 ) {
     private val httpClient: OkHttpClient = OkHttpClient.Builder()
         .cookieJar(CookieJar.NO_COOKIES)
@@ -56,11 +55,8 @@ class AiTextGateway @Inject constructor(
     fun currentConfig(): AiProviderConfig = settingsRepository.load()
 
     fun stream(prompt: String): Flow<AiTextChunk> = flow {
-        val config = settingsRepository.load()
-        when (config.provider) {
-            AiProviderId.GEMINI -> emitAllGemini(prompt)
-            AiProviderId.OPENAI_COMPATIBLE -> emitAllOpenAi(prompt, config)
-        }
+        settingsRepository.load()
+        emitAllGemini(prompt)
     }.flowOn(Dispatchers.IO)
 
     private suspend fun kotlinx.coroutines.flow.FlowCollector<AiTextChunk>.emitAllGemini(prompt: String) {
@@ -96,42 +92,6 @@ class AiTextGateway @Inject constructor(
         emit(AiTextChunk.Failure(failed))
     }
 
-    private suspend fun kotlinx.coroutines.flow.FlowCollector<AiTextChunk>.emitAllOpenAi(
-        prompt: String,
-        config: AiProviderConfig
-    ) {
-        val apiKey = secretStore.read(OPENAI_SECRET)
-        if (apiKey.isBlank()) {
-            emit(AiTextChunk.Failure("OpenAI uyumlu sağlayıcı anahtarı yok."))
-            return
-        }
-        val payload = JSONObject().apply {
-            put("model", config.openAiModel.ifBlank { DeepSeekPreset.MODEL })
-            put("stream", true)
-            put("max_tokens", AiPrompts.MAX_OUTPUT_TOKENS)
-            put("messages", JSONArray().put(JSONObject().apply {
-                put("role", "user")
-                put("content", prompt)
-            }))
-            if (config.openAiBaseUrl.contains("deepseek.com", ignoreCase = true)) {
-                put("thinking", JSONObject().put("type", "disabled"))
-            }
-        }
-        val request = Request.Builder()
-            .url(OpenAiEndpoints.chatCompletionsUrl(config.openAiBaseUrl))
-            .post(payload.toString().toRequestBody(JSON_MEDIA))
-            .header("Authorization", "Bearer $apiKey")
-            .header("Accept", "text/event-stream")
-            .build()
-        val outcome = readSse(request) { line ->
-            val data = line.removePrefix("data:").trim()
-            if (data.isEmpty()) "" else SseParsers.openAiDelta(data)
-        }
-        if (outcome != StreamRead.SUCCESS) {
-            emit(AiTextChunk.Failure(outcome.message))
-        }
-    }
-
     private suspend fun kotlinx.coroutines.flow.FlowCollector<AiTextChunk>.readSse(
         request: Request,
         decode: (String) -> String?
@@ -144,7 +104,7 @@ class AiTextGateway @Inject constructor(
             val response = withTimeout(20_000) { call.await() }
             response.use { resp ->
                 if (!resp.isSuccessful) {
-                    val retry = resp.code == 404 || resp.code == 429 || resp.code == 503
+                    val retry = resp.code == 400 || resp.code == 404 || resp.code == 429 || resp.code == 503
                     return StreamRead("HTTP ${resp.code}", retry)
                 }
                 val body = resp.body ?: return StreamRead("Boş yanıt", false)
@@ -193,7 +153,6 @@ class AiTextGateway @Inject constructor(
     }
 
     companion object {
-        const val OPENAI_SECRET = "openai_compatible"
         private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
     }
 }

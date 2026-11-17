@@ -7,7 +7,6 @@ import com.example.ai.FilterDecisionParser
 import com.example.ai.EntryFlag
 import com.example.ai.EntryHeuristics
 import com.example.ai.NlSearchParser
-import com.example.ai.OpenAiEndpoints
 import com.example.ai.PersonalGundemRanker
 import com.example.ai.SseParsers
 import com.example.data.model.EntryItem
@@ -44,28 +43,15 @@ class AiFeatureTest {
     }
 
     @Test
-    fun geminiAndOpenAiSseDeltas() {
+    fun geminiSseDeltaAndError() {
         val gemini = """{"candidates":[{"content":{"parts":[{"text":"merhaba"}]}}]}"""
         assertEquals("merhaba", SseParsers.geminiDelta(gemini))
-        val openAi = """{"choices":[{"delta":{"content":"selam"}}]}"""
-        assertEquals("selam", SseParsers.openAiDelta(openAi))
-        assertNull(SseParsers.openAiDelta("[DONE]"))
         try {
             SseParsers.geminiDelta("""{"error":{"message":"kota"}}""")
             throw AssertionError("error payload should fail")
         } catch (expected: IllegalStateException) {
             assertTrue(expected.message!!.contains("kota"))
         }
-        val reasoning = """{"choices":[{"delta":{"reasoning_content":"gizli"}}]}"""
-        assertEquals("", SseParsers.openAiDelta(reasoning))
-    }
-
-    @Test
-    fun deepSeekEndpoint_usesOfficialBaseUrl() {
-        assertEquals(
-            "https://api.deepseek.com/chat/completions",
-            OpenAiEndpoints.chatCompletionsUrl("https://api.deepseek.com/")
-        )
     }
 
     @Test

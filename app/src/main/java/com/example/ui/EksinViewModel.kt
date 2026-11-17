@@ -13,14 +13,11 @@ import androidx.paging.PagingData
 import androidx.paging.cachedIn
 import com.example.ai.AiPrompts
 import com.example.ai.AiProviderConfig
-import com.example.ai.AiProviderId
 import com.example.ai.AiSettingsRepository
 import com.example.ai.AiTextChunk
 import com.example.ai.AiTextGateway
-import com.example.ai.DeepSeekPreset
 import com.example.ai.DiscussionMapParser
 import com.example.ai.DiscussionPoint
-import com.example.ai.EncryptedSecretStore
 import com.example.ai.EntryHeuristics
 import com.example.ai.FilterDecisionParser
 import com.example.ai.GeminiAnalysisMode
@@ -184,7 +181,6 @@ class EksinViewModel @Inject constructor(
     private val geminiHelper: GeminiHelper,
     private val aiSettings: AiSettingsRepository,
     private val aiGateway: AiTextGateway,
-    private val secretStore: EncryptedSecretStore,
     private val onDevicePrompt: OnDevicePromptAssistant,
     private val socialFeedHelper: SocialFeedHelper,
     private val viewModelCacheCleaner: ViewModelCacheCleaner,
@@ -320,9 +316,6 @@ class EksinViewModel @Inject constructor(
     private val _aiConfig = MutableStateFlow(AiProviderConfig())
     val aiConfig: StateFlow<AiProviderConfig> = _aiConfig.asStateFlow()
 
-    private val _hasOpenAiKey = MutableStateFlow(false)
-    val hasOpenAiKey: StateFlow<Boolean> = _hasOpenAiKey.asStateFlow()
-
     private val _hiddenEntryIds = MutableStateFlow<Set<String>>(emptySet())
     val hiddenEntryIds: StateFlow<Set<String>> = _hiddenEntryIds.asStateFlow()
 
@@ -457,7 +450,6 @@ class EksinViewModel @Inject constructor(
             _hasCfClearance.value = webViewFetchBridge.isDomVerified()
             _isGeminiKeyConfigured.value = geminiHelper.hasValidApiKey()
             _aiConfig.value = aiSettings.load()
-            _hasOpenAiKey.value = secretStore.has(AiTextGateway.OPENAI_SECRET)
         }
 
         viewModelScope.launch {
@@ -740,15 +732,19 @@ class EksinViewModel @Inject constructor(
 
         val workingArray = initialItems.toMutableList()
         val stateMutex = kotlinx.coroutines.sync.Mutex()
-        val semaphore = Semaphore(4)
+        val semaphore = Semaphore(3)
+        val failures = AtomicInteger(0)
 
         withContext(Dispatchers.IO) {
             coroutineScope {
                 needsEnrichment.forEach { (index, item) ->
                     if (item.favoriteCount <= 0 || item.entryId.isNullOrBlank()) {
                         launch {
+                            if (failures.get() >= 6) return@launch
                             semaphore.withPermit {
+                                if (failures.get() >= 6) return@withPermit
                                 val enriched = repository.fetchAndCacheEntryFavoriteCount(item)
+                                if (enriched.favoriteCount <= 0) failures.incrementAndGet() else failures.set(0)
                                 if (enriched.favoriteCount != item.favoriteCount ||
                                     enriched.badgeText != item.badgeText ||
                                     enriched.author != item.author ||
@@ -1616,27 +1612,10 @@ class EksinViewModel @Inject constructor(
         }
     }
 
-    fun selectAiProvider(provider: AiProviderId) {
-        updateAiConfig(_aiConfig.value.copy(provider = provider))
-    }
-
-    fun saveOpenAiCompatibleKey(rawKey: String) {
-        secretStore.save(AiTextGateway.OPENAI_SECRET, rawKey)
-        _hasOpenAiKey.value = secretStore.has(AiTextGateway.OPENAI_SECRET)
-    }
-
-    fun clearOpenAiCompatibleKey() {
-        secretStore.clear(AiTextGateway.OPENAI_SECRET)
-        _hasOpenAiKey.value = false
-    }
-
-    fun updateOpenAiEndpoint(baseUrl: String, model: String) {
-        updateAiConfig(
-            _aiConfig.value.copy(
-                openAiBaseUrl = baseUrl.ifBlank { DeepSeekPreset.BASE_URL },
-                openAiModel = model.ifBlank { DeepSeekPreset.MODEL }
-            )
-        )
+    fun saveRedditClientId(raw: String) {
+        val cleaned = raw.trim()
+        updateAiConfig(_aiConfig.value.copy(redditClientId = cleaned))
+        aiSettings.saveRedditClientId(cleaned)
     }
 
     fun setSmartFilterEnabled(enabled: Boolean) {
@@ -1671,23 +1650,10 @@ class EksinViewModel @Inject constructor(
         cacheKey: String
     ) {
         activeGeminiJob?.cancel()
-        val config = _aiConfig.value
-        val ready = when (config.provider) {
-            AiProviderId.GEMINI -> geminiHelper.hasValidApiKey()
-            AiProviderId.OPENAI_COMPATIBLE -> secretStore.has(AiTextGateway.OPENAI_SECRET)
-        }
-        if (config.provider == AiProviderId.GEMINI) {
-            _isGeminiKeyConfigured.value = ready
-        }
+        val ready = geminiHelper.hasValidApiKey()
+        _isGeminiKeyConfigured.value = ready
         if (!ready) {
-            _geminiStreamState.value = if (config.provider == AiProviderId.GEMINI) {
-                GeminiStreamState.AwaitingApiKey(mode)
-            } else {
-                GeminiStreamState.Error(
-                    mode = mode,
-                    message = "OpenAI uyumlu sağlayıcı anahtarı yok. Profil ekranından kaydedin."
-                )
-            }
+            _geminiStreamState.value = GeminiStreamState.AwaitingApiKey(mode)
             return
         }
         aiGateway.cached(cacheKey)?.let { cached ->
@@ -1881,18 +1847,8 @@ class EksinViewModel @Inject constructor(
             putSocialTranslation(postId, current!!.copy(showing = !current.showing, error = null))
             return
         }
-        val config = _aiConfig.value
-        val ready = when (config.provider) {
-            AiProviderId.GEMINI -> geminiHelper.hasValidApiKey()
-            AiProviderId.OPENAI_COMPATIBLE -> secretStore.has(AiTextGateway.OPENAI_SECRET)
-        }
-        if (!ready) {
-            val message = if (config.provider == AiProviderId.GEMINI) {
-                "Gemini anahtarı yok."
-            } else {
-                "OpenAI uyumlu anahtar yok."
-            }
-            putSocialTranslation(postId, CardTranslation(error = message))
+        if (!geminiHelper.hasValidApiKey()) {
+            putSocialTranslation(postId, CardTranslation(error = "Gemini anahtarı yok."))
             return
         }
         socialTranslationJobs[postId]?.cancel()
@@ -2074,13 +2030,6 @@ class EksinViewModel @Inject constructor(
     fun generateEntryVisual(promptText: String) {
         val cleanPrompt = promptText.trim()
         if (cleanPrompt.isEmpty()) return
-        if (!_aiConfig.value.provider.supportsImages) {
-            _aiImageState.value = AiImageState.Error(
-                "Görsel üretim yalnızca Gemini sağlayıcısında kullanılabilir."
-            )
-            return
-        }
-
         val chosenModel = _selectedImageModel.value
         val chosenSize = _selectedImageSize.value
         val chosenRatio = _selectedAspectRatio.value
@@ -2138,7 +2087,7 @@ class EksinViewModel @Inject constructor(
         private const val TAG = "EksinViewModel"
         private const val PREFS_READ_TOPIC_COUNTS = "eksin_read_topic_counts_prefs"
         private const val MAX_READ_COUNT_KEYS = 400
-        private const val MAX_FAVORITE_ENRICHMENT = 8
+        private const val MAX_FAVORITE_ENRICHMENT = 50
         private const val KEY_TOPIC_URL = "open_topic_url"
         private const val KEY_TOPIC_TITLE = "open_topic_title"
         private const val KEY_TOPIC_ID = "open_topic_id"

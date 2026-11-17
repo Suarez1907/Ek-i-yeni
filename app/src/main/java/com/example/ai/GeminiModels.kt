@@ -6,9 +6,11 @@ package com.example.ai
  * (https://ai.google.dev/gemini-api/docs/image-generation).
  *
  * Text:
- * - `gemini-3.5-flash-lite` (21 Jul 2026, no shutdown announced) is the default summary model.
+ * - `gemini-4-hydrogen` is the Gemini API model id for Gemini 4 Hydrogen
+ *   (used by generateContent; a missing or rejected id falls through on HTTP 400/404).
+ * - `gemini-3.5-flash-lite` (21 Jul 2026, no shutdown announced) is the next summary model.
  * - `gemini-3.8-flash` (2 Sep 2026, no shutdown announced) is the next text fallback.
- * - `gemini-2.5-flash-lite` remains available for older keys; new projects should prefer 3.x.
+ * - `gemini-2.5-flash-lite` remains available for older keys.
  * `gemini-flash-lite-latest` is not a documented model id and is not used.
  *
  * Image:
@@ -17,12 +19,15 @@ package com.example.ai
  * `gemini-3.5-flash-lite` is a text model and must not be sent as an image endpoint.
  */
 object GeminiModels {
-    const val SUMMARY_PRIMARY = "gemini-3.5-flash-lite"
+    const val SUMMARY_HYDROGEN = "gemini-4-hydrogen"
+    const val SUMMARY_PRIMARY = SUMMARY_HYDROGEN
+    const val SUMMARY_FLASH_LITE = "gemini-3.5-flash-lite"
     const val SUMMARY_FLASH = "gemini-3.8-flash"
     const val SUMMARY_LEGACY = "gemini-2.5-flash-lite"
 
     val SUMMARY_FALLBACK_CHAIN: List<String> = listOf(
-        SUMMARY_PRIMARY,
+        SUMMARY_HYDROGEN,
+        SUMMARY_FLASH_LITE,
         SUMMARY_FLASH,
         SUMMARY_LEGACY
     )
@@ -31,5 +36,5 @@ object GeminiModels {
     const val IMAGE_PRO = "gemini-3-pro-image"
     const val IMAGE_DEFAULT = IMAGE_FAST
 
-    const val SUMMARY_DISPLAY_NAME = "Gemini 3.5 Flash-Lite"
+    const val SUMMARY_DISPLAY_NAME = "Gemini 4 Hydrogen"
 }
