@@ -1193,7 +1193,6 @@ private fun DebeAndPeriodicBestsScreenContent(
     }
 }
 
-@Composable
 /**
  * 3. ÖZELLİK: ANLIK ARAMA ÖNERİLERİ (AUTOCOMPLETE - BAŞLIKLAR VE @YAZARLAR) + SAYFALAMALI ARAMA.
  */

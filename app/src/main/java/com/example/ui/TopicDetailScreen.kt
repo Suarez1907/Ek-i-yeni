@@ -906,7 +906,6 @@ fun TopicDetailScreen(
     }
 }
 
-@Composable
 @OptIn(ExperimentalMaterial3Api::class)
 @Suppress("DEPRECATION")
 @Composable
