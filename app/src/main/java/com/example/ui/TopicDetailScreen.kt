@@ -96,6 +96,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
@@ -187,7 +188,7 @@ fun TopicDetailScreen(
     val coroutineScope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
     val listState = rememberLazyListState()
-    val isHeaderVisible by rememberDetailHeaderVisibility(listState)
+    val topAppBarScrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
 
     val activeTitle = metadata?.topicTitle?.takeIf { it.isNotBlank() } ?: topic.title
     val safeCurrentPage = currentPage.coerceAtLeast(1)
@@ -320,6 +321,7 @@ fun TopicDetailScreen(
     }
 
     Scaffold(
+        modifier = Modifier.nestedScroll(topAppBarScrollBehavior.nestedScrollConnection),
         containerColor = MaterialTheme.colorScheme.background,
         contentWindowInsets = WindowInsets.safeDrawing,
         snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
@@ -329,110 +331,106 @@ fun TopicDetailScreen(
                     .fillMaxWidth()
                     .background(MaterialTheme.colorScheme.surface)
             ) {
-                AnimatedVisibility(
-                    visible = isHeaderVisible,
-                    enter = expandVertically() + fadeIn(),
-                    exit = shrinkVertically() + fadeOut()
-                ) {
-                    TopAppBar(
-                        colors = TopAppBarDefaults.topAppBarColors(
-                            containerColor = MaterialTheme.colorScheme.surface,
-                            titleContentColor = MaterialTheme.colorScheme.onSurface
-                        ),
-                        navigationIcon = {
-                            IconButton(
-                                onClick = onBack,
-                                modifier = Modifier.testTag("topic_detail_back_button")
+                TopAppBar(
+                    scrollBehavior = topAppBarScrollBehavior,
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.surface,
+                        scrolledContainerColor = MaterialTheme.colorScheme.surfaceContainer,
+                        titleContentColor = MaterialTheme.colorScheme.onSurface
+                    ),
+                    navigationIcon = {
+                        IconButton(
+                            onClick = onBack,
+                            modifier = Modifier.testTag("topic_detail_back_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = "Geri",
+                                tint = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                    },
+                    title = {
+                        Column {
+                            Text(
+                                text = activeTitle,
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
-                                Icon(
-                                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                                    contentDescription = "Geri",
-                                    tint = MaterialTheme.colorScheme.onSurface
-                                )
-                            }
-                        },
-                        title = {
-                            Column {
+                                val subtitle = buildString {
+                                    append("Sayfa $safeCurrentPage / $safeTotalPages")
+                                    val meta = metadata
+                                    if (meta != null) {
+                                        if (activeFilterMode == TopicFilterMode.TODAY_POPULAR && !meta.usedTodayFallback) {
+                                            append(" • Bugün")
+                                        } else if (meta.usedTodayFallback) {
+                                            append(" • Tüm Başlık (Bugün Entry Yok)")
+                                        } else if (meta.usedTrackedFallback) {
+                                            append(" • Takipten")
+                                        }
+                                    } else if (pageUiState is TopicPageUiState.Loading) {
+                                        append(" • Yükleniyor...")
+                                    }
+                                }
                                 Text(
-                                    text = activeTitle,
-                                    style = MaterialTheme.typography.titleMedium,
-                                    fontWeight = FontWeight.Bold,
-                                    color = OledTopicUnread,
+                                    text = subtitle,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                ) {
-                                    val subtitle = buildString {
-                                        append("Sayfa $safeCurrentPage / $safeTotalPages")
-                                        val meta = metadata
-                                        if (meta != null) {
-                                            if (activeFilterMode == TopicFilterMode.TODAY_POPULAR && !meta.usedTodayFallback) {
-                                                append(" • Bugün")
-                                            } else if (meta.usedTodayFallback) {
-                                                append(" • Tüm Başlık (Bugün Entry Yok)")
-                                            } else if (meta.usedTrackedFallback) {
-                                                append(" • Takipten")
-                                            }
-                                        } else if (pageUiState is TopicPageUiState.Loading) {
-                                            append(" • Yükleniyor...")
-                                        }
-                                    }
-                                    Text(
-                                        text = subtitle,
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = EksiNeonGreen,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    if (isWaybackArchiveActive) {
-                                        Surface(
-                                            color = Color(0xFF2B2108),
-                                            shape = RoundedCornerShape(6.dp),
-                                            modifier = Modifier
-                                                .border(
-                                                    width = 0.6.dp,
-                                                    color = Color(0xFFFFB74D).copy(alpha = 0.7f),
-                                                    shape = RoundedCornerShape(6.dp)
-                                                )
-                                                .testTag("wayback_archive_badge")
-                                        ) {
-                                            Text(
-                                                text = "📦 Arşiv kopyası (Wayback)",
-                                                fontSize = 10.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                color = Color(0xFFFFB74D),
-                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                if (isWaybackArchiveActive) {
+                                    Surface(
+                                        color = Color(0xFF2B2108),
+                                        shape = RoundedCornerShape(6.dp),
+                                        modifier = Modifier
+                                            .border(
+                                                width = 0.6.dp,
+                                                color = Color(0xFFFFB74D).copy(alpha = 0.7f),
+                                                shape = RoundedCornerShape(6.dp)
                                             )
-                                        }
+                                            .testTag("wayback_archive_badge")
+                                    ) {
+                                        Text(
+                                            text = "📦 Arşiv kopyası (Wayback)",
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color(0xFFFFB74D),
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                        )
                                     }
                                 }
                             }
-                        },
-                        actions = {
-                            IconButton(
-                                onClick = { viewModel.openThemeDialog() },
-                                modifier = Modifier.testTag("topic_detail_theme_button")
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Palette,
-                                    contentDescription = "Tema Seçici",
-                                    tint = EksiNeonGreen,
-                                    modifier = Modifier.size(20.dp)
-                                )
-                            }
-                            IconButton(onClick = { viewModel.refreshCurrentTopicPage() }) {
-                                Icon(
-                                    imageVector = Icons.Default.Refresh,
-                                    contentDescription = "Yenile",
-                                    tint = OledTextSecondary
-                                )
-                            }
                         }
-                    )
-                }
+                    },
+                    actions = {
+                        IconButton(
+                            onClick = { viewModel.openThemeDialog() },
+                            modifier = Modifier.testTag("topic_detail_theme_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Palette,
+                                contentDescription = "Tema Seçici",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                        IconButton(onClick = { viewModel.refreshCurrentTopicPage() }) {
+                            Icon(
+                                imageVector = Icons.Default.Refresh,
+                                contentDescription = "Yenile",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                )
 
                 // Üstte yatay kaydırılabilir modern filtre çipleri:
                 // "Bugün" | "Tümü" | "🔥 Şükela Bugün" | "👑 Şükela Tümü" | "🔗 Linkler" | "🔍 Ara" | "✨ AI Özet"
@@ -909,26 +907,6 @@ fun TopicDetailScreen(
 }
 
 @Composable
-private fun rememberDetailHeaderVisibility(listState: LazyListState): State<Boolean> {
-    var previousIndex by remember(listState) { mutableIntStateOf(0) }
-    var previousScrollOffset by remember(listState) { mutableIntStateOf(0) }
-
-    return remember(listState) {
-        derivedStateOf {
-            val currentIndex = listState.firstVisibleItemIndex
-            val currentOffset = listState.firstVisibleItemScrollOffset
-            val isScrollingUp = when {
-                currentIndex < previousIndex -> true
-                currentIndex > previousIndex -> false
-                else -> currentOffset <= previousScrollOffset
-            }
-            previousIndex = currentIndex
-            previousScrollOffset = currentOffset
-            currentIndex == 0 || isScrollingUp
-        }
-    }
-}
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Suppress("DEPRECATION")
 @Composable
@@ -1034,31 +1012,39 @@ fun SwipeableEntryOledCard(
         }
     ) {
         Card(
-            shape = RoundedCornerShape(14.dp),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+            shape = MaterialTheme.shapes.large,
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceContainerLow
+            ),
             modifier = Modifier
                 .fillMaxWidth()
-                .border(
-                    width = 0.5.dp,
-                    color = if (isFavorited) EksiNeonGreen.copy(alpha = 0.65f) else OledHairlineDivider,
-                    shape = RoundedCornerShape(14.dp)
+                .then(
+                    if (isFavorited) {
+                        Modifier.border(
+                            width = 1.dp,
+                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.65f),
+                            shape = MaterialTheme.shapes.large
+                        )
+                    } else {
+                        Modifier
+                    }
                 )
         ) {
-            Column(modifier = Modifier.padding(14.dp)) {
+            Column(modifier = Modifier.padding(16.dp)) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Surface(
-                        color = OledElevatedCard,
-                        shape = RoundedCornerShape(6.dp)
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                        shape = MaterialTheme.shapes.small
                     ) {
                         Text(
                             text = "Sayfa ${entry.pageNumber} • #${entry.id}",
                             style = MaterialTheme.typography.labelSmall,
-                            color = OledTextSecondary,
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
                         )
                     }
 

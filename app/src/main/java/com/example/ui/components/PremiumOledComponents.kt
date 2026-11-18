@@ -364,48 +364,17 @@ fun FloatingPagerCapsuleBar(
         )
     }
 
-    val isLight = ActiveThemeState.currentMode == AppThemeMode.CLASSIC_LIGHT
-    val frostedGlassBrush = if (isLight) {
-        Brush.verticalGradient(
-            colors = listOf(
-                Color(0xF5FFFFFF),
-                Color(0xF5F2F6F2)
-            )
-        )
-    } else {
-        Brush.verticalGradient(
-            colors = listOf(
-                Color(0xEB131915),
-                Color(0xF20A0E0B)
-            )
-        )
-    }
-
-    Box(
+    Surface(
         modifier = modifier
-            .shadow(
-                elevation = 16.dp,
-                shape = RoundedCornerShape(50),
-                ambientColor = Color.Black.copy(alpha = if (isLight) 0.15f else 0.9f),
-                spotColor = EksiNeonGreen.copy(alpha = 0.25f)
-            )
-            .clip(RoundedCornerShape(50))
-            .background(brush = frostedGlassBrush)
-            .border(
-                width = 0.8.dp,
-                brush = Brush.horizontalGradient(
-                    colors = listOf(
-                        OledHairlineDivider,
-                        EksiNeonGreen.copy(alpha = 0.45f),
-                        OledHairlineDivider
-                    )
-                ),
-                shape = RoundedCornerShape(50)
-            )
-            .padding(horizontal = 6.dp, vertical = 5.dp)
-            .testTag("floating_pager_bar")
+            .testTag("floating_pager_bar"),
+        shape = RoundedCornerShape(50),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        contentColor = MaterialTheme.colorScheme.onSurface,
+        tonalElevation = 6.dp,
+        shadowElevation = 6.dp
     ) {
         Row(
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 5.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
@@ -424,19 +393,18 @@ fun FloatingPagerCapsuleBar(
             )
 
             Surface(
-                color = OledPillGreenBg,
+                color = MaterialTheme.colorScheme.primaryContainer,
+                contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
                 shape = RoundedCornerShape(50),
                 modifier = Modifier
                     .clip(RoundedCornerShape(50))
                     .clickable { showPagePickerDialog = true }
-                    .border(0.6.dp, EksiNeonGreen.copy(alpha = 0.45f), RoundedCornerShape(50))
                     .testTag("pager_center_selector")
             ) {
                 Text(
                     text = "Sayfa $safeCurrent / $safeTotal",
-                    color = EksiNeonGreen,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.ExtraBold,
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold,
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp)
                 )
             }
@@ -496,7 +464,7 @@ private fun PagePickerDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        containerColor = MaterialTheme.colorScheme.surfaceVariant,
+        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
         titleContentColor = MaterialTheme.colorScheme.onSurface,
         textContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
         title = {
@@ -619,7 +587,7 @@ fun ThemeSelectorDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        containerColor = MaterialTheme.colorScheme.surfaceVariant,
+        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
         titleContentColor = MaterialTheme.colorScheme.onSurface,
         textContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
         title = {
@@ -630,7 +598,7 @@ fun ThemeSelectorDialog(
                 Icon(
                     imageVector = Icons.Default.Palette,
                     contentDescription = null,
-                    tint = EksiNeonGreen
+                    tint = MaterialTheme.colorScheme.primary
                 )
                 Text(
                     text = "Arayüz Teması Seçin",
