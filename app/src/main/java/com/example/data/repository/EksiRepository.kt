@@ -269,8 +269,16 @@ class EksiRepository @Inject constructor(
                 val bugunHtml = runCatching {
                     webViewFetchBridge.fetchHtml(rawUrl = bugunUrl, isAjax = true)
                 }.getOrDefault("")
-                val parsedBugun = withContext(Dispatchers.Default) {
+                var parsedBugun = withContext(Dispatchers.Default) {
                     eksiParser.parseLeftFrameTopics(bugunHtml, isTrackedSection = false)
+                }
+                if (parsedBugun.isEmpty()) {
+                    val fullBugunHtml = runCatching {
+                        webViewFetchBridge.fetchHtml(rawUrl = bugunUrl, isAjax = false)
+                    }.getOrDefault("")
+                    parsedBugun = withContext(Dispatchers.Default) {
+                        eksiParser.parseLeftFrameTopics(fullBugunHtml, isTrackedSection = false)
+                    }
                 }
                 val filteredBugun = filterAgainstInMemoryGundem(parsedBugun)
                 if (filteredBugun.isNotEmpty()) {
@@ -288,7 +296,7 @@ class EksiRepository @Inject constructor(
             }
 
             // 1c & 2) Anonim modda (veya `/basliklar/bugun` Gündem ile aynı döndüğünde):
-            // EN FAZLA 2 hızlı kaynağı (`isAjax = true`) TAMAMEN PARALEL başlat.
+            // EN FAZLA 2 hızlı kaynağı (`isAjax = true`, boşsa `isAjax = false` fallback) TAMAMEN PARALEL başlat.
             // İlk tamamlanan kaynağı ANINDA ekrana bas, ikinci tamamlandığında sessizce zenginleştir!
             val firstReadyDeferred = CompletableDeferred<List<TopicItem>>()
 
@@ -301,24 +309,33 @@ class EksiRepository @Inject constructor(
             val channelPage = ((safePage - 1) / 4) + 1
             val deeperAgendaPage = (safePage + 1).coerceAtMost(15)
 
+            inFlightBugunPageJobs[safePage]?.cancel()
             val enrichmentJob = repositoryScope.launch {
                 val resultChannel = Channel<List<TopicItem>>(capacity = 2)
 
-                // Paralel Kaynak 1: Gündem'in bir sonraki sayfası (`/basliklar/gundem?p=2` vb., `isAjax = true`)
+                // Paralel Kaynak 1: Gündem'in bir sonraki sayfası (`/basliklar/gundem?p=2` vb.)
                 val sourceADeferred = async(Dispatchers.IO) {
                     val deeperUrl = "$baseDomain/basliklar/gundem?p=$deeperAgendaPage&_=${System.currentTimeMillis()}"
-                    val html = runCatching {
+                    val ajaxHtml = runCatching {
                         webViewFetchBridge.fetchHtml(rawUrl = deeperUrl, isAjax = true)
                     }.getOrDefault("")
-                    val parsed = withContext(Dispatchers.Default) {
-                        eksiParser.parseLeftFrameTopics(html, isTrackedSection = false)
+                    var parsed = withContext(Dispatchers.Default) {
+                        eksiParser.parseLeftFrameTopics(ajaxHtml, isTrackedSection = false)
+                    }
+                    if (parsed.isEmpty()) {
+                        val fullHtml = runCatching {
+                            webViewFetchBridge.fetchHtml(rawUrl = deeperUrl, isAjax = false)
+                        }.getOrDefault("")
+                        parsed = withContext(Dispatchers.Default) {
+                            eksiParser.parseLeftFrameTopics(fullHtml, isTrackedSection = false)
+                        }
                     }
                     val filtered = filterAgainstInMemoryGundem(parsed)
                     resultChannel.trySend(filtered)
                     filtered
                 }
 
-                // Paralel Kaynak 2: Aktif ana kanal (`/basliklar/kanal/spor` veya `/basliklar/kanal/siyaset`, `isAjax = true`)
+                // Paralel Kaynak 2: Aktif ana kanal (`/basliklar/kanal/spor` veya `/basliklar/kanal/siyaset`)
                 val sourceBDeferred = async(Dispatchers.IO) {
                     val channelUrl = eksiParser.buildChannelTopicsUrl(
                         baseDomain = baseDomain,
@@ -326,11 +343,19 @@ class EksiRepository @Inject constructor(
                         page = channelPage,
                         useRawTurkishSlug = false
                     )
-                    val html = runCatching {
+                    val ajaxHtml = runCatching {
                         webViewFetchBridge.fetchHtml(rawUrl = channelUrl, isAjax = true)
                     }.getOrDefault("")
-                    val parsed = withContext(Dispatchers.Default) {
-                        eksiParser.parseChannelTopics(html)
+                    var parsed = withContext(Dispatchers.Default) {
+                        eksiParser.parseChannelTopics(ajaxHtml)
+                    }
+                    if (parsed.isEmpty()) {
+                        val fullHtml = runCatching {
+                            webViewFetchBridge.fetchHtml(rawUrl = channelUrl, isAjax = false)
+                        }.getOrDefault("")
+                        parsed = withContext(Dispatchers.Default) {
+                            eksiParser.parseChannelTopics(fullHtml)
+                        }
                     }
                     val filtered = filterAgainstInMemoryGundem(parsed)
                     resultChannel.trySend(filtered)
@@ -1593,7 +1618,13 @@ class BugunTopicsPagingSource(
                 )
             }
 
-            val nextKey = if (items.isEmpty() || page >= 15) null else page + 1
+            if (items.isEmpty()) {
+                return LoadResult.Error(
+                    IllegalStateException("Bugün başlıkları şu anda yüklenemedi. Tekrar deneyin.")
+                )
+            }
+
+            val nextKey = if (page >= 15) null else page + 1
 
             LoadResult.Page(
                 data = items,
