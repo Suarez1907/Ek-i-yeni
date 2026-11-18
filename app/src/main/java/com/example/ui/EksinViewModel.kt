@@ -397,7 +397,7 @@ class EksinViewModel @Inject constructor(
         bugunPrefetchJob?.cancel()
         bugunPrefetchJob = viewModelScope.launch(Dispatchers.IO) {
             val loaded = repository.prefetchBugunTopics(forceRefresh = forceRefresh)
-            if (loaded.isNotEmpty() && forceRefresh) {
+            if (loaded.isNotEmpty()) {
                 _bugunRefreshTrigger.value += 1
             }
         }

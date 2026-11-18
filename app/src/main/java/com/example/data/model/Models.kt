@@ -107,6 +107,7 @@ enum class EksiChannel(
 ) {
     SPOR("#spor", "spor", "spor", "Spor"),
     TEKNOLOJI("#teknoloji", "teknoloji", "teknoloji", "Teknoloji"),
+    PROGRAMLAMA("#programlama", "programlama", "programlama", "Programlama"),
     SIYASET("#siyaset", "siyaset", "siyaset", "Siyaset"),
     EKONOMI("#ekonomi", "ekonomi", "ekonomi", "Ekonomi"),
     SINEMA("#sinema", "sinema", "sinema", "Sinema"),
