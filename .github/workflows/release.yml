@@ -1,0 +1,85 @@
+name: Build and Create Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v1.0.0)"
+        required: false
+        default: "v1.0.0"
+      title:
+        description: "Release title"
+        required: false
+        default: "Ekşi+ v1.0.0"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Accept Android SDK Licenses
+        run: |
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+
+      - name: Setup Gradle 9.3.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.3.1'
+
+      - name: Prepare Environment
+        run: |
+          touch .env
+          keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US" || true
+          cp debug.keystore app/debug.keystore || true
+
+      - name: Build Release and Debug APKs with Gradle
+        run: gradle assembleRelease assembleDebug --no-daemon
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            TAG="${GITHUB_REF_NAME}"
+            TITLE="Ekşi+ ${GITHUB_REF_NAME}"
+          else
+            TAG="${{ github.event.inputs.tag }}"
+            TITLE="${{ github.event.inputs.title }}"
+          fi
+
+          RELEASE_APK=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          DEBUG_APK=$(find app/build/outputs/apk/debug -name "*.apk" | head -n 1)
+
+          ASSETS=()
+          if [ -n "$RELEASE_APK" ]; then
+            ASSETS+=("$RELEASE_APK")
+          fi
+          if [ -n "$DEBUG_APK" ]; then
+            ASSETS+=("$DEBUG_APK")
+          fi
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${ASSETS[@]}" --clobber
+          else
+            gh release create "$TAG" "${ASSETS[@]}" \
+              --target "${{ github.sha }}" \
+              --title "$TITLE" \
+              --generate-notes
+          fi
