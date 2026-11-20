@@ -303,7 +303,13 @@ class EksiParser @Inject constructor() {
             rankCounter++
         }
 
-        return result.take(50)
+        return result
+            .sortedWith(
+                compareByDescending<RankedTopicOrEntryItem> { it.favoriteCount }
+                    .thenBy { it.rank }
+            )
+            .take(50)
+            .mapIndexed { index, item -> item.copy(rank = index + 1) }
     }
 
     /**

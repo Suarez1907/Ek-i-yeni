@@ -212,12 +212,9 @@ fun MainScaffold(
         viewModel.selectSection(LeftFrameSection.BUGUN)
         if (alreadyOnBugun) {
             viewModel.forceRefreshBugun()
-            bugunPagingItems.refresh()
             coroutineScope.launch {
                 bugunListState.animateScrollToItem(0)
             }
-        } else if (bugunPagingItems.itemCount == 0 && bugunPagingItems.loadState.refresh !is LoadState.Loading) {
-            bugunPagingItems.refresh()
         }
     }
 

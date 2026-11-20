@@ -409,6 +409,7 @@ class EksinViewModel @Inject constructor(
      */
     fun forceRefreshBugun() {
         _selectedSection.value = LeftFrameSection.BUGUN
+        bugunPrefetchJob?.cancel()
         repository.clearBugunCache()
         _bugunRefreshTrigger.value += 1
     }
@@ -551,7 +552,7 @@ class EksinViewModel @Inject constructor(
                         enrichItemsWithFavoriteCountsInBackground(
                             initialItems = list,
                             subtitle = subtitle,
-                            sortDescendingAfterUpdate = false
+                            sortDescendingAfterUpdate = true
                         )
                     },
                     onFailure = { err ->
@@ -665,24 +666,11 @@ class EksinViewModel @Inject constructor(
     }
 
     /**
-     * 3. KURAL: Sekme geçişlerinde hafızadaki hazır "Bugün" listesini korur; her sekme değişiminde
-     * baştan ağ isteği atmaz! Yalnızca kullanıcı ZATEN "Bugün" sekmesindeyken tekrar "Bugün"e
-     * tıklarsa (`alreadyOnBugun`) önbelleği temizleyip taze veri çeker.
+     * Sekme geçişlerinde yalnızca seçimi günceller. Yükleme ve yenileme, PagingSource
+     * tarafından tek yerden yönetilir.
      */
     fun selectSection(section: LeftFrameSection) {
-        val previousSection = _selectedSection.value
         _selectedSection.value = section
-
-        if (section == LeftFrameSection.BUGUN) {
-            if (previousSection == LeftFrameSection.BUGUN) {
-                // Kullanıcı zaten Bugün sekmesindeyken tekrar tıkladı (Re-select / Pull-to-Refresh):
-                // Önbelleği temizle ki yeni paralel istek çalışsın.
-                repository.clearBugunCache()
-            } else if (!repository.hasCachedBugunTopics()) {
-                // Başka sekmeden Bugün'e geçildi ve henüz önbellek dolmadıysa arka planda başlat
-                prefetchBugunTopics(forceRefresh = false)
-            }
-        }
     }
 
     /**
@@ -1246,6 +1234,7 @@ class EksinViewModel @Inject constructor(
     fun triggerRefresh() {
         refreshCookieState()
         initialBugunPrefetchScheduled.set(false)
+        bugunPrefetchJob?.cancel()
         repository.clearBugunCache()
         _refreshTrigger.value += 1
         loadDebeAndStats()
