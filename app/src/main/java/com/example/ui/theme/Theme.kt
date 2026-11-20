@@ -4,9 +4,7 @@ import android.app.Activity
 import android.content.Context
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ColorScheme
-import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
-import androidx.compose.material3.MaterialExpressiveTheme
-import androidx.compose.material3.MotionScheme
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
@@ -169,7 +167,6 @@ fun colorSchemeForMode(mode: AppThemeMode): ColorScheme {
     }
 }
 
-@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun EksinOledTheme(
     themeMode: AppThemeMode = ActiveThemeState.currentMode,
@@ -193,9 +190,8 @@ fun EksinOledTheme(
         }
     }
 
-    MaterialExpressiveTheme(
+    MaterialTheme(
         colorScheme = colorScheme,
-        motionScheme = MotionScheme.expressive(),
         typography = Typography,
         shapes = EksinShapes,
         content = content
