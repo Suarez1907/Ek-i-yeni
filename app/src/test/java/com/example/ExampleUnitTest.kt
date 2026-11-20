@@ -64,6 +64,26 @@ class ExampleUnitTest {
     }
 
     @Test
+    fun parseDebeEntriesList_sortsByFavoriteCountDescending() {
+        val debeHtml = """
+            <html>
+            <body>
+                <ol class="debe-list">
+                    <li data-favorite-count="12"><a href="/entry/101">on iki beğenili konu</a></li>
+                    <li data-favorite-count="57"><a href="/entry/102">elli yedi beğenili konu</a></li>
+                    <li data-favorite-count="31"><a href="/entry/103">otuz bir beğenili konu</a></li>
+                </ol>
+            </body>
+            </html>
+        """.trimIndent()
+
+        val items = parser.parseDebeEntriesList(debeHtml)
+
+        assertEquals(listOf(57, 31, 12), items.map { it.favoriteCount })
+        assertEquals(listOf(1, 2, 3), items.map { it.rank })
+    }
+
+    @Test
     fun parseTopicPage_extractsEntriesAndBkzAnnotations() {
         val sampleTopicHtml = """
             <!DOCTYPE html>

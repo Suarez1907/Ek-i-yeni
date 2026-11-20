@@ -225,13 +225,11 @@ class EksiRepository @Inject constructor(
         }
 
     /**
-     * 1 & 2. ÖZELLİK: "BUGÜN" SEKMESİ PARALEL HIZLANDIRMA VE ANINDA EKRANA BASMA (PROGRESSIVE LOADING):
-     * - Sıralı (sequential) çoklu istekleri tamamen kaldırır.
-     * - Tüm isteklerde hafif AJAX modunu (`isAjax = true`) kullanır.
+     * "BUGÜN" SEKMESİ HIZLI YÜKLEME:
+     * - Önce doğrudan `/basliklar/bugun` sol-frame kaynağını tek AJAX isteğiyle dener.
      * - Zaten hafızada (`gundemTopics` / `gundemPage1UrlCache`) var olan Gündem 1. sayfa başlıklarını
      *   tekrar ağdan ÇEKMEZ; doğrudan hafızadaki listeyle karşılaştırıp mükerrerleri filtreler.
-     * - Kullanıcı giriş yapmışsa tek bir istekle `https://eksisozluk.com/basliklar/bugun?p={page}` çeker.
-     * - Anonim modda 4-5 kanalı sırayla beklemek yerine `coroutineScope` ve `async` ile EN FAZLA 2
+     * - Doğrudan kaynak boşsa `coroutineScope` ve `async` ile EN FAZLA 2
      *   hızlı kaynağı (Gündem'in `page + 1` sayfası `/basliklar/gundem?p=2` ve aktif ana kanal
      *   `/basliklar/kanal/spor` veya `/basliklar/kanal/siyaset`) TAMAMEN PARALEL çeker.
      * - Paralel isteklerden İLK hangisi tamamlanırsa hiç beklemeden `bugunTopics` state'ini ve
@@ -263,39 +261,42 @@ class EksiRepository @Inject constructor(
         }.trimEnd('/')
 
         try {
-            // 1b) Kullanıcı giriş yapmışsa doğrudan TEK BİR İSTEKLE `/basliklar/bugun?p={page}` (`isAjax = true`) çek
-            if (isUserLoggedIn(baseDomain)) {
-                val bugunUrl = "$baseDomain/basliklar/bugun?p=$safePage&_=${System.currentTimeMillis()}"
-                val bugunHtml = runCatching {
-                    webViewFetchBridge.fetchHtml(rawUrl = bugunUrl, isAjax = true)
+            // Önce diğer sekmelerle aynı hızlı sol-frame yolunu kullan. Bu yol sonuç
+            // döndürüyorsa kanal ve gündem yedeklerini hiç bekletme.
+            val bugunUrl = if (safePage == 1) {
+                "$baseDomain/basliklar/bugun"
+            } else {
+                "$baseDomain/basliklar/bugun?p=$safePage"
+            }
+            val bugunHtml = runCatching {
+                webViewFetchBridge.fetchHtml(rawUrl = bugunUrl, isAjax = true)
+            }.getOrDefault("")
+            var parsedBugun = withContext(Dispatchers.Default) {
+                eksiParser.parseLeftFrameTopics(bugunHtml, isTrackedSection = false)
+            }
+            if (parsedBugun.isEmpty()) {
+                val fullBugunHtml = runCatching {
+                    webViewFetchBridge.fetchHtml(rawUrl = bugunUrl, isAjax = false)
                 }.getOrDefault("")
-                var parsedBugun = withContext(Dispatchers.Default) {
-                    eksiParser.parseLeftFrameTopics(bugunHtml, isTrackedSection = false)
-                }
-                if (parsedBugun.isEmpty()) {
-                    val fullBugunHtml = runCatching {
-                        webViewFetchBridge.fetchHtml(rawUrl = bugunUrl, isAjax = false)
-                    }.getOrDefault("")
-                    parsedBugun = withContext(Dispatchers.Default) {
-                        eksiParser.parseLeftFrameTopics(fullBugunHtml, isTrackedSection = false)
-                    }
-                }
-                val filteredBugun = filterAgainstInMemoryGundem(parsedBugun)
-                if (filteredBugun.isNotEmpty()) {
-                    cacheKnownTopics(filteredBugun)
-                    bugunPageCache[safePage] = BugunPageCacheEntry(
-                        items = filteredBugun,
-                        isComplete = true
-                    )
-                    if (safePage == 1) {
-                        _bugunTopics.value = filteredBugun
-                        _isBugunLoading.value = false
-                    }
-                    return@withContext filteredBugun
+                parsedBugun = withContext(Dispatchers.Default) {
+                    eksiParser.parseLeftFrameTopics(fullBugunHtml, isTrackedSection = false)
                 }
             }
+            val filteredBugun = filterAgainstInMemoryGundem(parsedBugun)
+            if (filteredBugun.isNotEmpty()) {
+                cacheKnownTopics(filteredBugun)
+                bugunPageCache[safePage] = BugunPageCacheEntry(
+                    items = filteredBugun,
+                    isComplete = true
+                )
+                if (safePage == 1) {
+                    _bugunTopics.value = filteredBugun
+                    _isBugunLoading.value = false
+                }
+                return@withContext filteredBugun
+            }
 
-            // 1c & 2) Anonim modda (veya `/basliklar/bugun` Gündem ile aynı döndüğünde):
+            // 1c & 2) `/basliklar/bugun` boş veya Gündem ile aynı döndüğünde:
             // EN FAZLA 2 hızlı kaynağı (`isAjax = true`, boşsa `isAjax = false` fallback) TAMAMEN PARALEL başlat.
             // İlk tamamlanan kaynağı ANINDA ekrana bas, ikinci tamamlandığında sessizce zenginleştir!
             val firstReadyDeferred = CompletableDeferred<List<TopicItem>>()
@@ -976,7 +977,9 @@ class EksiRepository @Inject constructor(
 
             if (bestList.isNotEmpty()) {
                 return@withContext Result.success(
-                    bestList.map { applyCachedFavoriteMetadata(it) }
+                    sortDebeItemsByFavoriteCount(
+                        bestList.map { applyCachedFavoriteMetadata(it) }
+                    )
                 )
             }
 
@@ -985,10 +988,25 @@ class EksiRepository @Inject constructor(
             val parsedFallback = withContext(Dispatchers.Default) {
                 eksiParser.parseDebeEntriesList(fallbackHtml)
             }
-            Result.success(parsedFallback.map { applyCachedFavoriteMetadata(it) })
+            Result.success(
+                sortDebeItemsByFavoriteCount(
+                    parsedFallback.map { applyCachedFavoriteMetadata(it) }
+                )
+            )
         } catch (e: Throwable) {
             Result.failure(e)
         }
+    }
+
+    private fun sortDebeItemsByFavoriteCount(
+        items: List<RankedTopicOrEntryItem>
+    ): List<RankedTopicOrEntryItem> {
+        return items
+            .sortedWith(
+                compareByDescending<RankedTopicOrEntryItem> { it.favoriteCount }
+                    .thenBy { it.rank }
+            )
+            .mapIndexed { index, item -> item.copy(rank = index + 1) }
     }
 
     /**
@@ -1590,8 +1608,8 @@ class LeftFramePagingSource(
  * Hızlandırılmış "Bugün" PagingSource:
  * 1. Sayfa önbellekte (`bugunPageCache`) hazırsa (ör. Gündem'den 500ms sonra arka planda
  *    `prefetchBugunTopics()` ile hazırlanmışsa veya sekme değiştirilmişse) 0ms'de ağa çıkmadan döndürür.
- * 2. Önbellekte yoksa [EksiRepository.loadBugunPageProgressive] ile paralel 2 hızlı kaynaktan
- *    ilk tamamlananı anında ekrana basar, ikinci tamamlandığında sessizce zenginleştirir.
+ * 2. Önbellekte yoksa [EksiRepository.loadBugunPageProgressive] ile doğrudan "Bugün" kaynağını
+ *    yükler; yalnızca boş yanıtta hızlı yedek kaynaklara geçer.
  */
 class BugunTopicsPagingSource(
     private val repository: EksiRepository
