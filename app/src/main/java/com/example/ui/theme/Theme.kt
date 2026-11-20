@@ -4,7 +4,9 @@ import android.app.Activity
 import android.content.Context
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ColorScheme
-import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.MaterialExpressiveTheme
+import androidx.compose.material3.MotionScheme
 import androidx.compose.material3.Shapes
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
@@ -43,10 +45,10 @@ object ThemePreferencesManager {
  * Google Material 3 Şekil Ölçeği (Shape Scale).
  */
 val EksinShapes = Shapes(
-    extraSmall = RoundedCornerShape(4.dp),
-    small = RoundedCornerShape(8.dp),
-    medium = RoundedCornerShape(12.dp),
-    large = RoundedCornerShape(16.dp),
+    extraSmall = RoundedCornerShape(6.dp),
+    small = RoundedCornerShape(10.dp),
+    medium = RoundedCornerShape(16.dp),
+    large = RoundedCornerShape(20.dp),
     extraLarge = RoundedCornerShape(28.dp)
 )
 
@@ -76,9 +78,9 @@ val EksinOledBlackColorScheme = darkColorScheme(
     surfaceDim = Color(0xFF000000),
     surfaceBright = Color(0xFF1E221E),
     surfaceContainerLowest = Color(0xFF000000),
-    surfaceContainerLow = Color(0xFF0B0D0B),
-    surfaceContainer = Color(0xFF101210),
-    surfaceContainerHigh = Color(0xFF171B17),
+    surfaceContainerLow = Color(0xFF0D0D0D),
+    surfaceContainer = Color(0xFF121212),
+    surfaceContainerHigh = Color(0xFF181B18),
     surfaceContainerHighest = Color(0xFF1F241F),
     outline = Color(0xFF2B302B),
     outlineVariant = Color(0xFF1A1E1A),
@@ -149,10 +151,10 @@ val EksinClassicLightColorScheme = lightColorScheme(
     surfaceDim = Color(0xFFDADED9),
     surfaceBright = Color(0xFFFFFFFF),
     surfaceContainerLowest = Color(0xFFFFFFFF),
-    surfaceContainerLow = Color(0xFFF6F8F6),
-    surfaceContainer = Color(0xFFF0F4F0),
-    surfaceContainerHigh = Color(0xFFE9EEE9),
-    surfaceContainerHighest = Color(0xFFE2E8E2),
+    surfaceContainerLow = Color(0xFFF4F6F4),
+    surfaceContainer = Color(0xFFEBF1EB),
+    surfaceContainerHigh = Color(0xFFE3E9E3),
+    surfaceContainerHighest = Color(0xFFDBE2DB),
     outline = Color(0xFF747974),
     outlineVariant = Color(0xFFC4CAC4),
     error = Color(0xFFD32F2F),
@@ -167,6 +169,7 @@ fun colorSchemeForMode(mode: AppThemeMode): ColorScheme {
     }
 }
 
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun EksinOledTheme(
     themeMode: AppThemeMode = ActiveThemeState.currentMode,
@@ -190,8 +193,9 @@ fun EksinOledTheme(
         }
     }
 
-    MaterialTheme(
+    MaterialExpressiveTheme(
         colorScheme = colorScheme,
+        motionScheme = MotionScheme.expressive(),
         typography = Typography,
         shapes = EksinShapes,
         content = content

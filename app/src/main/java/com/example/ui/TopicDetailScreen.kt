@@ -11,6 +11,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -1013,21 +1014,15 @@ fun SwipeableEntryOledCard(
         Card(
             shape = MaterialTheme.shapes.large,
             colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.surfaceContainerLow
+                containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                contentColor = MaterialTheme.colorScheme.onSurface
             ),
-            modifier = Modifier
-                .fillMaxWidth()
-                .then(
-                    if (isFavorited) {
-                        Modifier.border(
-                            width = 1.dp,
-                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.65f),
-                            shape = MaterialTheme.shapes.large
-                        )
-                    } else {
-                        Modifier
-                    }
-                )
+            elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+            border = BorderStroke(
+                width = if (isFavorited) 1.5.dp else 0.5.dp,
+                color = if (isFavorited) MaterialTheme.colorScheme.primary.copy(alpha = 0.65f) else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f)
+            ),
+            modifier = Modifier.fillMaxWidth()
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Row(
@@ -1055,7 +1050,7 @@ fun SwipeableEntryOledCard(
                             Icon(
                                 imageVector = Icons.Default.PersonSearch,
                                 contentDescription = "Sadece bu yazarın entry'lerini filtrele",
-                                tint = OledTextSecondary,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.size(16.dp)
                             )
                         }
@@ -1066,7 +1061,7 @@ fun SwipeableEntryOledCard(
                             Icon(
                                 imageVector = Icons.Default.AutoAwesome,
                                 contentDescription = "Entry AI Özetle",
-                                tint = EksiNeonGreen,
+                                tint = MaterialTheme.colorScheme.primary,
                                 modifier = Modifier.size(16.dp)
                             )
                         }
@@ -1077,7 +1072,7 @@ fun SwipeableEntryOledCard(
                             Icon(
                                 imageVector = Icons.Default.Share,
                                 contentDescription = "Paylaş",
-                                tint = OledTextSecondary,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.size(16.dp)
                             )
                         }
@@ -1167,13 +1162,13 @@ fun SwipeableEntryOledCard(
                                     Icons.Default.FavoriteBorder
                                 },
                                 contentDescription = "Şükela / Favori",
-                                tint = if (isFavorited) EksiNeonGreen else OledTextSecondary,
+                                tint = if (isFavorited) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.size(15.dp)
                             )
                             Text(
                                 text = if (displayFavCount > 0) "$displayFavCount Şükela" else "Şükela",
                                 style = MaterialTheme.typography.labelMedium,
-                                color = if (isFavorited) EksiNeonGreen else OledTextSecondary,
+                                color = if (isFavorited) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                                 fontWeight = if (isFavorited) FontWeight.Bold else FontWeight.Medium
                             )
                         }
@@ -1183,7 +1178,7 @@ fun SwipeableEntryOledCard(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         modifier = Modifier
-                            .clip(RoundedCornerShape(8.dp))
+                            .clip(MaterialTheme.shapes.small)
                             .clickable { onAuthorClick(entry.author) }
                             .padding(horizontal = 4.dp, vertical = 2.dp)
                     ) {
@@ -1191,7 +1186,7 @@ fun SwipeableEntryOledCard(
                             Text(
                                 text = entry.author,
                                 style = MaterialTheme.typography.labelLarge,
-                                color = EksiNeonGreen,
+                                color = MaterialTheme.colorScheme.primary,
                                 fontWeight = FontWeight.SemiBold,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
@@ -1204,7 +1199,7 @@ fun SwipeableEntryOledCard(
                             Text(
                                 text = dateLabel,
                                 style = MaterialTheme.typography.labelSmall,
-                                color = OledTextMuted,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
                                 fontSize = 11.sp
                             )
                         }
@@ -1216,7 +1211,7 @@ fun SwipeableEntryOledCard(
                                 modifier = Modifier
                                     .size(28.dp)
                                     .clip(CircleShape)
-                                    .border(0.5.dp, EksiNeonGreen.copy(alpha = 0.5f), CircleShape),
+                                    .border(0.5.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.5f), CircleShape),
                                 contentScale = ContentScale.Crop
                             )
                         } else {

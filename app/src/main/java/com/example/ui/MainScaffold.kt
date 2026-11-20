@@ -1,11 +1,13 @@
 package com.example.ui
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -457,14 +459,14 @@ fun MainScaffold(
             },
             bottomBar = {
                 NavigationBar(
-                    containerColor = MaterialTheme.colorScheme.surfaceContainer,
+                    containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
                     contentColor = MaterialTheme.colorScheme.onSurface,
                     tonalElevation = 0.dp
                 ) {
                     val navColors = NavigationBarItemDefaults.colors(
-                        selectedIconColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                        selectedTextColor = MaterialTheme.colorScheme.onSurface,
-                        indicatorColor = MaterialTheme.colorScheme.secondaryContainer,
+                        indicatorColor = MaterialTheme.colorScheme.primaryContainer,
+                        selectedIconColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                        selectedTextColor = MaterialTheme.colorScheme.primary,
                         unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
                         unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -718,30 +720,33 @@ private fun TopQuickSectionChip(
     selected: Boolean,
     onClick: () -> Unit
 ) {
-    FilterChip(
-        selected = selected,
-        onClick = onClick,
-        shape = RoundedCornerShape(50),
-        label = {
-            Text(
-                text = label,
-                style = MaterialTheme.typography.labelMedium,
-                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium
-            )
-        },
-        colors = FilterChipDefaults.filterChipColors(
-            selectedContainerColor = MaterialTheme.colorScheme.secondaryContainer,
-            selectedLabelColor = MaterialTheme.colorScheme.onSecondaryContainer,
-            containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
-            labelColor = MaterialTheme.colorScheme.onSurfaceVariant
-        ),
-        border = FilterChipDefaults.filterChipBorder(
-            enabled = true,
-            selected = selected,
-            borderColor = MaterialTheme.colorScheme.outlineVariant,
-            selectedBorderColor = Color.Transparent
-        )
+    val containerColor by animateColorAsState(
+        targetValue = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerLow,
+        label = "chip_container"
     )
+    val contentColor by animateColorAsState(
+        targetValue = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+        label = "chip_content"
+    )
+    val borderColor by animateColorAsState(
+        targetValue = if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.5f) else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f),
+        label = "chip_border"
+    )
+
+    Surface(
+        onClick = onClick,
+        shape = CircleShape,
+        color = containerColor,
+        contentColor = contentColor,
+        border = BorderStroke(0.8.dp, borderColor)
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp)
+        )
+    }
 }
 
 /**
@@ -1563,110 +1568,113 @@ private fun TopicPagingList(
 
                     val isRead = lastSeenCount != null && !hasNewEntriesAfterRead
 
-                    Row(
+                    Card(
+                        shape = MaterialTheme.shapes.medium,
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+                        border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f)),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .background(MaterialTheme.colorScheme.background)
+                            .padding(horizontal = 12.dp, vertical = 3.dp)
                             .clickable { onTopicClick(item) }
-                            .padding(horizontal = 16.dp, vertical = 14.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         Row(
-                            modifier = Modifier.weight(1f),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 12.dp),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            if (isDebeMode) {
-                                Surface(
-                                    color = MaterialTheme.colorScheme.primaryContainer,
-                                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                                    shape = CircleShape,
-                                    modifier = Modifier.size(28.dp)
-                                ) {
-                                    Box(contentAlignment = Alignment.Center) {
+                            Row(
+                                modifier = Modifier.weight(1f),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                if (isDebeMode) {
+                                    Surface(
+                                        color = MaterialTheme.colorScheme.primaryContainer,
+                                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                                        shape = CircleShape,
+                                        modifier = Modifier.size(28.dp)
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            Text(
+                                                text = "${index + 1}",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                        }
+                                    }
+                                }
+
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = item.title,
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        color = if (isRead) {
+                                            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f)
+                                        } else {
+                                            MaterialTheme.colorScheme.onSurface
+                                        },
+                                        fontWeight = when {
+                                            hasNewEntriesAfterRead -> FontWeight.SemiBold
+                                            isRead -> FontWeight.Normal
+                                            else -> FontWeight.Medium
+                                        }
+                                    )
+                                    if (hasNewEntriesAfterRead && lastSeenCount != null) {
+                                        val addedCount = (item.entryCount - lastSeenCount).coerceAtLeast(1)
+                                        Spacer(modifier = Modifier.height(3.dp))
                                         Text(
-                                            text = "${index + 1}",
+                                            text = "+$addedCount yeni entry" + (savedRead?.let { " • Kalınan: Sayfa ${it.pageNumber}" } ?: ""),
                                             style = MaterialTheme.typography.labelSmall,
-                                            fontWeight = FontWeight.Bold
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                    } else if (savedRead != null) {
+                                        Spacer(modifier = Modifier.height(3.dp))
+                                        Text(
+                                            text = "Kalınan: Sayfa ${savedRead.pageNumber} • #${savedRead.entryId}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.8f)
                                         )
                                     }
                                 }
                             }
 
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = item.title,
-                                    style = MaterialTheme.typography.bodyLarge,
-                                    color = if (isRead) {
-                                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f)
+                            val badgeText = when {
+                                isDebeMode && item.favoriteCount > 0 -> "♥ ${item.favoriteCount}"
+                                isDebeMode && item.entryCountText.isNotBlank() -> item.entryCountText
+                                isDebeMode -> "♥ ..."
+                                item.entryCountText.isNotBlank() -> item.entryCountText
+                                item.entryCount > 0 -> item.entryCount.toString()
+                                else -> ""
+                            }
+
+                            if (badgeText.isNotBlank()) {
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Surface(
+                                    color = if (hasNewEntriesAfterRead) {
+                                        MaterialTheme.colorScheme.primary
                                     } else {
-                                        MaterialTheme.colorScheme.onSurface
+                                        MaterialTheme.colorScheme.secondaryContainer
                                     },
-                                    fontWeight = when {
-                                        hasNewEntriesAfterRead -> FontWeight.SemiBold
-                                        isRead -> FontWeight.Normal
-                                        else -> FontWeight.Medium
-                                    }
-                                )
-                                if (hasNewEntriesAfterRead && lastSeenCount != null) {
-                                    val addedCount = (item.entryCount - lastSeenCount).coerceAtLeast(1)
-                                    Spacer(modifier = Modifier.height(3.dp))
+                                    contentColor = if (hasNewEntriesAfterRead) {
+                                        MaterialTheme.colorScheme.onPrimary
+                                    } else {
+                                        MaterialTheme.colorScheme.onSecondaryContainer
+                                    },
+                                    shape = CircleShape
+                                ) {
                                     Text(
-                                        text = "+$addedCount yeni entry" + (savedRead?.let { " • Kalınan: Sayfa ${it.pageNumber}" } ?: ""),
-                                        style = MaterialTheme.typography.labelSmall,
+                                        text = badgeText,
+                                        style = MaterialTheme.typography.labelMedium,
                                         fontWeight = FontWeight.SemiBold,
-                                        color = MaterialTheme.colorScheme.primary
-                                    )
-                                } else if (savedRead != null) {
-                                    Spacer(modifier = Modifier.height(3.dp))
-                                    Text(
-                                        text = "Kalınan: Sayfa ${savedRead.pageNumber} • #${savedRead.entryId}",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.8f)
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
                                     )
                                 }
                             }
                         }
-
-                        val badgeText = when {
-                            isDebeMode && item.favoriteCount > 0 -> "♥ ${item.favoriteCount}"
-                            isDebeMode && item.entryCountText.isNotBlank() -> item.entryCountText
-                            isDebeMode -> "♥ ..."
-                            item.entryCountText.isNotBlank() -> item.entryCountText
-                            item.entryCount > 0 -> item.entryCount.toString()
-                            else -> ""
-                        }
-
-                        if (badgeText.isNotBlank()) {
-                            Spacer(modifier = Modifier.width(12.dp))
-                            Surface(
-                                color = if (hasNewEntriesAfterRead) {
-                                    MaterialTheme.colorScheme.primary
-                                } else {
-                                    MaterialTheme.colorScheme.primaryContainer
-                                },
-                                contentColor = if (hasNewEntriesAfterRead) {
-                                    MaterialTheme.colorScheme.onPrimary
-                                } else {
-                                    MaterialTheme.colorScheme.onPrimaryContainer
-                                },
-                                shape = RoundedCornerShape(50)
-                            ) {
-                                Text(
-                                    text = badgeText,
-                                    style = MaterialTheme.typography.labelMedium,
-                                    fontWeight = FontWeight.SemiBold,
-                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
-                                )
-                            }
-                        }
                     }
-
-                    HorizontalDivider(
-                        color = MaterialTheme.colorScheme.outlineVariant,
-                        thickness = 0.5.dp
-                    )
                 }
 
                 if (pagingItems.loadState.append is LoadState.Loading) {

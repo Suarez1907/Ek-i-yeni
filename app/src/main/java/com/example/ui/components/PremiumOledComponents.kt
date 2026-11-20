@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -367,14 +368,15 @@ fun FloatingPagerCapsuleBar(
     Surface(
         modifier = modifier
             .testTag("floating_pager_bar"),
-        shape = RoundedCornerShape(50),
+        shape = CircleShape,
         color = MaterialTheme.colorScheme.surfaceContainerHigh,
         contentColor = MaterialTheme.colorScheme.onSurface,
         tonalElevation = 6.dp,
-        shadowElevation = 6.dp
+        shadowElevation = 10.dp,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f))
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 6.dp, vertical = 5.dp),
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
@@ -395,9 +397,9 @@ fun FloatingPagerCapsuleBar(
             Surface(
                 color = MaterialTheme.colorScheme.primaryContainer,
                 contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                shape = RoundedCornerShape(50),
+                shape = CircleShape,
                 modifier = Modifier
-                    .clip(RoundedCornerShape(50))
+                    .clip(CircleShape)
                     .clickable { showPagePickerDialog = true }
                     .testTag("pager_center_selector")
             ) {
@@ -405,7 +407,7 @@ fun FloatingPagerCapsuleBar(
                     text = "Sayfa $safeCurrent / $safeTotal",
                     style = MaterialTheme.typography.labelMedium,
                     fontWeight = FontWeight.Bold,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp)
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
                 )
             }
 
@@ -616,18 +618,18 @@ fun ThemeSelectorDialog(
                 AppThemeMode.entries.forEach { mode ->
                     val isSelected = currentTheme == mode
                     Card(
-                        shape = RoundedCornerShape(14.dp),
+                        shape = MaterialTheme.shapes.medium,
                         colors = CardDefaults.cardColors(
-                            containerColor = MaterialTheme.colorScheme.background
+                            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
                         ),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clip(RoundedCornerShape(14.dp))
+                            .clip(MaterialTheme.shapes.medium)
                             .clickable { onSelectTheme(mode) }
                             .border(
-                                width = if (isSelected) 1.5.dp else 0.6.dp,
-                                color = if (isSelected) EksiNeonGreen else OledHairlineDivider,
-                                shape = RoundedCornerShape(14.dp)
+                                width = if (isSelected) 2.dp else 0.8.dp,
+                                color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                                shape = MaterialTheme.shapes.medium
                             )
                             .testTag("theme_option_${mode.storageKey}")
                     ) {
@@ -684,7 +686,7 @@ fun ThemeSelectorDialog(
                                     Icons.Default.RadioButtonUnchecked
                                 },
                                 contentDescription = null,
-                                tint = if (isSelected) EksiNeonGreen else OledTextSecondary,
+                                tint = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.size(22.dp)
                             )
                         }
