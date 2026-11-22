@@ -9,6 +9,7 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import com.example.data.model.EksiChannel
+import com.example.data.model.EntryCreateResult
 import com.example.data.model.EntryItem
 import com.example.data.model.MessageItem
 import com.example.data.model.MessageThreadItem
@@ -50,15 +51,6 @@ data class MessageThreadDetail(
     val threadId: String,
     val title: String,
     val messages: List<MessageItem>
-)
-
-/**
- * Entry oluşturma / mesaj gönderme sonucu.
- */
-data class EntryCreateResult(
-    val isSuccess: Boolean,
-    val message: String? = null,
-    val entryId: String? = null
 )
 
 /**

@@ -322,7 +322,8 @@ fun TopicDetailScreen(
                 content = content
             )
         },
-        onDismiss = { viewModel.dismissEntryCompose() }
+        onDismiss = { viewModel.dismissEntryCompose() },
+        onOpenLogin = { viewModel.requestLogin() }
     )
 
     val shareEntry: (EntryItem) -> Unit = { entry ->

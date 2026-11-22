@@ -36,7 +36,10 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
+import com.example.data.model.MessageItem
+import com.example.data.model.MessageThreadItem
 
 @Composable
 fun MessagesScreen(
@@ -45,12 +48,13 @@ fun MessagesScreen(
 ) {
     LaunchedEffect(Unit) { viewModel.loadMessages() }
 
-    val threads = viewModel.messageThreads
-    val selectedThread = viewModel.selectedMessageThread
-    val messages = viewModel.messages
-    val loading = viewModel.messagesLoading
-    val error = viewModel.messagesError
-    val draftRecipient = viewModel.draftRecipient
+    val state by viewModel.messagesState.collectAsStateWithLifecycle()
+    val selectedThread = state.threads.firstOrNull { it.id == state.selectedThreadId }
+    val threads = state.threads
+    val messages = state.messages
+    val loading = state.isLoading
+    val error = state.error
+    val draftRecipient = state.draftRecipient.orEmpty()
     var draft by remember { mutableStateOf("") }
 
     Box(modifier = modifier.fillMaxSize()) {
@@ -86,7 +90,7 @@ fun MessagesScreen(
                             )
                         }
                         Text(
-                            text = selectedThread?.username ?: draftRecipient,
+                            text = selectedThread?.author ?: draftRecipient,
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.onSurface
@@ -152,7 +156,7 @@ fun MessagesScreen(
                     items(threads) { thread ->
                         MessageThreadItem(
                             thread = thread,
-                            onClick = { viewModel.openMessageThread(thread) }
+                            onClick = { viewModel.openMessageThread(thread.id) }
                         )
                     }
                 }
@@ -163,7 +167,7 @@ fun MessagesScreen(
 
 @Composable
 private fun MessageThreadItem(
-    thread: MessageThread,
+    thread: MessageThreadItem,
     onClick: () -> Unit
 ) {
     Row(
@@ -175,26 +179,26 @@ private fun MessageThreadItem(
     ) {
         Column(modifier = Modifier.weight(1f)) {
             Text(
-                text = thread.username,
+                text = thread.author,
                 style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.onSurface
             )
             Text(
-                text = thread.lastMessage,
+                text = thread.snippet,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
         }
-        if (thread.unreadCount > 0) {
+        if (thread.unread) {
             Surface(
                 color = MaterialTheme.colorScheme.primary,
                 shape = RoundedCornerShape(50)
             ) {
                 Text(
-                    text = thread.unreadCount.toString(),
+                    text = "•",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onPrimary,
                     modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
@@ -205,7 +209,7 @@ private fun MessageThreadItem(
 }
 
 @Composable
-private fun MessageItem(message: Message) {
+private fun MessageItem(message: MessageItem) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = if (message.isMine) Arrangement.End else Arrangement.Start
@@ -226,12 +230,12 @@ private fun MessageItem(message: Message) {
         ) {
             Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
                 Text(
-                    text = message.content,
+                    text = message.body,
                     style = MaterialTheme.typography.bodyMedium
                 )
-                if (message.timestamp.isNotBlank()) {
+                if (message.dateText.isNotBlank()) {
                     Text(
-                        text = message.timestamp,
+                        text = message.dateText,
                         style = MaterialTheme.typography.labelSmall,
                         color = if (message.isMine) {
                             MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.7f)

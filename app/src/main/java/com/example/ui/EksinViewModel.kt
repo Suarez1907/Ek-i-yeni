@@ -21,6 +21,8 @@ import com.example.data.model.DebeAndStatsUiState
 import com.example.data.model.EksiChannel
 import com.example.data.model.EntryItem
 import com.example.data.model.LeftFrameSection
+import com.example.data.model.MessageItem
+import com.example.data.model.MessageThreadItem
 import com.example.data.model.PeriodicRankingTab
 import com.example.data.model.PeriodicTimeRange
 import com.example.data.model.RankedTopicOrEntryItem
@@ -133,27 +135,13 @@ data class AuthUiState(
     val error: String? = null
 )
 
-sealed interface EntryComposeState {
-    data object Hidden : EntryComposeState
-    data class Open(val topicTitle: String = "") : EntryComposeState
-    data class Success(val message: String = "") : EntryComposeState
-    data class Error(val message: String) : EntryComposeState
-}
-
-data class MessageThreadItem(
-    val id: String,
-    val author: String,
-    val subject: String = "",
-    val preview: String = "",
-    val unread: Boolean = false
-)
-
-data class MessageItem(
-    val id: String,
-    val threadId: String,
-    val author: String,
-    val body: String,
-    val timestamp: String = ""
+data class EntryComposeState(
+    val isHidden: Boolean = true,
+    val topicTitle: String = "",
+    val isSubmitting: Boolean = false,
+    val errorMessage: String? = null,
+    val successMessage: String? = null,
+    val isLoggedIn: Boolean = false
 )
 
 data class MessagesUiState(
@@ -1271,6 +1259,7 @@ class EksinViewModel @Inject constructor(
         val loggedIn = cookieJar.hasActiveUserSession(activeDomain)
         _hasUserSession.value = loggedIn
         repository.setUserLoggedInState(loggedIn)
+        _authUiState.value = _authUiState.value.copy(isLoggedIn = loggedIn)
     }
 
     fun triggerRefresh() {
@@ -1383,10 +1372,12 @@ class EksinViewModel @Inject constructor(
         }
     }
 
-    private val _authUiState = MutableStateFlow(AuthUiState())
+    private val _authUiState = MutableStateFlow(
+        AuthUiState(isLoggedIn = _hasUserSession.value)
+    )
     val authUiState: StateFlow<AuthUiState> = _authUiState.asStateFlow()
 
-    private val _entryComposeState = MutableStateFlow<EntryComposeState>(EntryComposeState.Hidden)
+    private val _entryComposeState = MutableStateFlow(EntryComposeState())
     val entryComposeState: StateFlow<EntryComposeState> = _entryComposeState.asStateFlow()
 
     private val _messagesState = MutableStateFlow(MessagesUiState())
@@ -1423,28 +1414,61 @@ class EksinViewModel @Inject constructor(
     }
 
     fun openEntryCompose(topic: TopicItem) {
-        _entryComposeState.value = EntryComposeState.Open(topicTitle = topic.title)
+        _entryComposeState.value = EntryComposeState(
+            isHidden = false,
+            topicTitle = topic.title,
+            isLoggedIn = _hasUserSession.value
+        )
     }
 
     fun dismissEntryCompose() {
-        _entryComposeState.value = EntryComposeState.Hidden
+        _entryComposeState.value = EntryComposeState(
+            isLoggedIn = _hasUserSession.value
+        )
     }
 
-    fun submitEntry(content: String) {
+    fun submitEntryCompose(topic: TopicItem, content: String) {
         val clean = content.trim()
         if (clean.isEmpty()) {
-            _entryComposeState.value = EntryComposeState.Error("Entry içeriği boş olamaz.")
+            _entryComposeState.value = _entryComposeState.value.copy(
+                errorMessage = "Entry içeriği boş olamaz."
+            )
             return
         }
         viewModelScope.launch(Dispatchers.IO) {
-            _entryComposeState.value = EntryComposeState.Success("Entry başarıyla gönderildi.")
+            _entryComposeState.value = _entryComposeState.value.copy(
+                isSubmitting = true,
+                errorMessage = null,
+                successMessage = null
+            )
+            val result = repository.createEntry(
+                topicId = topic.id,
+                topicTitle = topic.title,
+                content = clean
+            )
+            _entryComposeState.value = _entryComposeState.value.copy(
+                isSubmitting = false,
+                errorMessage = result.message.takeUnless { result.isSuccess },
+                successMessage = result.message
+                    .takeIf { result.isSuccess }
+                    ?: "Entry başarıyla gönderildi.".takeIf { result.isSuccess }
+            )
         }
     }
 
     fun loadMessages() {
         viewModelScope.launch(Dispatchers.IO) {
             _messagesState.value = _messagesState.value.copy(isLoading = true, error = null)
-            _messagesState.value = _messagesState.value.copy(isLoading = false)
+            val threads = repository.loadMessageThreads()
+            _messagesState.value = _messagesState.value.copy(
+                threads = threads,
+                isLoading = false,
+                error = if (threads.isEmpty() && !_hasUserSession.value) {
+                    "Mesajları görüntülemek için giriş yapın."
+                } else {
+                    null
+                }
+            )
         }
     }
 
@@ -1457,7 +1481,11 @@ class EksinViewModel @Inject constructor(
             error = null
         )
         viewModelScope.launch(Dispatchers.IO) {
-            _messagesState.value = _messagesState.value.copy(isLoading = false)
+            val messages = repository.loadMessageThread(cleanId)
+            _messagesState.value = _messagesState.value.copy(
+                messages = messages,
+                isLoading = false
+            )
         }
     }
 
@@ -1481,7 +1509,30 @@ class EksinViewModel @Inject constructor(
         if (clean.isEmpty()) return
         viewModelScope.launch(Dispatchers.IO) {
             _messagesState.value = _messagesState.value.copy(isSending = true, error = null)
-            _messagesState.value = _messagesState.value.copy(isSending = false)
+            val current = _messagesState.value
+            val result = repository.sendMessage(
+                threadId = current.selectedThreadId,
+                recipient = current.draftRecipient.orEmpty(),
+                body = clean
+            )
+            if (result.isSuccess) {
+                val threadId = current.selectedThreadId
+                val messages = if (threadId.isNullOrBlank()) {
+                    current.messages
+                } else {
+                    repository.loadMessageThread(threadId)
+                }
+                _messagesState.value = _messagesState.value.copy(
+                    messages = messages,
+                    isSending = false,
+                    error = null
+                )
+            } else {
+                _messagesState.value = _messagesState.value.copy(
+                    isSending = false,
+                    error = result.message ?: "Mesaj gönderilemedi."
+                )
+            }
         }
     }
 
