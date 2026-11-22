@@ -121,7 +121,7 @@ fun AuthorProfileScreen(
                 is ProfileUiState.Error -> ErrorCard(profileState.message, onRefresh)
                 is ProfileUiState.Success -> {
                     val profile = profileState.profile
-                    val entries = profileState.entries
+                    val entries = profileState.profile.recentEntries
                     LazyColumn(
                         modifier = Modifier.fillMaxSize(),
                         contentPadding = PaddingValues(16.dp),
@@ -130,10 +130,10 @@ fun AuthorProfileScreen(
                         item {
                             ProfileHeaderCard(
                                 nick = authorNick,
-                                karma = profile.karma,
-                                entryCount = profile.entryCount,
-                                followerCount = profile.followerCount,
-                                followingCount = profile.followingCount,
+                                badgeText = profile.badgeText,
+                                entryCountText = profile.entryCountText,
+                                followerCountText = profile.followerCountText,
+                                followingCountText = profile.followingCountText,
                                 onSendMessage = {
                                     if (isUserLoggedIn) {
                                         showMessageDialog = true
@@ -153,7 +153,16 @@ fun AuthorProfileScreen(
                         items(entries) { entry ->
                             EntryCard(
                                 entry = entry,
-                                onClick = { onOpenTopic(TopicItem(title = entry.title)) }
+                                onClick = {
+                                    onOpenTopic(
+                                        TopicItem(
+                                            id = entry.id,
+                                            title = entry.topicTitle,
+                                            slug = "",
+                                            url = entry.topicUrl
+                                        )
+                                    )
+                                }
                             )
                         }
                     }
@@ -177,10 +186,10 @@ fun AuthorProfileScreen(
 @Composable
 private fun ProfileHeaderCard(
     nick: String,
-    karma: String,
-    entryCount: Int,
-    followerCount: Int,
-    followingCount: Int,
+    badgeText: String,
+    entryCountText: String,
+    followerCountText: String,
+    followingCountText: String,
     onSendMessage: (() -> Unit)? = null
 ) {
     Card(
@@ -219,7 +228,7 @@ private fun ProfileHeaderCard(
                         color = MaterialTheme.colorScheme.onSurface
                     )
                     Text(
-                        text = "karma: $karma",
+                        text = badgeText,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -229,9 +238,9 @@ private fun ProfileHeaderCard(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                StatBox("Entry", entryCount.toString(), Modifier.weight(1f))
-                StatBox("Takipçi", followerCount.toString(), Modifier.weight(1f))
-                StatBox("Takip", followingCount.toString(), Modifier.weight(1f))
+                StatBox("Entry", entryCountText, Modifier.weight(1f))
+                StatBox("Takipçi", followerCountText, Modifier.weight(1f))
+                StatBox("Takip", followingCountText, Modifier.weight(1f))
             }
             if (onSendMessage != null) {
                 Button(
@@ -288,13 +297,13 @@ private fun EntryCard(entry: EntryItem, onClick: () -> Unit) {
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Text(
-                text = entry.title,
+                text = entry.topicTitle,
                 style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.SemiBold,
                 color = MaterialTheme.colorScheme.onSurface
             )
             Text(
-                text = entry.summary,
+                text = entry.plainText,
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

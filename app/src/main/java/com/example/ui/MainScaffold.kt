@@ -177,6 +177,9 @@ fun MainScaffold(
     val themeMode by viewModel.themeMode.collectAsStateWithLifecycle()
     val showThemeDialog by viewModel.showThemeDialog.collectAsStateWithLifecycle()
     val activeAuthorNick by viewModel.activeAuthorNick.collectAsStateWithLifecycle()
+    val authorProfileState by viewModel.selectedAuthorProfileState.collectAsStateWithLifecycle()
+    val messageSubmitState by viewModel.messageSubmitState.collectAsStateWithLifecycle()
+    val profileIsUserLoggedIn by viewModel.isUserLoggedIn.collectAsStateWithLifecycle()
 
     val readStateByUrl = remember(allReadStates) {
         allReadStates.associateBy { it.topicKey }
@@ -675,14 +678,21 @@ fun MainScaffold(
             ) {
                 BackHandler { viewModel.closeAuthorProfile() }
                 AuthorProfileScreen(
-                    viewModel = viewModel,
                     authorNick = nick,
+                    profileState = authorProfileState,
+                    messageSubmitState = messageSubmitState,
+                    isUserLoggedIn = profileIsUserLoggedIn,
                     onBack = { viewModel.closeAuthorProfile() },
+                    onRefresh = { viewModel.openAuthorProfile(nick) },
                     onOpenTopic = { topic ->
                         viewModel.closeAuthorProfile()
                         viewModel.openTopic(topic, preferTodayMode = false)
                     },
-                    onOpenAuthorProfile = { otherNick -> viewModel.openAuthorProfile(otherNick) }
+                    onSendMessage = { toNick, message ->
+                        viewModel.sendDirectMessage(toNick, message)
+                    },
+                    onResetMessageState = { viewModel.resetMessageSubmitState() },
+                    onRequestLogin = { viewModel.openUserLogin() }
                 )
             }
         }

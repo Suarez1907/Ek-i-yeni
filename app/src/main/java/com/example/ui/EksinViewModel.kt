@@ -1398,7 +1398,7 @@ class EksinViewModel @Inject constructor(
 
     fun openMessageThread(thread: MessageThreadItem) {
         activeMessageThread = thread
-        _activeThreadDetailState.value = ThreadDetailUiState.Loading
+        _activeThreadDetailState.value = ThreadDetailUiState.Loading(thread.participantNick)
         viewModelScope.launch {
             try {
                 repository.fetchMessageThreadDetail(
@@ -1410,7 +1410,8 @@ class EksinViewModel @Inject constructor(
                     },
                     onFailure = { error ->
                         _activeThreadDetailState.value = ThreadDetailUiState.Error(
-                            error.localizedMessage ?: "Konuşma yüklenemedi."
+                            participantNick = thread.participantNick,
+                            message = error.localizedMessage ?: "Konuşma yüklenemedi."
                         )
                     }
                 )
@@ -1418,7 +1419,8 @@ class EksinViewModel @Inject constructor(
                 throw e
             } catch (e: Exception) {
                 _activeThreadDetailState.value = ThreadDetailUiState.Error(
-                    e.localizedMessage ?: "Konuşma yüklenemedi."
+                    participantNick = thread.participantNick,
+                    message = e.localizedMessage ?: "Konuşma yüklenemedi."
                 )
             }
         }

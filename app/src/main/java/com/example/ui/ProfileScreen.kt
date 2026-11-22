@@ -50,13 +50,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.model.ActionSubmitState
-import com.example.data.model.ActiveThreadDetailUiState
+import com.example.data.model.AuthorProfileData
+import com.example.data.model.DirectMessageItem
 import com.example.data.model.EntryItem
-import com.example.data.model.MessageItem
 import com.example.data.model.MessageThreadDetail
 import com.example.data.model.MessageThreadItem
-import com.example.data.model.MessageThreadsUiState
+import com.example.data.model.MessagesUiState
 import com.example.data.model.ProfileUiState
+import com.example.data.model.ThreadDetailUiState
 import com.example.data.model.TopicItem
 import com.example.ui.sheets.SendMessageDialog
 
@@ -83,12 +84,12 @@ fun ProfileScreen(
     LaunchedEffect(Unit) {
         if (isUserLoggedIn) {
             if (myProfileState is ProfileUiState.Idle) viewModel.loadMyProfile()
-            if (messageThreadsState is MessageThreadsUiState.Idle) viewModel.loadMessageThreads()
+            if (messageThreadsState is MessagesUiState.Idle) viewModel.loadMessageThreads()
         }
     }
 
     LaunchedEffect(activeThreadDetailState) {
-        if (activeThreadDetailState !is ActiveThreadDetailUiState.Hidden) {
+        if (activeThreadDetailState !is ThreadDetailUiState.Hidden) {
             showThreadDetail = true
         }
     }
@@ -132,7 +133,7 @@ fun ProfileScreen(
             }
             if (selectedTab == 0) {
                 MyProfileTab(
-                    username = currentUsername,
+                    username = currentUsername.orEmpty(),
                     state = myProfileState,
                     onRefresh = viewModel::loadMyProfile,
                     onOpenTopic = onOpenTopic
@@ -230,10 +231,7 @@ private fun MyProfileTab(
                 item {
                     ProfileHeaderCard(
                         nick = username,
-                        karma = profile.karma,
-                        entryCount = profile.entryCount,
-                        followerCount = profile.followerCount,
-                        followingCount = profile.followingCount
+                        profile = profile
                     )
                 }
                 item {
@@ -256,10 +254,19 @@ private fun MyProfileTab(
                         }
                     }
                 }
-                items(state.entries) { entry ->
+                items(profile.recentEntries) { entry ->
                     EntryCard(
                         entry = entry,
-                        onClick = { onOpenTopic(TopicItem(title = entry.title)) }
+                        onClick = {
+                            onOpenTopic(
+                                TopicItem(
+                                    id = entry.id,
+                                    title = entry.topicTitle,
+                                    slug = "",
+                                    url = entry.topicUrl
+                                )
+                            )
+                        }
                     )
                 }
             }
@@ -270,8 +277,8 @@ private fun MyProfileTab(
 
 @Composable
 private fun MessagesTab(
-    threadsState: MessageThreadsUiState,
-    detailState: ActiveThreadDetailUiState,
+    threadsState: MessagesUiState,
+    detailState: ThreadDetailUiState,
     showThreadDetail: Boolean,
     submitState: ActionSubmitState,
     onOpenThread: (MessageThreadItem) -> Unit,
@@ -281,16 +288,16 @@ private fun MessagesTab(
     onNewMessage: () -> Unit,
     onRefresh: () -> Unit
 ) {
-    if (showThreadDetail && detailState !is ActiveThreadDetailUiState.Hidden) {
+    if (showThreadDetail && detailState !is ThreadDetailUiState.Hidden) {
         when (detailState) {
-            is ActiveThreadDetailUiState.Loading -> Box(
+            is ThreadDetailUiState.Loading -> Box(
                 modifier = Modifier.fillMaxSize(),
                 contentAlignment = Alignment.Center
             ) {
                 CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
             }
-            is ActiveThreadDetailUiState.Error -> ErrorCard(detailState.message, onRefresh)
-            is ActiveThreadDetailUiState.Success -> ThreadDetailContent(
+            is ThreadDetailUiState.Error -> ErrorCard(detailState.message, onRefresh)
+            is ThreadDetailUiState.Success -> ThreadDetailContent(
                 detail = detailState.detail,
                 submitState = submitState,
                 onBack = onBackFromDetail,
@@ -301,14 +308,14 @@ private fun MessagesTab(
         }
     } else {
         when (threadsState) {
-            is MessageThreadsUiState.Loading -> Box(
+            is MessagesUiState.Loading -> Box(
                 modifier = Modifier.fillMaxSize(),
                 contentAlignment = Alignment.Center
             ) {
                 CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
             }
-            is MessageThreadsUiState.Error -> ErrorCard(threadsState.message, onRefresh)
-            is MessageThreadsUiState.Success -> ThreadListContent(
+            is MessagesUiState.Error -> ErrorCard(threadsState.message, onRefresh)
+            is MessagesUiState.Success -> ThreadListContent(
                 threads = threadsState.threads,
                 onOpenThread = onOpenThread,
                 onNewMessage = onNewMessage
@@ -384,7 +391,7 @@ private fun MessageThreadCard(thread: MessageThreadItem, onClick: () -> Unit) {
                     color = MaterialTheme.colorScheme.onSurface
                 )
                 Text(
-                    text = thread.lastMessage,
+                    text = thread.lastMessageSnippet,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1
@@ -392,13 +399,13 @@ private fun MessageThreadCard(thread: MessageThreadItem, onClick: () -> Unit) {
             }
             Column(horizontalAlignment = Alignment.End) {
                 Text(
-                    text = thread.lastMessageDate,
+                    text = thread.lastDateText,
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                if (thread.unreadCount > 0) {
+                if (thread.isUnread) {
                     Text(
-                        text = thread.unreadCount.toString(),
+                        text = "Yeni",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.primary
                     )
@@ -491,14 +498,14 @@ private fun ThreadDetailContent(
 }
 
 @Composable
-private fun MessageBubble(message: MessageItem) {
+private fun MessageBubble(message: DirectMessageItem) {
     Row(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = if (message.isFromMe) Arrangement.End else Arrangement.Start
+        horizontalArrangement = if (message.isOutgoing) Arrangement.End else Arrangement.Start
     ) {
         Card(
             colors = CardDefaults.cardColors(
-                containerColor = if (message.isFromMe) {
+                containerColor = if (message.isOutgoing) {
                     MaterialTheme.colorScheme.primaryContainer
                 } else {
                     MaterialTheme.colorScheme.surfaceVariant
@@ -511,16 +518,21 @@ private fun MessageBubble(message: MessageItem) {
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 Text(
-                    text = message.text,
+                    text = message.senderNick,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    text = message.contentText,
                     style = MaterialTheme.typography.bodyMedium,
-                    color = if (message.isFromMe) {
+                    color = if (message.isOutgoing) {
                         MaterialTheme.colorScheme.onPrimaryContainer
                     } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
+                        MaterialTheme.colorScheme.onSurface
                     }
                 )
                 Text(
-                    text = message.date,
+                    text = message.dateText,
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -532,11 +544,9 @@ private fun MessageBubble(message: MessageItem) {
 @Composable
 private fun ProfileHeaderCard(
     nick: String,
-    karma: String,
-    entryCount: Int,
-    followerCount: Int,
-    followingCount: Int
+    profile: AuthorProfileData
 ) {
+    val badgeText = profile.badgeText ?: "çaylak/yazar"
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -573,7 +583,7 @@ private fun ProfileHeaderCard(
                         color = MaterialTheme.colorScheme.onSurface
                     )
                     Text(
-                        text = "karma: $karma",
+                        text = badgeText,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -583,9 +593,9 @@ private fun ProfileHeaderCard(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                StatBox("Entry", entryCount.toString(), Modifier.weight(1f))
-                StatBox("Takipçi", followerCount.toString(), Modifier.weight(1f))
-                StatBox("Takip", followingCount.toString(), Modifier.weight(1f))
+                StatBox("Entry", profile.entryCountText, Modifier.weight(1f))
+                StatBox("Takipçi", profile.followerCountText, Modifier.weight(1f))
+                StatBox("Takip", profile.followingCountText, Modifier.weight(1f))
             }
         }
     }
@@ -634,13 +644,13 @@ private fun EntryCard(entry: EntryItem, onClick: () -> Unit) {
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Text(
-                text = entry.title,
+                text = entry.topicTitle,
                 style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.SemiBold,
                 color = MaterialTheme.colorScheme.onSurface
             )
             Text(
-                text = entry.summary,
+                text = entry.plainText,
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

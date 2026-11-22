@@ -1606,13 +1606,13 @@ class EksiRepository @Inject constructor(
                 ?: return@withContext Result.failure(
                     IllegalStateException("Oturum bilgisi alinamadi. Lutfen tekrar giris yapin.")
                 )
-            if (metadata.requestVerificationToken.isBlank()) {
+            if (metadata.verificationToken.isBlank()) {
                 return@withContext Result.failure(
                     IllegalStateException("Oturum bilgisi alinamadi. Lutfen tekrar giris yapin.")
                 )
             }
             val formFields = mapOf(
-                "__RequestVerificationToken" to metadata.requestVerificationToken,
+                "__RequestVerificationToken" to metadata.verificationToken,
                 "Title" to topicTitle,
                 "Id" to topicId,
                 "Content" to content,
@@ -1623,7 +1623,7 @@ class EksiRepository @Inject constructor(
                 formFields = formFields
             )
             val status = response.statusCode
-            val body = response.body
+            val body = response.html
             val validationError = extractFormValidationError(body)
             if (status in 200..399 && validationError == null) {
                 Result.success(Unit)
@@ -1743,14 +1743,14 @@ class EksiRepository @Inject constructor(
                 ?: return@withContext Result.failure(
                     IllegalStateException("Oturum bilgisi alinamadi. Lutfen tekrar giris yapin.")
                 )
-            if (metadata.requestVerificationToken.isBlank()) {
+            if (metadata.verificationToken.isBlank()) {
                 return@withContext Result.failure(
                     IllegalStateException("Oturum bilgisi alinamadi. Lutfen tekrar giris yapin.")
                 )
             }
             val postUrl = metadata.actionUrl.takeIf { it.isNotBlank() } ?: sourceUrl
             val formFields = mapOf(
-                "__RequestVerificationToken" to metadata.requestVerificationToken,
+                "__RequestVerificationToken" to metadata.verificationToken,
                 "To" to toNick,
                 "Message" to message
             )
@@ -1759,7 +1759,7 @@ class EksiRepository @Inject constructor(
                 formFields = formFields
             )
             val status = response.statusCode
-            val body = response.body
+            val body = response.html
             val validationError = extractFormValidationError(body)
             if (status in 200..399 && validationError == null) {
                 Result.success(Unit)

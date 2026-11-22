@@ -116,6 +116,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import coil.compose.SubcomposeAsyncImage
 import com.example.ai.GeminiAnalysisMode
+import com.example.data.model.ActionSubmitState
 import com.example.data.model.EntryItem
 import com.example.data.model.TopicFilterMode
 import com.example.data.model.TopicItem
@@ -330,6 +331,7 @@ fun TopicDetailScreen(
     if (showEntryComposer) {
         EntryComposerBottomSheet(
             topicTitle = activeTitle,
+            submitState = entrySubmitState,
             onDismiss = { showEntryComposer = false },
             onSubmit = { content ->
                 viewModel.submitEntry(
