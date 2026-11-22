@@ -35,6 +35,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
+import okhttp3.FormBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
@@ -473,6 +474,89 @@ class WebViewFetchBridge @Inject constructor(
         }
     }
 
+    /**
+     * Form verilerini (`application/x-www-form-urlencoded`) POST eder.
+     * Önce OkHttp `FormBody` ile hızlı doğrudan istek; Cloudflare challenge veya 403/503
+     * durumunda arka plan WebView üzerinden JS `fetch` POST ile fallback yapar.
+     */
+    suspend fun postForm(
+        rawUrl: String,
+        formFields: Map<String, String>,
+        refererUrl: String = getActiveBaseDomain(),
+        isAjax: Boolean = false
+    ): FetchBridgeResult {
+        ensureNetworkAvailable()
+
+        val baseDomain = getActiveBaseDomain()
+        val targetUrl = replaceDomain(rawUrl, baseDomain)
+        val referer = if (refererUrl.isBlank()) "$baseDomain/" else refererUrl
+
+        val formBodyBuilder = FormBody.Builder()
+        for ((key, value) in formFields) {
+            formBodyBuilder.add(key, value)
+        }
+        val formBody = formBodyBuilder.build()
+
+        val directResult = executeDirectHttpFormPost(
+            targetUrl = targetUrl,
+            baseDomain = baseDomain,
+            referer = referer,
+            formBody = formBody,
+            isAjax = isAjax
+        )
+
+        if (directResult != null &&
+            !directResult.isCloudflareChallenge &&
+            directResult.statusCode in 200..399
+        ) {
+            invalidateTtlCacheForUrl(rawUrl)
+            invalidateTtlCacheForUrl(refererUrl)
+            return directResult
+        }
+
+        val needsWebViewFallback = directResult == null ||
+            directResult.isCloudflareChallenge ||
+            directResult.statusCode == 403 ||
+            directResult.statusCode == 503
+
+        if (needsWebViewFallback && WebViewCookieJar.isHardwareWebViewSupported()) {
+            scheduleIdleWebViewHibernation()
+            val originReady = ensureRealOriginLoaded(baseDomain)
+            if (originReady) {
+                val jsResult = executeJsFormPost(
+                    targetUrl = targetUrl,
+                    baseDomain = baseDomain,
+                    formFields = formFields,
+                    isAjax = isAjax
+                )
+                scheduleIdleWebViewHibernation()
+                if (jsResult != null &&
+                    !jsResult.isCloudflareChallenge &&
+                    jsResult.statusCode in 200..399
+                ) {
+                    invalidateTtlCacheForUrl(rawUrl)
+                    invalidateTtlCacheForUrl(refererUrl)
+                    return jsResult
+                }
+                if (jsResult != null) {
+                    return jsResult
+                }
+            }
+        }
+
+        if (directResult != null) {
+            return directResult
+        }
+
+        return FetchBridgeResult(
+            statusCode = 0,
+            finalUrl = targetUrl,
+            html = "",
+            hasValidEksiDom = false,
+            isCloudflareChallenge = false
+        )
+    }
+
     private suspend fun performNetworkFetchChain(
         rawUrl: String,
         isAjax: Boolean,
@@ -670,6 +754,163 @@ class WebViewFetchBridge @Inject constructor(
             Log.d(TAG, "executeDirectHttpFetch tamamlanamadı")
             null
         }
+    }
+
+    /**
+     * OkHttp `FormBody` ile `application/x-www-form-urlencoded` POST isteği yapar.
+     */
+    private suspend fun executeDirectHttpFormPost(
+        targetUrl: String,
+        baseDomain: String,
+        referer: String,
+        formBody: FormBody,
+        isAjax: Boolean
+    ): FetchBridgeResult? = withContext(Dispatchers.IO) {
+        try {
+            cookieJar.syncFromWebViewCookieManager(baseDomain)
+            val requestBuilder = Request.Builder()
+                .url(targetUrl)
+                .post(formBody)
+                .header("User-Agent", userAgentProvider.getUserAgent())
+                .header("Accept-Language", "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7")
+                .header("Referer", referer)
+                .header("Origin", baseDomain.trimEnd('/'))
+
+            if (isAjax) {
+                requestBuilder.header("X-Requested-With", "XMLHttpRequest")
+                requestBuilder.header("Accept", "text/html, */*; q=0.01")
+            } else {
+                requestBuilder.header(
+                    "Accept",
+                    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+                )
+            }
+
+            directHttpClient.newCall(requestBuilder.build()).execute().use { response ->
+                val code = response.code
+                val finalUrl = response.request.url.toString()
+                val bodyHtml = response.body?.string().orEmpty()
+                val hasValidDom = hasEksiDomElements(bodyHtml)
+                val isChallenge = isCloudflareChallengeHtml(bodyHtml, code, hasValidDom)
+                FetchBridgeResult(
+                    statusCode = code,
+                    finalUrl = finalUrl,
+                    html = bodyHtml,
+                    hasValidEksiDom = hasValidDom,
+                    isCloudflareChallenge = isChallenge
+                )
+            }
+        } catch (e: Throwable) {
+            if (e is CancellationException) throw e
+            Log.d(TAG, "executeDirectHttpFormPost tamamlanamadı")
+            null
+        }
+    }
+
+    /**
+     * Arka plan WebView içinde `fetch(url, { method: 'POST', body: encodedBody })` çalıştırır.
+     */
+    private suspend fun executeJsFormPost(
+        targetUrl: String,
+        baseDomain: String,
+        formFields: Map<String, String>,
+        isAjax: Boolean
+    ): FetchBridgeResult? {
+        if (!WebViewCookieJar.isHardwareWebViewSupported()) return null
+
+        val requestId = UUID.randomUUID().toString()
+        val deferred = CompletableDeferred<FetchBridgeResult>()
+        pendingFetchRequests[requestId] = deferred
+
+        val relativeOrFullUrl = toSameOriginFetchTarget(targetUrl, baseDomain)
+        val quotedRequestId = JSONObject.quote(requestId)
+        val quotedUrl = JSONObject.quote(relativeOrFullUrl)
+        val quotedReferer = JSONObject.quote("$baseDomain/")
+
+        val encodedBody = buildUrlEncodedFormBody(formFields)
+        val quotedBody = JSONObject.quote(encodedBody)
+
+        val acceptHeader = if (isAjax) {
+            "text/html, */*; q=0.01"
+        } else {
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        }
+        val quotedAccept = JSONObject.quote(acceptHeader)
+        val headersJsObject = if (isAjax) {
+            """
+            {
+                'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                'X-Requested-With': 'XMLHttpRequest',
+                'Accept': $quotedAccept,
+                'Referer': $quotedReferer
+            }
+            """.trimIndent()
+        } else {
+            """
+            {
+                'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                'Accept': $quotedAccept,
+                'Referer': $quotedReferer
+            }
+            """.trimIndent()
+        }
+
+        val jsCode = """
+            (function() {
+                var reqId = $quotedRequestId;
+                var url = $quotedUrl;
+                var body = $quotedBody;
+                try {
+                    fetch(url, {
+                        method: 'POST',
+                        credentials: 'include',
+                        headers: $headersJsObject,
+                        body: body
+                    })
+                    .then(function(response) {
+                        var status = response.status || 200;
+                        var finalUrl = response.url || url;
+                        return response.text().then(function(bodyText) {
+                            window.$JS_INTERFACE_NAME.onFetchCompleted(reqId, status, finalUrl, bodyText || '');
+                        });
+                    })
+                    .catch(function(error) {
+                        var msg = (error && error.message) ? error.message : String(error);
+                        window.$JS_INTERFACE_NAME.onFetchFailed(reqId, msg);
+                    });
+                } catch (outerErr) {
+                    window.$JS_INTERFACE_NAME.onFetchFailed(reqId, String(outerErr));
+                }
+            })();
+        """.trimIndent()
+
+        return try {
+            withContext(Dispatchers.Main) {
+                val webView = getOrCreateBackgroundWebViewOnMain()
+                webView?.evaluateJavascript(jsCode, null)
+            }
+            withTimeoutOrNull(JS_FETCH_TIMEOUT_MS) {
+                deferred.await()
+            }
+        } catch (e: Throwable) {
+            if (e is CancellationException) throw e
+            Log.w(TAG, "executeJsFormPost uyarısı")
+            null
+        } finally {
+            pendingFetchRequests.remove(requestId)
+        }
+    }
+
+    private fun buildUrlEncodedFormBody(formFields: Map<String, String>): String {
+        if (formFields.isEmpty()) return ""
+        val sb = StringBuilder()
+        for ((key, value) in formFields) {
+            if (sb.isNotEmpty()) sb.append('&')
+            sb.append(Uri.encode(key))
+            sb.append('=')
+            sb.append(Uri.encode(value))
+        }
+        return sb.toString()
     }
 
     /**

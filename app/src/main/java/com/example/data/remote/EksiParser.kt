@@ -8,8 +8,13 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
+import com.example.data.model.AuthorProfileData
+import com.example.data.model.DirectMessageItem
 import com.example.data.model.EksiChannel
+import com.example.data.model.EntryFormMetadata
 import com.example.data.model.EntryItem
+import com.example.data.model.MessageThreadDetail
+import com.example.data.model.MessageThreadItem
 import com.example.data.model.PeriodicTimeRange
 import com.example.data.model.RankedTopicOrEntryItem
 import com.example.data.model.SearchFilter
@@ -1253,6 +1258,267 @@ class EksiParser @Inject constructor() {
 
         val fallbackTopics = parseLeftFrameTopics(html = rawResponse, isTrackedSection = false)
         return fallbackTopics to emptyList()
+    }
+
+    /**
+     * Giriş yapmış kullanıcının nick'ini üst navigasyon ve profil bağlantılarından ayrıştırır.
+     * `/biri/{nick}` yolunu bulup URL decode ederek nick'i döndürür.
+     */
+    fun parseCurrentUsername(html: String): String? {
+        if (html.isBlank()) return null
+        val doc = Jsoup.parse(html, BASE_URL)
+
+        val selectors = listOf(
+            "#top-navigation a[href^=\"/biri/\"]",
+            "li.not-mobile a[href^=\"/biri/\"]",
+            "a[title=ben]",
+            "a.profile-link",
+            "#top-navigation a[href*=\"/biri/\"]"
+        )
+        for (selector in selectors) {
+            val anchor = doc.selectFirst(selector) ?: continue
+            val href = anchor.attr("href").trim()
+            val nick = extractNickFromHref(href)
+            if (!nick.isNullOrBlank()) return nick
+        }
+        return null
+    }
+
+    /**
+     * `/biri/{nick}` içeren bir href'ten nick'i URL decode ederek çıkarır.
+     */
+    private fun extractNickFromHref(href: String): String? {
+        if (href.isBlank()) return null
+        val clean = href.substringBefore('?').substringBefore('#')
+        if (!clean.contains("/biri/", ignoreCase = true)) return null
+        val raw = clean.substringAfter("/biri/").trim('/')
+        if (raw.isBlank()) return null
+        val decoded = runCatching { Uri.decode(raw) }.getOrDefault(raw)
+        return decoded.replace("+", " ").trim().takeIf { it.isNotBlank() }
+    }
+
+    /**
+     * Entry ekleme formunun action URL'sini ve `__RequestVerificationToken` değerini ayrıştırır.
+     * Token boşsa null döndürür.
+     */
+    fun parseEntryFormMetadata(
+        html: String,
+        fallbackTopicTitle: String = "",
+        fallbackTopicId: String = ""
+    ): EntryFormMetadata? {
+        if (html.isBlank()) return null
+        val doc = Jsoup.parse(html, BASE_URL)
+
+        val form = doc.selectFirst("#entry-add-form")
+            ?: doc.selectFirst("form.editform")
+            ?: doc.selectFirst("form[action*=\"/entry/ekle\"]")
+            ?: return null
+
+        val rawAction = form.attr("action").trim()
+        val actionUrl = if (rawAction.isBlank()) "$BASE_URL/entry/ekle" else normalizeUrl(rawAction)
+
+        val token = form.selectFirst("input[name=\"__RequestVerificationToken\"]")
+            ?.attr("value")?.trim().orEmpty()
+        if (token.isBlank()) return null
+
+        val title = form.selectFirst("input[name=\"Title\"]")?.attr("value")?.trim()?.takeIf { it.isNotBlank() }
+            ?: fallbackTopicTitle
+        val topicId = form.selectFirst("input[name=\"Id\"]")?.attr("value")?.trim()?.takeIf { it.isNotBlank() }
+            ?: fallbackTopicId
+
+        return EntryFormMetadata(
+            actionUrl = actionUrl,
+            verificationToken = token,
+            title = title,
+            topicId = topicId
+        )
+    }
+
+    /**
+     * `/biri/{nick}` HTML'inden yazar nick'i, avatarı, rozet/karma bilgisi, istatistikleri ve
+     * son entry'leri çıkararak [AuthorProfileData] üretir.
+     */
+    fun parseAuthorProfile(
+        html: String,
+        requestedNick: String,
+        isCurrentUser: Boolean = false
+    ): AuthorProfileData {
+        val doc: Document = Jsoup.parse(html, BASE_URL)
+
+        val nickElement = doc.selectFirst("#user-profile-title, h1[data-nick]")
+        val nick = nickElement?.attr("data-nick")?.trim()?.takeIf { it.isNotBlank() }
+            ?: nickElement?.text()?.trim()?.takeIf { it.isNotBlank() }
+            ?: requestedNick
+
+        val avatarUrl = doc.selectFirst(".avatar img[src], .avatar img[data-src], .avatar-container img, img.avatar")
+            ?.let { img ->
+                img.attr("src").takeIf { it.isNotBlank() && !it.startsWith("data:") }
+                    ?: img.attr("data-src").takeIf { it.isNotBlank() }
+            }
+            ?.let { normalizeUrl(it) }
+
+        val badgeText = doc.selectFirst("#user-text-badges, .muted")?.text()?.trim().orEmpty()
+
+        val entryCountText = doc.selectFirst("#entry-count-total")
+            ?.text()?.trim()?.takeIf { it.isNotBlank() } ?: "0"
+        val followerCountText = doc.selectFirst("#user-follower-count")
+            ?.text()?.trim()?.takeIf { it.isNotBlank() } ?: "0"
+        val followingCountText = doc.selectFirst("#user-following-count")
+            ?.text()?.trim()?.takeIf { it.isNotBlank() } ?: "0"
+
+        val profileUrl = "$BASE_URL/biri/${Uri.encode(nick)}"
+
+        val recentEntries = doc.select("#entry-item-list > li").mapNotNull { li ->
+            parseEntryElement(
+                li = li,
+                topicTitle = li.attr("data-title").ifBlank { "" },
+                topicUrl = profileUrl,
+                pageNumber = 1
+            )
+        }
+
+        return AuthorProfileData(
+            nick = nick,
+            avatarUrl = avatarUrl,
+            badgeText = badgeText,
+            entryCountText = entryCountText,
+            followerCountText = followerCountText,
+            followingCountText = followingCountText,
+            isCurrentUser = isCurrentUser,
+            profileUrl = profileUrl,
+            recentEntries = recentEntries
+        )
+    }
+
+    /**
+     * `/mesaj` HTML'inden konuşma listesini (konuşma id, URL, karşı yazar nick'i,
+     * son mesaj özeti, tarih, okunmamış durumu) ayrıştırır.
+     */
+    fun parseMessageThreads(html: String): List<MessageThreadItem> {
+        if (html.isBlank()) return emptyList()
+        val doc: Document = Jsoup.parse(html, BASE_URL)
+
+        val listItems = doc.select("#threads > li").ifEmpty {
+            doc.select("ul#threads li, article[data-thread-id], .thread-list li")
+        }
+
+        val threads = mutableListOf<MessageThreadItem>()
+        for (li in listItems) {
+            val anchor = li.selectFirst("a[href*=\"/mesaj/\"]") ?: li.selectFirst("a[href]")
+            val rawHref = anchor?.attr("href")?.trim().orEmpty()
+            val threadUrl = if (rawHref.isNotBlank()) normalizeUrl(rawHref) else ""
+
+            val id = li.attr("data-thread-id").trim()
+                .ifBlank { threadUrl.substringAfter("/mesaj/", "").substringBefore("/").substringBefore("?") }
+                .ifBlank { anchor?.attr("data-id")?.trim().orEmpty() }
+            if (id.isBlank() && threadUrl.isBlank()) continue
+
+            val participantNick = li.selectFirst("h2, .nick, a[href*=\"/biri/\"]")?.text()?.trim()
+                ?.removePrefix("@")?.takeIf { it.isNotBlank() }
+                ?: anchor?.text()?.trim()?.takeIf { it.isNotBlank() }
+                ?: ""
+
+            val snippet = li.selectFirst("p, .message-preview, .snippet")?.text()?.trim().orEmpty()
+            val dateText = li.selectFirst("time")?.text()?.trim()
+                ?: li.selectFirst(".date, span.date")?.text()?.trim().orEmpty()
+
+            val isUnread = li.hasClass("unread") || li.selectFirst(".unread") != null
+
+            threads.add(
+                MessageThreadItem(
+                    id = id,
+                    participantNick = participantNick,
+                    lastMessageSnippet = snippet,
+                    lastDateText = dateText,
+                    isUnread = isUnread,
+                    threadUrl = threadUrl
+                )
+            )
+        }
+        return threads.distinctBy { it.id.ifBlank { it.threadUrl } }
+    }
+
+    /**
+     * Konuşma sayfasından gelen/giden mesajları ve yanıt formundaki action + token değerlerini ayrıştırır.
+     */
+    fun parseMessageThreadDetail(
+        html: String,
+        threadUrl: String,
+        fallbackNick: String = ""
+    ): MessageThreadDetail {
+        val doc: Document = Jsoup.parse(html, BASE_URL)
+
+        val normalizedThreadUrl = normalizeUrl(threadUrl)
+        val threadId = normalizedThreadUrl
+            .substringAfter("/mesaj/", "")
+            .substringBefore("/")
+            .substringBefore("?")
+
+        val participantNick = doc.selectFirst("#message-thread .thread-header h2, .thread-header .nick, h1[data-nick], .thread-header a[href*=\"/biri/\"]")
+            ?.text()?.trim()?.removePrefix("@")?.takeIf { it.isNotBlank() }
+            ?: fallbackNick
+
+        val messageElements = doc.select("#message-thread article, .incoming, .outgoing, article.message, .message")
+        val messages = messageElements.mapNotNull { el ->
+            val isOutgoing = el.hasClass("outgoing") ||
+                el.className().contains("outgoing", ignoreCase = true) ||
+                el.attr("data-direction").equals("out", ignoreCase = true)
+
+            val contentEl = el.selectFirst(".message-content, .content, p") ?: el
+            val contentHtml = contentEl.html().trim()
+            val contentText = contentEl.text().trim()
+            if (contentHtml.isBlank() && contentText.isBlank()) return@mapNotNull null
+
+            val id = el.attr("data-message-id").trim()
+                .ifBlank { el.id().removePrefix("message-") }
+
+            val senderNick = el.attr("data-sender").trim()
+                .ifBlank { el.selectFirst("a[href*=\"/biri/\"], .nick, .sender")?.text()?.trim().orEmpty() }
+                .removePrefix("@")
+                .ifBlank { if (isOutgoing) "ben" else participantNick }
+
+            val dateText = el.selectFirst("time, .date, span.date")?.text()?.trim().orEmpty()
+
+            DirectMessageItem(
+                id = id,
+                senderNick = senderNick,
+                contentHtml = contentHtml,
+                contentText = contentText,
+                dateText = dateText,
+                isOutgoing = isOutgoing
+            )
+        }
+
+        val replyForm = doc.selectFirst("#message-send-form")
+            ?: doc.selectFirst("form[action*=\"/mesaj\"]")
+        val replyFormAction = replyForm?.attr("action")?.trim()?.takeIf { it.isNotBlank() }
+            ?.let { normalizeUrl(it) }
+        val verificationToken = replyForm?.selectFirst("input[name=\"__RequestVerificationToken\"]")
+            ?.attr("value")?.trim()?.takeIf { it.isNotBlank() }
+
+        return MessageThreadDetail(
+            threadId = threadId,
+            participantNick = participantNick,
+            threadUrl = normalizedThreadUrl,
+            messages = messages,
+            replyFormAction = replyFormAction,
+            verificationToken = verificationToken
+        )
+    }
+
+    /**
+     * `/mesaj` sayfasındaki yeni mesaj formundan action URL ve `__RequestVerificationToken` ikilisini döndürür.
+     */
+    fun parseNewMessageVerificationToken(html: String): Pair<String, String>? {
+        if (html.isBlank()) return null
+        val doc: Document = Jsoup.parse(html, BASE_URL)
+        val form = doc.selectFirst("form[action*=\"/mesaj\"]") ?: return null
+        val rawAction = form.attr("action").trim()
+        if (rawAction.isBlank()) return null
+        val token = form.selectFirst("input[name=\"__RequestVerificationToken\"]")
+            ?.attr("value")?.trim().orEmpty()
+        if (token.isBlank()) return null
+        return normalizeUrl(rawAction) to token
     }
 
     /**

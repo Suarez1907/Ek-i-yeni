@@ -296,3 +296,104 @@ enum class LeftFrameSection(val title: String, val endpointPath: String) {
     DEBE("Debe", "/basliklar/debe"),
     OLAYLAR("Olaylar", "/basliklar/olay")
 }
+
+/**
+ * Entry ekleme/yanıtlama formundan ayrıştırılan meta veriler.
+ */
+data class EntryFormMetadata(
+    val actionUrl: String,
+    val verificationToken: String,
+    val title: String,
+    val topicId: String
+)
+
+/**
+ * Yazar profili (`/biri/{nick}`) verileri.
+ */
+data class AuthorProfileData(
+    val nick: String,
+    val avatarUrl: String? = null,
+    val badgeText: String = "",
+    val entryCountText: String = "0",
+    val followerCountText: String = "0",
+    val followingCountText: String = "0",
+    val isCurrentUser: Boolean = false,
+    val profileUrl: String = "",
+    val recentEntries: List<EntryItem> = emptyList()
+)
+
+/**
+ * Mesajlar sekmesindeki konuşma özeti.
+ */
+data class MessageThreadItem(
+    val id: String,
+    val participantNick: String,
+    val lastMessageSnippet: String,
+    val lastDateText: String,
+    val isUnread: Boolean = false,
+    val threadUrl: String
+)
+
+/**
+ * Konuşma içindeki tekil direkt mesaj.
+ */
+data class DirectMessageItem(
+    val id: String,
+    val senderNick: String,
+    val contentHtml: String,
+    val contentText: String,
+    val dateText: String,
+    val isOutgoing: Boolean
+)
+
+/**
+ * Bir konuşmanın tam detayı.
+ */
+data class MessageThreadDetail(
+    val threadId: String,
+    val participantNick: String,
+    val threadUrl: String,
+    val messages: List<DirectMessageItem>,
+    val replyFormAction: String? = null,
+    val verificationToken: String? = null
+)
+
+/**
+ * Profil sekmesi yükleme durumları.
+ */
+sealed interface ProfileUiState {
+    data object Idle : ProfileUiState
+    data object Loading : ProfileUiState
+    data class Success(val profile: AuthorProfileData) : ProfileUiState
+    data class Error(val message: String) : ProfileUiState
+}
+
+/**
+ * Mesajlar sekmesi yükleme durumları.
+ */
+sealed interface MessagesUiState {
+    data object Idle : MessagesUiState
+    data object Loading : MessagesUiState
+    data class Success(val threads: List<MessageThreadItem>) : MessagesUiState
+    data class Error(val message: String) : MessagesUiState
+}
+
+/**
+ * Bir konuşma detayının yükleme durumları.
+ */
+sealed interface ThreadDetailUiState {
+    data object Hidden : ThreadDetailUiState
+    data class Loading(val participantNick: String) : ThreadDetailUiState
+    data class Success(val detail: MessageThreadDetail) : ThreadDetailUiState
+    data class Error(val participantNick: String, val message: String) : ThreadDetailUiState
+}
+
+/**
+ * Entry gönderme / mesaj gönderme gibi form aksiyonlarının gönderim durumu.
+ */
+sealed interface ActionSubmitState {
+    data object Idle : ActionSubmitState
+    data object Submitting : ActionSubmitState
+    data class Success(val message: String) : ActionSubmitState
+    data class Error(val message: String) : ActionSubmitState
+}
