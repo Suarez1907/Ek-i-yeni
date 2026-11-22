@@ -1606,13 +1606,13 @@ class EksiRepository @Inject constructor(
                 ?: return@withContext Result.failure(
                     IllegalStateException("Oturum bilgisi alinamadi. Lutfen tekrar giris yapin.")
                 )
-            if (metadata.requestVerificationToken.isBlank()) {
+            if (metadata.verificationToken.isBlank()) {
                 return@withContext Result.failure(
                     IllegalStateException("Oturum bilgisi alinamadi. Lutfen tekrar giris yapin.")
                 )
             }
             val formFields = mapOf(
-                "__RequestVerificationToken" to metadata.requestVerificationToken,
+                "__RequestVerificationToken" to metadata.verificationToken,
                 "Title" to topicTitle,
                 "Id" to topicId,
                 "Content" to content,
@@ -1743,14 +1743,14 @@ class EksiRepository @Inject constructor(
                 ?: return@withContext Result.failure(
                     IllegalStateException("Oturum bilgisi alinamadi. Lutfen tekrar giris yapin.")
                 )
-            if (metadata.requestVerificationToken.isBlank()) {
+            if (metadata.verificationToken.isBlank()) {
                 return@withContext Result.failure(
                     IllegalStateException("Oturum bilgisi alinamadi. Lutfen tekrar giris yapin.")
                 )
             }
             val postUrl = metadata.actionUrl.takeIf { it.isNotBlank() } ?: sourceUrl
             val formFields = mapOf(
-                "__RequestVerificationToken" to metadata.requestVerificationToken,
+                "__RequestVerificationToken" to metadata.verificationToken,
                 "To" to toNick,
                 "Message" to message
             )
