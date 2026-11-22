@@ -7,10 +7,10 @@ import androidx.compose.ui.graphics.Color
 
 /**
  * Kullanıcı tarafından seçilebilen ve SharedPreferences ile kalıcı olarak kaydedilen 3 tema modu:
- * 1. [OLED_BLACK]: Arka plan `#000000`, Kart `#0D0D0D`, Metin `#EDEDED`, Vurgu `#81C784`.
- * 2. [DARK_GRAY]: Arka plan `#121212`, Kart `#1E1E1E`, Metin `#E0E0E0`, Vurgu `#81C784`.
- * 3. [CLASSIC_LIGHT]: Arka plan `#FFFFFF`, Kart/Yüzey `#F4F6F4`, Metin `#1A1A1A`,
- *    İkincil Metin `#555555`, Vurgu (Ekşi Yeşili) `#2E7D32`, Başlık Rozeti `#E8F5E9`.
+ * 1. [OLED_BLACK]: Arka plan `#000000`, Kart `#0B0E0C`, Metin `#EDF2EE`, Vurgu `#74E092`.
+ * 2. [DARK_GRAY]: Arka plan `#0F1210`, Kart `#171B18`, Metin `#E4EAE6`, Vurgu `#6EE798`.
+ * 3. [CLASSIC_LIGHT]: Arka plan `#F7F9F8`, Kart/Yüzey `#FFFFFF`, Metin `#111814`,
+ *    İkincil Metin `#4B5750`, Vurgu (Ekşi Yeşili) `#1B7F3B`, Başlık Rozeti `#E6F5EC`.
  */
 enum class AppThemeMode(
     val storageKey: String,
@@ -25,32 +25,32 @@ enum class AppThemeMode(
     OLED_BLACK(
         storageKey = "oled_black",
         title = "OLED Siyah",
-        subtitle = "Arka plan #000000 • Kart #0D0D0D • Vurgu #81C784",
+        subtitle = "Arka plan #000000 • Kart #0B0E0C • Vurgu #74E092",
         isLight = false,
         previewBgHex = Color(0xFF000000),
-        previewCardHex = Color(0xFF0D0D0D),
-        previewTextHex = Color(0xFFEDEDED),
-        previewAccentHex = Color(0xFF81C784)
+        previewCardHex = Color(0xFF0B0E0C),
+        previewTextHex = Color(0xFFEDF2EE),
+        previewAccentHex = Color(0xFF74E092)
     ),
     DARK_GRAY(
         storageKey = "dark_gray",
-        title = "Koyu (Dark Gray)",
-        subtitle = "Arka plan #121212 • Kart #1E1E1E • Vurgu #81C784",
+        title = "Koyu Gri",
+        subtitle = "Arka plan #0F1210 • Kart #171B18 • Vurgu #6EE798",
         isLight = false,
-        previewBgHex = Color(0xFF121212),
-        previewCardHex = Color(0xFF1E1E1E),
-        previewTextHex = Color(0xFFE0E0E0),
-        previewAccentHex = Color(0xFF81C784)
+        previewBgHex = Color(0xFF0F1210),
+        previewCardHex = Color(0xFF171B18),
+        previewTextHex = Color(0xFFE4EAE6),
+        previewAccentHex = Color(0xFF6EE798)
     ),
     CLASSIC_LIGHT(
         storageKey = "classic_light",
-        title = "Klasik Beyaz (Light Mode)",
-        subtitle = "Arka plan #FFFFFF • Kart #F4F6F4 • Vurgu #2E7D32",
+        title = "Açık Tema",
+        subtitle = "Arka plan #F7F9F8 • Kart #FFFFFF • Vurgu #1B7F3B",
         isLight = true,
-        previewBgHex = Color(0xFFFFFFFF),
-        previewCardHex = Color(0xFFF4F6F4),
-        previewTextHex = Color(0xFF1A1A1A),
-        previewAccentHex = Color(0xFF2E7D32)
+        previewBgHex = Color(0xFFF7F9F8),
+        previewCardHex = Color(0xFFFFFFFF),
+        previewTextHex = Color(0xFF111814),
+        previewAccentHex = Color(0xFF1B7F3B)
     );
 
     companion object {
@@ -73,101 +73,101 @@ object ActiveThemeState {
 val OledPitchBlack: Color
     get() = when (ActiveThemeState.currentMode) {
         AppThemeMode.OLED_BLACK -> Color(0xFF000000)
-        AppThemeMode.DARK_GRAY -> Color(0xFF121212)
-        AppThemeMode.CLASSIC_LIGHT -> Color(0xFFFFFFFF)
+        AppThemeMode.DARK_GRAY -> Color(0xFF0F1210)
+        AppThemeMode.CLASSIC_LIGHT -> Color(0xFFF7F9F8)
     }
 
 val OledCardSurface: Color
     get() = when (ActiveThemeState.currentMode) {
-        AppThemeMode.OLED_BLACK -> Color(0xFF0D0D0D)
-        AppThemeMode.DARK_GRAY -> Color(0xFF1E1E1E)
-        AppThemeMode.CLASSIC_LIGHT -> Color(0xFFF4F6F4)
+        AppThemeMode.OLED_BLACK -> Color(0xFF0B0E0C)
+        AppThemeMode.DARK_GRAY -> Color(0xFF171B18)
+        AppThemeMode.CLASSIC_LIGHT -> Color(0xFFFFFFFF)
     }
 
 val OledCardDark: Color
     get() = when (ActiveThemeState.currentMode) {
-        AppThemeMode.OLED_BLACK -> Color(0xFF121212)
-        AppThemeMode.DARK_GRAY -> Color(0xFF242424)
-        AppThemeMode.CLASSIC_LIGHT -> Color(0xFFEEF2EE)
+        AppThemeMode.OLED_BLACK -> Color(0xFF121815)
+        AppThemeMode.DARK_GRAY -> Color(0xFF1E231F)
+        AppThemeMode.CLASSIC_LIGHT -> Color(0xFFF0F4F2)
     }
 
 val OledSurfaceDark: Color
     get() = when (ActiveThemeState.currentMode) {
-        AppThemeMode.OLED_BLACK -> Color(0xFF080808)
-        AppThemeMode.DARK_GRAY -> Color(0xFF181818)
-        AppThemeMode.CLASSIC_LIGHT -> Color(0xFFF8FAF8)
+        AppThemeMode.OLED_BLACK -> Color(0xFF050706)
+        AppThemeMode.DARK_GRAY -> Color(0xFF141815)
+        AppThemeMode.CLASSIC_LIGHT -> Color(0xFFF3F6F4)
     }
 
 val OledElevatedCard: Color
     get() = when (ActiveThemeState.currentMode) {
-        AppThemeMode.OLED_BLACK -> Color(0xFF161616)
-        AppThemeMode.DARK_GRAY -> Color(0xFF282828)
-        AppThemeMode.CLASSIC_LIGHT -> Color(0xFFE6ECE6)
+        AppThemeMode.OLED_BLACK -> Color(0xFF141916)
+        AppThemeMode.DARK_GRAY -> Color(0xFF212723)
+        AppThemeMode.CLASSIC_LIGHT -> Color(0xFFE9F0EC)
     }
 
 val OledDivider: Color
     get() = when (ActiveThemeState.currentMode) {
-        AppThemeMode.OLED_BLACK -> Color(0xFF161616)
-        AppThemeMode.DARK_GRAY -> Color(0xFF2C2C2C)
-        AppThemeMode.CLASSIC_LIGHT -> Color(0xFFE0E5E0)
+        AppThemeMode.OLED_BLACK -> Color(0xFF1B211D)
+        AppThemeMode.DARK_GRAY -> Color(0xFF252C27)
+        AppThemeMode.CLASSIC_LIGHT -> Color(0xFFE2E8E5)
     }
 
 val OledHairlineDivider: Color
     get() = when (ActiveThemeState.currentMode) {
-        AppThemeMode.OLED_BLACK -> Color(0xFF161616)
-        AppThemeMode.DARK_GRAY -> Color(0xFF262626)
-        AppThemeMode.CLASSIC_LIGHT -> Color(0xFFE4E8E4)
+        AppThemeMode.OLED_BLACK -> Color(0xFF1B211D)
+        AppThemeMode.DARK_GRAY -> Color(0xFF252C27)
+        AppThemeMode.CLASSIC_LIGHT -> Color(0xFFE8EEEB)
     }
 
 // Sol Frame & Başlık Renkleri
 val OledTopicUnread: Color
     get() = when (ActiveThemeState.currentMode) {
-        AppThemeMode.OLED_BLACK -> Color(0xFFEDEDED)
-        AppThemeMode.DARK_GRAY -> Color(0xFFE0E0E0)
-        AppThemeMode.CLASSIC_LIGHT -> Color(0xFF1A1A1A)
+        AppThemeMode.OLED_BLACK -> Color(0xFFF2F7F4)
+        AppThemeMode.DARK_GRAY -> Color(0xFFE4EAE6)
+        AppThemeMode.CLASSIC_LIGHT -> Color(0xFF111814)
     }
 
 val OledTopicRead: Color
     get() = when (ActiveThemeState.currentMode) {
-        AppThemeMode.OLED_BLACK -> Color(0xFF888888)
-        AppThemeMode.DARK_GRAY -> Color(0xFF8E8E8E)
-        AppThemeMode.CLASSIC_LIGHT -> Color(0xFF757575)
+        AppThemeMode.OLED_BLACK -> Color(0xFF8A9690)
+        AppThemeMode.DARK_GRAY -> Color(0xFF909C95)
+        AppThemeMode.CLASSIC_LIGHT -> Color(0xFF7A867F)
     }
 
 val OledPillGreenBg: Color
     get() = when (ActiveThemeState.currentMode) {
-        AppThemeMode.OLED_BLACK -> Color(0xFF112415)
-        AppThemeMode.DARK_GRAY -> Color(0xFF1B3320)
-        AppThemeMode.CLASSIC_LIGHT -> Color(0xFFE8F5E9)
+        AppThemeMode.OLED_BLACK -> Color(0xFF102819)
+        AppThemeMode.DARK_GRAY -> Color(0xFF163020)
+        AppThemeMode.CLASSIC_LIGHT -> Color(0xFFE6F5EC)
     }
 
 // Ekşi Yeşili Vurgu Tonları
 val EksiNeonGreen: Color
     get() = when (ActiveThemeState.currentMode) {
-        AppThemeMode.OLED_BLACK -> Color(0xFF81C784)
-        AppThemeMode.DARK_GRAY -> Color(0xFF81C784)
-        AppThemeMode.CLASSIC_LIGHT -> Color(0xFF2E7D32)
+        AppThemeMode.OLED_BLACK -> Color(0xFF74E092)
+        AppThemeMode.DARK_GRAY -> Color(0xFF6EE798)
+        AppThemeMode.CLASSIC_LIGHT -> Color(0xFF1B7F3B)
     }
 
 val EksiBrightGreen: Color
     get() = when (ActiveThemeState.currentMode) {
-        AppThemeMode.OLED_BLACK -> Color(0xFF66BB6A)
-        AppThemeMode.DARK_GRAY -> Color(0xFF66BB6A)
-        AppThemeMode.CLASSIC_LIGHT -> Color(0xFF388E3C)
+        AppThemeMode.OLED_BLACK -> Color(0xFF63CE80)
+        AppThemeMode.DARK_GRAY -> Color(0xFF78DC96)
+        AppThemeMode.CLASSIC_LIGHT -> Color(0xFF229948)
     }
 
 val EksiDeepGreen: Color
     get() = when (ActiveThemeState.currentMode) {
-        AppThemeMode.OLED_BLACK -> Color(0xFF112415)
-        AppThemeMode.DARK_GRAY -> Color(0xFF1B3320)
-        AppThemeMode.CLASSIC_LIGHT -> Color(0xFFE8F5E9)
+        AppThemeMode.OLED_BLACK -> Color(0xFF102819)
+        AppThemeMode.DARK_GRAY -> Color(0xFF163020)
+        AppThemeMode.CLASSIC_LIGHT -> Color(0xFFE6F5EC)
     }
 
 val EksiSoftMint: Color
     get() = when (ActiveThemeState.currentMode) {
-        AppThemeMode.OLED_BLACK -> Color(0xFFA5D6A7)
-        AppThemeMode.DARK_GRAY -> Color(0xFFA5D6A7)
-        AppThemeMode.CLASSIC_LIGHT -> Color(0xFF1B5E20)
+        AppThemeMode.OLED_BLACK -> Color(0xFFB6EDC5)
+        AppThemeMode.DARK_GRAY -> Color(0xFFB6EDC5)
+        AppThemeMode.CLASSIC_LIGHT -> Color(0xFF10632F)
     }
 
 val OledOnAccentColor: Color
@@ -180,23 +180,23 @@ val OledOnAccentColor: Color
 // Metin ve İkincil Renkler
 val OledTextPrimary: Color
     get() = when (ActiveThemeState.currentMode) {
-        AppThemeMode.OLED_BLACK -> Color(0xFFEDEDED)
-        AppThemeMode.DARK_GRAY -> Color(0xFFE0E0E0)
-        AppThemeMode.CLASSIC_LIGHT -> Color(0xFF1A1A1A)
+        AppThemeMode.OLED_BLACK -> Color(0xFFEDF2EE)
+        AppThemeMode.DARK_GRAY -> Color(0xFFE4EAE6)
+        AppThemeMode.CLASSIC_LIGHT -> Color(0xFF111814)
     }
 
 val OledTextSecondary: Color
     get() = when (ActiveThemeState.currentMode) {
-        AppThemeMode.OLED_BLACK -> Color(0xFF9E9E9E)
-        AppThemeMode.DARK_GRAY -> Color(0xFFA6A6A6)
-        AppThemeMode.CLASSIC_LIGHT -> Color(0xFF555555)
+        AppThemeMode.OLED_BLACK -> Color(0xFF9BA89F)
+        AppThemeMode.DARK_GRAY -> Color(0xFFA3B0A7)
+        AppThemeMode.CLASSIC_LIGHT -> Color(0xFF4B5750)
     }
 
 val OledTextMuted: Color
     get() = when (ActiveThemeState.currentMode) {
-        AppThemeMode.OLED_BLACK -> Color(0xFF6E6E6E)
-        AppThemeMode.DARK_GRAY -> Color(0xFF787878)
-        AppThemeMode.CLASSIC_LIGHT -> Color(0xFF777777)
+        AppThemeMode.OLED_BLACK -> Color(0xFF6B7A70)
+        AppThemeMode.DARK_GRAY -> Color(0xFF74827A)
+        AppThemeMode.CLASSIC_LIGHT -> Color(0xFF7A867F)
     }
 
 val OledErrorRed = Color(0xFFEF5350)
