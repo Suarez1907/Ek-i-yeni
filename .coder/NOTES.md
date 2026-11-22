@@ -19,6 +19,15 @@ Aktif tema `ActiveThemeState` ile reaktif tutulur; `Theme.kt` içindeki
 güncellenir. Tercih `ThemePreferencesManager` ile `SharedPreferences`'a
 `selected_theme_mode` anahtarı altında yazılır.
 
+## Öne Çıkan Akışlar
+- Profil/Mesajlar — `ProfileScreen` ve `AuthorProfileScreen` yazar istatistikleri,
+  son entry'ler ve mesaj thread'lerini listeler; `MainScaffold` "Profilim" sekmesi
+  ve `activeAuthorNick` overlay'i ile açılır.
+- Entry yazma — `EntryComposerBottomSheet` başlık detayındaki "Entry Gir" FAB'ından
+  açılır; doğrulama token'ı `parseEntryFormMetadata` ile alınır, gönderim
+  `WebViewFetchBridge.postForm` POST akışıyla yapılır.
+- Mesaj gönderme — `SendMessageDialog` reply token ile POST isteğini tetikler.
+
 ## Kurallar
 - Mevcut public sembol isimleri ve `storageKey` değerleri korunur.
 - UI tamamen `MaterialTheme` semantik renkleri üzerinden çizilir.

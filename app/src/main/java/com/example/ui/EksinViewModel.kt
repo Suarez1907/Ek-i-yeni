@@ -15,8 +15,13 @@ import com.example.ai.GeminiImageGenerationResult
 import com.example.ai.GeminiStreamState
 import com.example.data.local.BookmarkedEntryEntity
 import com.example.data.local.TopicReadStateEntity
+import com.example.data.model.ActionSubmitState
 import com.example.data.model.AutocompleteSuggestionState
 import com.example.data.model.DebeAndStatsCategory
+import com.example.data.model.MessageThreadItem
+import com.example.data.model.MessagesUiState
+import com.example.data.model.ProfileUiState
+import com.example.data.model.ThreadDetailUiState
 import com.example.data.model.DebeAndStatsUiState
 import com.example.data.model.EksiChannel
 import com.example.data.model.EntryItem
@@ -251,6 +256,34 @@ class EksinViewModel @Inject constructor(
 
     private val _hasUserSession = MutableStateFlow(cookieJar.hasActiveUserSession())
     val hasUserSession: StateFlow<Boolean> = _hasUserSession.asStateFlow()
+
+    private val _isUserLoggedIn = MutableStateFlow(cookieJar.hasActiveUserSession())
+    val isUserLoggedIn: StateFlow<Boolean> = _isUserLoggedIn.asStateFlow()
+
+    private val _currentUsername = MutableStateFlow<String?>(null)
+    val currentUsername: StateFlow<String?> = _currentUsername.asStateFlow()
+
+    private val _myProfileState = MutableStateFlow<ProfileUiState>(ProfileUiState.Idle)
+    val myProfileState: StateFlow<ProfileUiState> = _myProfileState.asStateFlow()
+
+    private val _activeAuthorNick = MutableStateFlow<String?>(null)
+    val activeAuthorNick: StateFlow<String?> = _activeAuthorNick.asStateFlow()
+
+    private val _selectedAuthorProfileState = MutableStateFlow<ProfileUiState>(ProfileUiState.Idle)
+    val selectedAuthorProfileState: StateFlow<ProfileUiState> = _selectedAuthorProfileState.asStateFlow()
+
+    private val _messageThreadsState = MutableStateFlow<MessagesUiState>(MessagesUiState.Idle)
+    val messageThreadsState: StateFlow<MessagesUiState> = _messageThreadsState.asStateFlow()
+
+    private val _activeThreadDetailState = MutableStateFlow<ThreadDetailUiState>(ThreadDetailUiState.Hidden)
+    val activeThreadDetailState: StateFlow<ThreadDetailUiState> = _activeThreadDetailState.asStateFlow()
+    private var activeMessageThread: MessageThreadItem? = null
+
+    private val _entrySubmitState = MutableStateFlow<ActionSubmitState>(ActionSubmitState.Idle)
+    val entrySubmitState: StateFlow<ActionSubmitState> = _entrySubmitState.asStateFlow()
+
+    private val _messageSubmitState = MutableStateFlow<ActionSubmitState>(ActionSubmitState.Idle)
+    val messageSubmitState: StateFlow<ActionSubmitState> = _messageSubmitState.asStateFlow()
 
     private val _geminiStreamState = MutableStateFlow<GeminiStreamState>(GeminiStreamState.Idle)
     val geminiStreamState: StateFlow<GeminiStreamState> = _geminiStreamState.asStateFlow()
@@ -1213,6 +1246,7 @@ class EksinViewModel @Inject constructor(
         _pendingCloudflareChallenge.value = null
         _activeAuthSheet.value = null
         refreshCookieState()
+        refreshSessionState()
         triggerRefresh()
     }
 
@@ -1228,7 +1262,277 @@ class EksinViewModel @Inject constructor(
         _hasCfClearance.value = webViewFetchBridge.isDomVerified()
         val loggedIn = cookieJar.hasActiveUserSession(activeDomain)
         _hasUserSession.value = loggedIn
+        _isUserLoggedIn.value = loggedIn
         repository.setUserLoggedInState(loggedIn)
+    }
+
+    fun refreshSessionState() {
+        val activeDomain = webViewFetchBridge.getActiveBaseDomain()
+        val loggedIn = cookieJar.hasActiveUserSession(activeDomain)
+        _isUserLoggedIn.value = loggedIn
+        _hasUserSession.value = loggedIn
+        repository.setUserLoggedInState(loggedIn)
+        if (loggedIn) {
+            loadMyProfile(forceRefresh = true)
+            loadMessageThreads(forceRefresh = true)
+        } else {
+            _currentUsername.value = null
+            _myProfileState.value = ProfileUiState.Idle
+            _messageThreadsState.value = MessagesUiState.Idle
+        }
+    }
+
+    fun loadMyProfile(forceRefresh: Boolean = false) {
+        if (!_isUserLoggedIn.value) {
+            _myProfileState.value = ProfileUiState.Idle
+            return
+        }
+        viewModelScope.launch {
+            _myProfileState.value = ProfileUiState.Loading
+            try {
+                var nick = _currentUsername.value?.trim().orEmpty()
+                if (nick.isEmpty()) {
+                    val fetched = runCatching { repository.fetchCurrentUsername() }.getOrNull()
+                    val fetchedNick: String? = when (fetched) {
+                        is Result<*> -> fetched.getOrNull() as? String
+                        is String -> fetched
+                        else -> null
+                    }
+                    val cleanNick = fetchedNick?.trim().orEmpty()
+                    if (cleanNick.isNotEmpty()) {
+                        _currentUsername.value = cleanNick
+                        nick = cleanNick
+                    }
+                }
+                if (nick.isEmpty()) {
+                    _myProfileState.value = ProfileUiState.Error("Kullanıcı adı alınamadı.")
+                    return@launch
+                }
+                repository.fetchAuthorProfile(
+                    nick = nick,
+                    isCurrentUser = true,
+                    forceRefresh = forceRefresh
+                ).fold(
+                    onSuccess = { profile ->
+                        _myProfileState.value = ProfileUiState.Success(profile)
+                    },
+                    onFailure = { error ->
+                        _myProfileState.value = ProfileUiState.Error(
+                            error.localizedMessage ?: "Profil yüklenemedi."
+                        )
+                    }
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _myProfileState.value = ProfileUiState.Error(
+                    e.localizedMessage ?: "Profil yüklenemedi."
+                )
+            }
+        }
+    }
+
+    fun openAuthorProfile(nick: String) {
+        val cleanNick = nick.trim().removePrefix("@")
+        if (cleanNick.isEmpty()) return
+        _activeAuthorNick.value = cleanNick
+        viewModelScope.launch {
+            _selectedAuthorProfileState.value = ProfileUiState.Loading
+            try {
+                repository.fetchAuthorProfile(
+                    nick = cleanNick,
+                    isCurrentUser = cleanNick.equals(_currentUsername.value, ignoreCase = true),
+                    forceRefresh = false
+                ).fold(
+                    onSuccess = { profile ->
+                        _selectedAuthorProfileState.value = ProfileUiState.Success(profile)
+                    },
+                    onFailure = { error ->
+                        _selectedAuthorProfileState.value = ProfileUiState.Error(
+                            error.localizedMessage ?: "Yazar profili yüklenemedi."
+                        )
+                    }
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _selectedAuthorProfileState.value = ProfileUiState.Error(
+                    e.localizedMessage ?: "Yazar profili yüklenemedi."
+                )
+            }
+        }
+    }
+
+    fun closeAuthorProfile() {
+        _activeAuthorNick.value = null
+        _selectedAuthorProfileState.value = ProfileUiState.Idle
+    }
+
+    fun loadMessageThreads(forceRefresh: Boolean = false) {
+        if (!_isUserLoggedIn.value) {
+            _messageThreadsState.value = MessagesUiState.Idle
+            return
+        }
+        viewModelScope.launch {
+            _messageThreadsState.value = MessagesUiState.Loading
+            try {
+                repository.fetchMessageThreads(forceRefresh = forceRefresh).fold(
+                    onSuccess = { threads ->
+                        _messageThreadsState.value = MessagesUiState.Success(threads)
+                    },
+                    onFailure = { error ->
+                        _messageThreadsState.value = MessagesUiState.Error(
+                            error.localizedMessage ?: "Mesajlar yüklenemedi."
+                        )
+                    }
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _messageThreadsState.value = MessagesUiState.Error(
+                    e.localizedMessage ?: "Mesajlar yüklenemedi."
+                )
+            }
+        }
+    }
+
+    fun openMessageThread(thread: MessageThreadItem) {
+        activeMessageThread = thread
+        _activeThreadDetailState.value = ThreadDetailUiState.Loading
+        viewModelScope.launch {
+            try {
+                repository.fetchMessageThreadDetail(
+                    threadUrl = thread.threadUrl,
+                    participantNick = thread.participantNick
+                ).fold(
+                    onSuccess = { detail ->
+                        _activeThreadDetailState.value = ThreadDetailUiState.Success(detail)
+                    },
+                    onFailure = { error ->
+                        _activeThreadDetailState.value = ThreadDetailUiState.Error(
+                            error.localizedMessage ?: "Konuşma yüklenemedi."
+                        )
+                    }
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _activeThreadDetailState.value = ThreadDetailUiState.Error(
+                    e.localizedMessage ?: "Konuşma yüklenemedi."
+                )
+            }
+        }
+    }
+
+    fun closeMessageThread() {
+        activeMessageThread = null
+        _activeThreadDetailState.value = ThreadDetailUiState.Hidden
+    }
+
+    fun submitEntry(
+        topicUrl: String,
+        topicTitle: String,
+        topicId: String,
+        content: String
+    ) {
+        val trimmed = content.trim()
+        if (trimmed.isEmpty()) {
+            _entrySubmitState.value = ActionSubmitState.Error("Entry içeriği boş olamaz.")
+            return
+        }
+        if (!_isUserLoggedIn.value) {
+            openUserLogin()
+            _entrySubmitState.value = ActionSubmitState.Error(
+                "Entry girmek için giriş yapmalısınız."
+            )
+            return
+        }
+        viewModelScope.launch {
+            _entrySubmitState.value = ActionSubmitState.Submitting
+            try {
+                repository.submitEntry(
+                    topicUrl = topicUrl,
+                    topicTitle = topicTitle,
+                    topicId = topicId,
+                    content = trimmed
+                ).fold(
+                    onSuccess = {
+                        _entrySubmitState.value = ActionSubmitState.Success("Entry gönderildi")
+                        refreshCurrentTopicPage()
+                    },
+                    onFailure = { error ->
+                        _entrySubmitState.value = ActionSubmitState.Error(
+                            error.localizedMessage ?: "Entry gönderilemedi."
+                        )
+                    }
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _entrySubmitState.value = ActionSubmitState.Error(
+                    e.localizedMessage ?: "Entry gönderilemedi."
+                )
+            }
+        }
+    }
+
+    fun resetEntrySubmitState() {
+        _entrySubmitState.value = ActionSubmitState.Idle
+    }
+
+    fun sendDirectMessage(
+        toNick: String,
+        message: String,
+        replyThreadUrl: String? = null
+    ) {
+        val cleanToNick = toNick.trim().removePrefix("@")
+        val trimmed = message.trim()
+        if (cleanToNick.isEmpty() || trimmed.isEmpty()) {
+            _messageSubmitState.value = ActionSubmitState.Error("Alıcı ve mesaj boş olamaz.")
+            return
+        }
+        if (!_isUserLoggedIn.value) {
+            openUserLogin()
+            _messageSubmitState.value = ActionSubmitState.Error(
+                "Mesaj göndermek için giriş yapmalısınız."
+            )
+            return
+        }
+        viewModelScope.launch {
+            _messageSubmitState.value = ActionSubmitState.Submitting
+            try {
+                repository.sendDirectMessage(
+                    toNick = cleanToNick,
+                    message = trimmed,
+                    replyThreadUrl = replyThreadUrl
+                ).fold(
+                    onSuccess = {
+                        _messageSubmitState.value = ActionSubmitState.Success("Mesaj gönderildi")
+                        val thread = activeMessageThread
+                        if (replyThreadUrl != null && thread != null) {
+                            openMessageThread(thread)
+                        } else {
+                            loadMessageThreads(forceRefresh = true)
+                        }
+                    },
+                    onFailure = { error ->
+                        _messageSubmitState.value = ActionSubmitState.Error(
+                            error.localizedMessage ?: "Mesaj gönderilemedi."
+                        )
+                    }
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _messageSubmitState.value = ActionSubmitState.Error(
+                    e.localizedMessage ?: "Mesaj gönderilemedi."
+                )
+            }
+        }
+    }
+
+    fun resetMessageSubmitState() {
+        _messageSubmitState.value = ActionSubmitState.Idle
     }
 
     fun triggerRefresh() {

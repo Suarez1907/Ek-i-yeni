@@ -55,6 +55,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
@@ -62,8 +63,10 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -89,6 +92,7 @@ import androidx.compose.runtime.State
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -123,6 +127,7 @@ import com.example.ui.components.FloatingPagerCapsuleBar
 import com.example.ui.components.ThemeSelectorDialog
 import com.example.ui.components.rememberOledShimmerBrush
 import com.example.ui.sheets.BkzPreviewBottomSheet
+import com.example.ui.sheets.EntryComposerBottomSheet
 import com.example.ui.sheets.GeminiSummaryBottomSheet
 import com.example.ui.theme.ActiveThemeState
 import com.example.ui.theme.AppThemeMode
@@ -189,6 +194,20 @@ fun TopicDetailScreen(
     val focusManager = LocalFocusManager.current
     val coroutineScope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
+    val entrySubmitState by viewModel.entrySubmitState.collectAsStateWithLifecycle()
+    val isUserLoggedIn = viewModel.isUserLoggedIn.value
+    var showEntryComposer by remember { mutableStateOf(false) }
+
+    LaunchedEffect(entrySubmitState) {
+        if (entrySubmitState is ActionSubmitState.Success) {
+            showEntryComposer = false
+            viewModel.resetEntrySubmitState()
+            snackbarHostState.showSnackbar(
+                message = "Entry gönderildi",
+                duration = SnackbarDuration.Short
+            )
+        }
+    }
     val listState = rememberLazyListState()
     val topAppBarScrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
 
@@ -308,6 +327,21 @@ fun TopicDetailScreen(
         onDismiss = { viewModel.clearGeminiStream() }
     )
 
+    if (showEntryComposer) {
+        EntryComposerBottomSheet(
+            topicTitle = activeTitle,
+            onDismiss = { showEntryComposer = false },
+            onSubmit = { content ->
+                viewModel.submitEntry(
+                    topicUrl = topic.url,
+                    topicTitle = metadata?.topicTitle ?: topic.title,
+                    topicId = topic.id,
+                    content = content
+                )
+            }
+        )
+    }
+
     val shareEntry: (EntryItem) -> Unit = { entry ->
         val plainText = entry.annotatedContent.text
         val shareBody = "$activeTitle - @${entry.author} (#${entry.id}):\n\n$plainText\n\nhttps://eksisozluk.com/entry/${entry.id}"
@@ -327,6 +361,27 @@ fun TopicDetailScreen(
         containerColor = MaterialTheme.colorScheme.background,
         contentWindowInsets = WindowInsets.safeDrawing,
         snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
+        floatingActionButton = {
+            ExtendedFloatingActionButton(
+                onClick = {
+                    if (isUserLoggedIn) {
+                        showEntryComposer = true
+                    } else {
+                        viewModel.openUserLogin()
+                    }
+                },
+                icon = {
+                    Icon(
+                        imageVector = Icons.Rounded.Edit,
+                        contentDescription = "Entry Gir"
+                    )
+                },
+                text = { Text("Entry Gir") },
+                containerColor = EksiNeonGreen,
+                contentColor = OledOnAccentColor,
+                modifier = Modifier.testTag("entry_compose_fab")
+            )
+        },
         topBar = {
             Column(
                 modifier = Modifier
@@ -821,7 +876,7 @@ fun TopicDetailScreen(
                                     }
                                 },
                                 onAuthorClick = { authorName ->
-                                    viewModel.openBkzPreview(authorName)
+                                    viewModel.openAuthorProfile(authorName)
                                 },
                                 onShareEntry = {
                                     shareEntry(entry)
