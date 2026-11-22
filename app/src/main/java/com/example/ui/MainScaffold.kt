@@ -48,6 +48,7 @@ import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.EmojiEvents
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.Palette
@@ -157,6 +158,7 @@ enum class MainNavDestination(
     KANALLAR("Kanallar", Icons.Default.Tag, "nav_kanallar"),
     DEBE_ENLER("DEBE", Icons.Default.EmojiEvents, "nav_debe_enler"),
     ARAMA("Arama", Icons.Default.Search, "nav_arama"),
+    MESAJLAR("Mesajlar", Icons.Default.Email, "nav_mesajlar"),
     PROFIL("Profil", Icons.Default.Person, "nav_profil")
 }
 
@@ -469,6 +471,9 @@ fun MainScaffold(
                                     MainNavDestination.ARAMA -> {
                                         currentDestination = MainNavDestination.ARAMA
                                     }
+                                    MainNavDestination.MESAJLAR -> {
+                                        currentDestination = MainNavDestination.MESAJLAR
+                                    }
                                     MainNavDestination.PROFIL -> {
                                         currentDestination = MainNavDestination.PROFIL
                                     }
@@ -634,6 +639,10 @@ fun MainScaffold(
                             )
                         }
 
+                        MainNavDestination.MESAJLAR -> {
+                            MessagesScreen(viewModel = viewModel)
+                        }
+
                         MainNavDestination.PROFIL -> {
                             ProfileAndStudioScreenContent(
                                 viewModel = viewModel,
@@ -666,7 +675,8 @@ fun MainScaffold(
                 TopicDetailScreen(
                     topic = topic,
                     viewModel = viewModel,
-                    onBack = { viewModel.closeTopicDetail() }
+                    onBack = { viewModel.closeTopicDetail() },
+                    onOpenMessages = { currentDestination = MainNavDestination.MESAJLAR }
                 )
             }
         }
@@ -1292,7 +1302,7 @@ private fun SearchScreenContent(
     ) {
         OutlinedTextField(
             value = query,
-            onValueChange = { viewModel.updateSearchQuery(it) },
+            onValueChange = { viewModel.onSearchQueryChange(it) },
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp, vertical = 10.dp)
@@ -1322,7 +1332,7 @@ private fun SearchScreenContent(
                         )
                     }
                     if (query.isNotEmpty()) {
-                        IconButton(onClick = { viewModel.updateSearchQuery("") }) {
+                        IconButton(onClick = { viewModel.onSearchQueryChange("") }) {
                             Icon(
                                 imageVector = Icons.Default.Clear,
                                 contentDescription = "Temizle",
@@ -1354,7 +1364,7 @@ private fun SearchScreenContent(
         // Anlık Arama Önerileri (Autocomplete) Açılır Kartı / Listesi:
         // Kullanıcı en az 2 harf yazdığında ve öneri varsa arama kutusunun hemen altında belirir.
         AnimatedVisibility(
-            visible = query.trim().length >= 2 && autocompleteState.hasAnySuggestion
+            visible = query.isNotBlank() && autocompleteState.hasAnySuggestion
         ) {
             Card(
                 shape = MaterialTheme.shapes.large,
@@ -1394,7 +1404,7 @@ private fun SearchScreenContent(
                     LazyColumn(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .heightIn(max = 300.dp)
+                            .heightIn(max = 260.dp)
                             .testTag("autocomplete_suggestions_list")
                     ) {
                         // 1) Başlık Önerileri (Titles)
@@ -2081,25 +2091,48 @@ private fun ProfileAndStudioScreenContent(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Button(
-                            onClick = { viewModel.openUserLogin() },
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = EksiNeonGreen,
-                                contentColor = OledOnAccentColor
-                            ),
-                            shape = RoundedCornerShape(12.dp),
-                            modifier = Modifier
-                                .weight(1f)
-                                .height(44.dp)
-                                .testTag("profile_login_button")
-                        ) {
-                            Text(
-                                text = "Ekşi Giriş Yap",
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Bold,
-                                maxLines = 1,
-                                softWrap = false
-                            )
+                        if (hasUserSession) {
+                            Button(
+                                onClick = { viewModel.logout() },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                                    contentColor = OledTextPrimary
+                                ),
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(44.dp)
+                                    .testTag("profile_logout_button")
+                            ) {
+                                Text(
+                                    text = "Çıkış Yap",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
+                            }
+                        } else {
+                            Button(
+                                onClick = { viewModel.requestLogin() },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = EksiNeonGreen,
+                                    contentColor = OledOnAccentColor
+                                ),
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(44.dp)
+                                    .testTag("profile_login_button")
+                            ) {
+                                Text(
+                                    text = "Ekşi Giriş Yap",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
+                            }
                         }
                         OutlinedButton(
                             onClick = { viewModel.openCloudflareVerification() },
@@ -2123,7 +2156,7 @@ private fun ProfileAndStudioScreenContent(
             }
         }
 
-        // 1.5 Gemini API Anahtarı (Google AI Studio - Free Tier & SharedPreferences)
+        // 1.5 OpenRouter API Anahtarı (Free Tier & SharedPreferences)
         item {
             Card(
                 shape = RoundedCornerShape(14.dp),
@@ -2152,7 +2185,7 @@ private fun ProfileAndStudioScreenContent(
                                 tint = EksiNeonGreen
                             )
                             Text(
-                                text = "Gemini API Anahtarı",
+                                text = "OpenRouter API Anahtarı",
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold,
                                 color = EksiNeonGreen,
@@ -2182,7 +2215,7 @@ private fun ProfileAndStudioScreenContent(
                     }
 
                     Text(
-                        text = "Başlık içi '✨ AI Özet' (gemini-3.5-flash-lite) özelliği için ücretsiz Google AI Studio API anahtarınızı buraya girin. Anahtarınız yalnızca cihazınızda (SharedPreferences) saklanır.",
+                        text = "Başlık içi '✨ AI Özet' ve yazar mesajlaşma özellikleri için OpenRouter API anahtarınızı buraya girin. Anahtarınız yalnızca cihazınızda (SharedPreferences) saklanır.",
                         style = MaterialTheme.typography.bodySmall,
                         color = OledTextSecondary
                     )
@@ -2198,7 +2231,7 @@ private fun ProfileAndStudioScreenContent(
                             .testTag("gemini_api_key_input"),
                         singleLine = true,
                         shape = RoundedCornerShape(14.dp),
-                        label = { Text("AIzaSy... (Gemini API Key)") },
+                        label = { Text("sk-or-... (OpenRouter API Key)") },
                         visualTransformation = if (showApiKeyPlain) {
                             VisualTransformation.None
                         } else {
@@ -2428,7 +2461,7 @@ private fun ProfileAndStudioScreenContent(
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     Text(
-                        text = "Gemini Görsel Stüdyosu (1K/2K/4K & En-Boy Oranı)",
+                        text = "OpenRouter Görsel Stüdyosu (devre dışı)",
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.Bold,
                         color = EksiNeonGreen
@@ -2508,7 +2541,7 @@ private fun ProfileAndStudioScreenContent(
 
                     Button(
                         onClick = { viewModel.generateEntryVisual(promptInput) },
-                        enabled = aiImageState !is AiImageState.Loading && promptInput.isNotBlank(),
+                        enabled = false,
                         colors = ButtonDefaults.buttonColors(
                             containerColor = EksiNeonGreen,
                             contentColor = OledOnAccentColor

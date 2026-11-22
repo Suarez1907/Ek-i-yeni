@@ -45,6 +45,8 @@ import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.BrokenImage
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.FilterAlt
@@ -64,6 +66,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -163,7 +166,8 @@ import kotlinx.coroutines.launch
 fun TopicDetailScreen(
     topic: TopicItem,
     viewModel: EksinViewModel,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onOpenMessages: () -> Unit = {}
 ) {
     BackHandler { onBack() }
 
@@ -184,6 +188,8 @@ fun TopicDetailScreen(
     val lastContentSource by viewModel.lastContentSource.collectAsStateWithLifecycle()
     val themeMode by viewModel.themeMode.collectAsStateWithLifecycle()
     val showThemeDialog by viewModel.showThemeDialog.collectAsStateWithLifecycle()
+    val authUiState by viewModel.authUiState.collectAsStateWithLifecycle()
+    val entryComposeState by viewModel.entryComposeState.collectAsStateWithLifecycle()
 
     val context = LocalContext.current
     val focusManager = LocalFocusManager.current
@@ -308,6 +314,17 @@ fun TopicDetailScreen(
         onDismiss = { viewModel.clearGeminiStream() }
     )
 
+    EntryComposeSheet(
+        state = entryComposeState,
+        onSubmit = { content ->
+            viewModel.submitEntryCompose(
+                topic = topic,
+                content = content
+            )
+        },
+        onDismiss = { viewModel.dismissEntryCompose() }
+    )
+
     val shareEntry: (EntryItem) -> Unit = { entry ->
         val plainText = entry.annotatedContent.text
         val shareBody = "$activeTitle - @${entry.author} (#${entry.id}):\n\n$plainText\n\nhttps://eksisozluk.com/entry/${entry.id}"
@@ -327,6 +344,21 @@ fun TopicDetailScreen(
         containerColor = MaterialTheme.colorScheme.background,
         contentWindowInsets = WindowInsets.safeDrawing,
         snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
+        floatingActionButton = {
+            if (authUiState.isLoggedIn) {
+                FloatingActionButton(
+                    onClick = { viewModel.openEntryCompose(topic) },
+                    containerColor = EksiNeonGreen,
+                    contentColor = OledOnAccentColor,
+                    modifier = Modifier.testTag("entry_compose_fab")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Edit,
+                        contentDescription = "Entry Gir"
+                    )
+                }
+            }
+        },
         topBar = {
             Column(
                 modifier = Modifier
@@ -843,6 +875,10 @@ fun TopicDetailScreen(
                                         topicTitle = "${entry.topicTitle} (#${entry.id})",
                                         entries = listOf(entry)
                                     )
+                                },
+                                onSendMessage = {
+                                    viewModel.startNewMessage(entry.author)
+                                    onOpenMessages()
                                 }
                             )
                         }
@@ -920,7 +956,8 @@ fun SwipeableEntryOledCard(
     onShareEntry: () -> Unit,
     onBkzClick: (String) -> Unit,
     onExternalUrlClick: (String) -> Unit,
-    onSummarizeSingle: () -> Unit
+    onSummarizeSingle: () -> Unit,
+    onSendMessage: () -> Unit = {}
 ) {
     val dismissState = rememberSwipeToDismissBoxState(
         confirmValueChange = { targetValue ->
@@ -1044,6 +1081,19 @@ fun SwipeableEntryOledCard(
                     }
 
                     Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                        IconButton(
+                            onClick = onSendMessage,
+                            modifier = Modifier
+                                .size(32.dp)
+                                .testTag("entry_send_message_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Email,
+                                contentDescription = "Yazara mesaj gönder",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
                         IconButton(
                             onClick = onSwipeLeftAuthorOrShare,
                             modifier = Modifier.size(32.dp)
