@@ -71,6 +71,7 @@ android {
 }
 
 secrets {
+    // OpenRouter API anahtarı ve modeli .env / .env.example üzerinden BuildConfig.OPENROUTER_* alanlarına çevrilir.
     propertiesFileName = ".env"
     defaultPropertiesFileName = ".env.example"
     ignoreList.add("keyToIgnore")

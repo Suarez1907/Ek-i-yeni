@@ -133,7 +133,7 @@ object AppModule {
             } else {
                 HttpLoggingInterceptor.Level.NONE
             }
-            redactHeader("x-goog-api-key")
+            redactHeader("Authorization")
             redactHeader("Cookie")
             redactHeader("Set-Cookie")
         }
@@ -182,4 +182,7 @@ data class EksinServiceContainer(
     val webViewFetchBridge: WebViewFetchBridge,
     val cloudflareManager: CloudflareChallengeManager,
     val geminiHelper: GeminiHelper
-)
+) {
+    val openRouterHelper: GeminiHelper
+        get() = geminiHelper
+}
