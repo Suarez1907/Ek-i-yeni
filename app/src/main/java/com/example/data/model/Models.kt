@@ -316,9 +316,9 @@ data class MessageItem(
  * Entry oluşturma / mesaj gönderme gibi yazma işlemlerinin sonucu.
  */
 data class EntryCreateResult(
-    val success: Boolean,
+    val isSuccess: Boolean,
     val entryId: String? = null,
-    val message: String = ""
+    val message: String? = null
 )
 
 /**

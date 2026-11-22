@@ -1589,7 +1589,7 @@ class EksiRepository @Inject constructor(
         try {
             if (content.isBlank()) {
                 return@withContext EntryCreateResult(
-                    success = false,
+                    isSuccess = false,
                     message = "İçerik boş olamaz"
                 )
             }
@@ -1613,14 +1613,14 @@ class EksiRepository @Inject constructor(
 
             if (result.statusCode == 0) {
                 return@withContext EntryCreateResult(
-                    success = false,
+                    isSuccess = false,
                     message = "Bağlantı kurulamadı"
                 )
             }
 
             eksiParser.parseEntryCreateResult(result.html)
         } catch (_: Throwable) {
-            EntryCreateResult(success = false, message = "Entry gönderilemedi")
+            EntryCreateResult(isSuccess = false, message = "Entry gönderilemedi")
         }
     }
 
@@ -1669,7 +1669,7 @@ class EksiRepository @Inject constructor(
         try {
             if (body.isBlank()) {
                 return@withContext EntryCreateResult(
-                    success = false,
+                    isSuccess = false,
                     message = "Mesaj boş olamaz"
                 )
             }
@@ -1695,14 +1695,14 @@ class EksiRepository @Inject constructor(
 
             if (result.statusCode == 0) {
                 return@withContext EntryCreateResult(
-                    success = false,
+                    isSuccess = false,
                     message = "Bağlantı kurulamadı"
                 )
             }
 
             eksiParser.parseMessageSendResult(result.html)
         } catch (_: Throwable) {
-            EntryCreateResult(success = false, message = "Mesaj gönderilemedi")
+            EntryCreateResult(isSuccess = false, message = "Mesaj gönderilemedi")
         }
     }
 }
