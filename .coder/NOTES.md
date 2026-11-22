@@ -27,6 +27,7 @@ güncellenir. Tercih `ThemePreferencesManager` ile `SharedPreferences`'a
   açılır; doğrulama token'ı `parseEntryFormMetadata` ile alınır, gönderim
   `WebViewFetchBridge.postForm` POST akışıyla yapılır.
 - Mesaj gönderme — `SendMessageDialog` reply token ile POST isteğini tetikler.
+- Ayarlar — `MainScaffold` üst çubuğundaki dişli ikonu `SettingsBottomSheet` açar; Ekşi Sözlük giriş/çıkışı, Gemini API anahtarı, tema ve Cloudflare kısayolları buradan yönetilir.
 
 ## Kurallar
 - Mevcut public sembol isimleri ve `storageKey` değerleri korunur.
