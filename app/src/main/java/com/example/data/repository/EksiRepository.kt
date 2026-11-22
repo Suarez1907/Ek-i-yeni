@@ -11,8 +11,11 @@ import com.example.data.local.BookmarkedEntryEntity
 import com.example.data.local.EksinDao
 import com.example.data.local.ReadStateDao
 import com.example.data.local.TopicReadStateEntity
+import com.example.data.model.AuthorProfileData
 import com.example.data.model.EksiChannel
 import com.example.data.model.EntryItem
+import com.example.data.model.MessageThreadDetail
+import com.example.data.model.MessageThreadItem
 import com.example.data.model.LeftFrameSection
 import com.example.data.model.PeriodicRankingTab
 import com.example.data.model.PeriodicTimeRange
@@ -1521,6 +1524,252 @@ class EksiRepository @Inject constructor(
             Result.success(
                 firstPageParsed.copy(entries = firstPageParsed.entries.take(5))
             )
+        } catch (e: Throwable) {
+            Result.failure(e)
+        }
+    }
+
+    private fun isLoginPage(html: String): Boolean {
+        if (html.isBlank()) return false
+        val lower = html.lowercase()
+        return lower.contains("name=\"username\"") ||
+            lower.contains("id=\"login-form\"") ||
+            lower.contains("loginform") ||
+            (lower.contains("şifre") && lower.contains("giriş"))
+    }
+
+    private fun extractFormValidationError(html: String): String? {
+        if (html.isBlank()) return null
+        val markerRegex = Regex(
+            """<(?:div|span|ul|li)[^>]*(?:field-validation-error|validation-summary-errors|text-danger)[^>]*>(.*?)</(?:div|span|ul|li)>""",
+            setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
+        )
+        val match = markerRegex.find(html) ?: return null
+        return match.groupValues.getOrNull(1)
+            ?.replace(Regex("<[^>]+>"), " ")
+            ?.replace(Regex("\\s+"), " ")
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+    }
+
+    private fun activeBaseDomainTrimmed(): String =
+        webViewFetchBridge.getActiveBaseDomain().ifBlank {
+            WebViewCookieJar.DEFAULT_BASE_URL
+        }.trimEnd('/')
+
+    /**
+     * Aktif oturumdaki kullanıcı adını çeker. Oturum yoksa anlamlı Türkçe hata döndürür.
+     */
+    suspend fun fetchCurrentUsername(): Result<String> = withContext(Dispatchers.IO) {
+        try {
+            val baseDomain = activeBaseDomainTrimmed()
+            val html = webViewFetchBridge.fetchHtml(
+                rawUrl = "$baseDomain/mesaj",
+                isAjax = false,
+                bypassCache = true
+            )
+            val username = eksiParser.parseCurrentUsername(html)
+            if (username.isNullOrBlank()) {
+                Result.failure(
+                    IllegalStateException("Oturum bilgisi alinamadi. Lutfen tekrar giris yapin.")
+                )
+            } else {
+                Result.success(username)
+            }
+        } catch (e: Throwable) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Başlığa yeni entry gönderir. İçerik boşsa, oturum/CSRF token yoksa veya form doğrulama
+     * hatası döndüyse anlamlı Türkçe hata mesajıyla [Result.failure] döner.
+     */
+    suspend fun submitEntry(
+        topicUrl: String,
+        topicTitle: String,
+        topicId: String,
+        content: String
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            if (content.isBlank()) {
+                return@withContext Result.failure(
+                    IllegalArgumentException("Entry icerigi bos olamaz.")
+                )
+            }
+            val html = webViewFetchBridge.fetchHtml(
+                rawUrl = topicUrl,
+                isAjax = false,
+                bypassCache = true
+            )
+            val metadata = eksiParser.parseEntryFormMetadata(html)
+                ?: return@withContext Result.failure(
+                    IllegalStateException("Oturum bilgisi alinamadi. Lutfen tekrar giris yapin.")
+                )
+            if (metadata.requestVerificationToken.isBlank()) {
+                return@withContext Result.failure(
+                    IllegalStateException("Oturum bilgisi alinamadi. Lutfen tekrar giris yapin.")
+                )
+            }
+            val formFields = mapOf(
+                "__RequestVerificationToken" to metadata.requestVerificationToken,
+                "Title" to topicTitle,
+                "Id" to topicId,
+                "Content" to content,
+                "ReturnUrl" to topicUrl
+            )
+            val response = webViewFetchBridge.postForm(
+                rawUrl = topicUrl,
+                formFields = formFields
+            )
+            val status = response.statusCode
+            val body = response.body
+            val validationError = extractFormValidationError(body)
+            if (status in 200..399 && validationError == null) {
+                Result.success(Unit)
+            } else {
+                Result.failure(
+                    IllegalStateException(
+                        validationError ?: "Entry gonderilemedi. (HTTP $status)"
+                    )
+                )
+            }
+        } catch (e: Throwable) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Yazar profilini `/biri/{encodedNick}` adresinden çeker.
+     */
+    suspend fun fetchAuthorProfile(
+        nick: String,
+        isCurrentUser: Boolean = false,
+        forceRefresh: Boolean = false
+    ): Result<AuthorProfileData> = withContext(Dispatchers.IO) {
+        try {
+            val cleanNick = nick.trim()
+            if (cleanNick.isBlank()) {
+                return@withContext Result.failure(
+                    IllegalArgumentException("Yazar adi bos olamaz.")
+                )
+            }
+            val encodedNick = Uri.encode(cleanNick)
+            val baseDomain = activeBaseDomainTrimmed()
+            val html = webViewFetchBridge.fetchHtml(
+                rawUrl = "$baseDomain/biri/$encodedNick",
+                isAjax = false,
+                bypassCache = forceRefresh
+            )
+            val profile = eksiParser.parseAuthorProfile(html, cleanNick)
+            Result.success(profile)
+        } catch (e: Throwable) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Mesajlar sekmesindeki sohbet başlıklarını `/mesaj` adresinden çeker. Giriş sayfasına
+     * yönlendirilmişse oturum hatası döndürür.
+     */
+    suspend fun fetchMessageThreads(
+        forceRefresh: Boolean = false
+    ): Result<List<MessageThreadItem>> = withContext(Dispatchers.IO) {
+        try {
+            val baseDomain = activeBaseDomainTrimmed()
+            val html = webViewFetchBridge.fetchHtml(
+                rawUrl = "$baseDomain/mesaj",
+                isAjax = false,
+                bypassCache = forceRefresh
+            )
+            if (isLoginPage(html)) {
+                return@withContext Result.failure(
+                    IllegalStateException("Mesajlari gormek icin giris yapmalisiniz.")
+                )
+            }
+            Result.success(eksiParser.parseMessageThreads(html))
+        } catch (e: Throwable) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Belirli bir mesaj sohbetinin detayını çeker.
+     */
+    suspend fun fetchMessageThreadDetail(
+        threadUrl: String,
+        participantNick: String = ""
+    ): Result<MessageThreadDetail> = withContext(Dispatchers.IO) {
+        try {
+            if (threadUrl.isBlank()) {
+                return@withContext Result.failure(
+                    IllegalArgumentException("Sohbet adresi bos olamaz.")
+                )
+            }
+            val html = webViewFetchBridge.fetchHtml(
+                rawUrl = threadUrl,
+                isAjax = false,
+                bypassCache = true
+            )
+            Result.success(eksiParser.parseMessageThreadDetail(html, participantNick))
+        } catch (e: Throwable) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Bir yazara özel mesaj gönderir. Alıcı/mesaj boşsa, oturum/CSRF token yoksa veya form
+     * doğrulama hatası döndüyse anlamlı Türkçe hata mesajıyla [Result.failure] döner.
+     */
+    suspend fun sendDirectMessage(
+        toNick: String,
+        message: String,
+        replyThreadUrl: String? = null
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            if (toNick.isBlank() || message.isBlank()) {
+                return@withContext Result.failure(
+                    IllegalArgumentException("Alici ve mesaj bos olamaz.")
+                )
+            }
+            val baseDomain = activeBaseDomainTrimmed()
+            val sourceUrl = replyThreadUrl?.takeIf { it.isNotBlank() } ?: "$baseDomain/mesaj"
+            val html = webViewFetchBridge.fetchHtml(
+                rawUrl = sourceUrl,
+                isAjax = false,
+                bypassCache = true
+            )
+            val metadata = eksiParser.parseEntryFormMetadata(html)
+                ?: return@withContext Result.failure(
+                    IllegalStateException("Oturum bilgisi alinamadi. Lutfen tekrar giris yapin.")
+                )
+            if (metadata.requestVerificationToken.isBlank()) {
+                return@withContext Result.failure(
+                    IllegalStateException("Oturum bilgisi alinamadi. Lutfen tekrar giris yapin.")
+                )
+            }
+            val postUrl = metadata.actionUrl.takeIf { it.isNotBlank() } ?: sourceUrl
+            val formFields = mapOf(
+                "__RequestVerificationToken" to metadata.requestVerificationToken,
+                "To" to toNick,
+                "Message" to message
+            )
+            val response = webViewFetchBridge.postForm(
+                rawUrl = postUrl,
+                formFields = formFields
+            )
+            val status = response.statusCode
+            val body = response.body
+            val validationError = extractFormValidationError(body)
+            if (status in 200..399 && validationError == null) {
+                Result.success(Unit)
+            } else {
+                Result.failure(
+                    IllegalStateException(
+                        validationError ?: "Mesaj gonderilemedi. (HTTP $status)"
+                    )
+                )
+            }
         } catch (e: Throwable) {
             Result.failure(e)
         }
