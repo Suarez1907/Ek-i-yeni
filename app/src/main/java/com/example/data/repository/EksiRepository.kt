@@ -1,7 +1,6 @@
 package com.example.data.repository
 
 import android.net.Uri
-import android.webkit.CookieManager
 import androidx.paging.Pager
 import androidx.paging.PagingConfig
 import androidx.paging.PagingData
@@ -72,7 +71,8 @@ class EksiRepository @Inject constructor(
     private val webViewFetchBridge: WebViewFetchBridge,
     private val eksiParser: EksiParser,
     private val readStateDao: ReadStateDao,
-    private val eksinDao: EksinDao
+    private val eksinDao: EksinDao,
+    private val webViewCookieJar: WebViewCookieJar = WebViewCookieJar()
 ) {
 
     private val repositoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -146,17 +146,7 @@ class EksiRepository @Inject constructor(
         explicitUserLoggedInFlag?.let { if (it) return true }
         return try {
             if (!WebViewCookieJar.isHardwareWebViewSupported()) return false
-            val rawCookie = CookieManager.getInstance().getCookie(baseDomain).orEmpty()
-            if (rawCookie.isBlank()) return false
-            rawCookie.split(";").any { segment ->
-                val name = segment.substringBefore('=').trim()
-                val value = segment.substringAfter('=', "").trim()
-                value.isNotEmpty() && (
-                    name.equals("a", ignoreCase = true) ||
-                        name.equals(".ASPXAUTH", ignoreCase = true) ||
-                        name.equals("iq", ignoreCase = true)
-                    )
-            }
+            webViewCookieJar.hasActiveUserSession(baseDomain)
         } catch (_: Throwable) {
             false
         }
@@ -1537,7 +1527,7 @@ class EksiRepository @Inject constructor(
             val baseDomain = webViewFetchBridge.getActiveBaseDomain().ifBlank {
                 WebViewCookieJar.DEFAULT_BASE_URL
             }.trimEnd('/')
-            WebViewCookieJar.extractUserNickFromCookies(baseDomain)
+            webViewCookieJar.extractUserNickFromCookies(baseDomain)
         } catch (_: Throwable) {
             null
         }

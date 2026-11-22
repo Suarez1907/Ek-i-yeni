@@ -228,6 +228,12 @@ class WebViewCookieJar @Inject constructor() : CookieJar {
     }
 
     /**
+     * Aktif oturumdaki kullanıcı nick'ini çerezlerden okur. Bulunamazsa `null` döner.
+     */
+    fun getCurrentUserNick(url: String = DEFAULT_BASE_URL): String? =
+        extractUserNickFromCookies(url)
+
+    /**
      * Belirtilen URL için tüm çerezleri [Map] (isim -> değer) olarak döndürür.
      */
     fun getCookieMap(url: String = DEFAULT_BASE_URL): Map<String, String> {
