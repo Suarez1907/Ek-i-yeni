@@ -193,9 +193,12 @@ class WebViewCookieJar @Inject constructor() : CookieJar {
      */
     fun hasActiveUserSession(url: String = DEFAULT_BASE_URL): Boolean {
         val cookies = getCookieMap(url)
-        return !cookies["a"].isNullOrBlank() ||
-            !cookies[".ASPXAUTH"].isNullOrBlank() ||
-            cookies.keys.any { it.equals("iq", ignoreCase = true) }
+        return cookies.any { (name, value) ->
+            val isAnonymousCookie = ANONYMOUS_COOKIE_NAMES.any { it.equals(name, ignoreCase = true) }
+            !isAnonymousCookie &&
+                value.isNotBlank() &&
+                AUTHENTICATION_COOKIE_NAMES.any { it.equals(name, ignoreCase = true) }
+        }
     }
 
     /**
@@ -303,6 +306,17 @@ class WebViewCookieJar @Inject constructor() : CookieJar {
         private const val TAG = "WebViewCookieJar"
         const val DEFAULT_BASE_URL = "https://eksisozluk.com"
         const val CF_CLEARANCE_COOKIE = "cf_clearance"
+
+        private val AUTHENTICATION_COOKIE_NAMES = setOf(
+            "a",
+            ".ASPXAUTH"
+        )
+        private val ANONYMOUS_COOKIE_NAMES = setOf(
+            CF_CLEARANCE_COOKIE,
+            "ASP.NET_SessionId",
+            "__cf_bm",
+            "iq"
+        )
 
         /**
          * Gerçek Android cihazlarda (ARM / x86 fark etmeksizin) her zaman `true` döner.

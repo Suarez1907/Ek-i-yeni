@@ -56,6 +56,7 @@ import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Security
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Tag
 import androidx.compose.material.icons.filled.Today
 import androidx.compose.material.icons.filled.Whatshot
@@ -131,6 +132,7 @@ import com.example.data.model.TopicItem
 import com.example.ui.auth.AuthWebViewScreen
 import com.example.ui.components.ThemeSelectorDialog
 import com.example.ui.components.TopicListSkeletonShimmer
+import com.example.ui.sheets.SettingsBottomSheet
 import com.example.ui.theme.AppThemeMode
 import com.example.ui.theme.EksiNeonGreen
 import com.example.ui.theme.OledCardSurface
@@ -180,6 +182,9 @@ fun MainScaffold(
     val authorProfileState by viewModel.selectedAuthorProfileState.collectAsStateWithLifecycle()
     val messageSubmitState by viewModel.messageSubmitState.collectAsStateWithLifecycle()
     val profileIsUserLoggedIn by viewModel.isUserLoggedIn.collectAsStateWithLifecycle()
+    val settingsUsername by viewModel.currentUsername.collectAsStateWithLifecycle()
+    val geminiApiKey by viewModel.geminiApiKey.collectAsStateWithLifecycle()
+    val isGeminiKeyConfigured by viewModel.isGeminiKeyConfigured.collectAsStateWithLifecycle()
 
     val readStateByUrl = remember(allReadStates) {
         allReadStates.associateBy { it.topicKey }
@@ -187,6 +192,7 @@ fun MainScaffold(
 
     val coroutineScope = rememberCoroutineScope()
     var currentDestination by rememberSaveable { mutableStateOf(MainNavDestination.GUNDEM) }
+    var showSettingsSheet by remember { mutableStateOf(false) }
 
     // 2. KURAL: Her sekme için ayrı LazyListState ve ayrı LazyPagingItems en üst seviyede (TopicDetailScreen
     // veya AuthWebViewScreen açıldığında bile silinmeyecek şekilde) tutulur. Böylece bir başlığa tıklayıp
@@ -263,6 +269,39 @@ fun MainScaffold(
             currentTheme = themeMode,
             onSelectTheme = { viewModel.selectThemeMode(it) },
             onDismiss = { viewModel.dismissThemeDialog() }
+        )
+    }
+
+    if (showSettingsSheet) {
+        SettingsBottomSheet(
+            isUserLoggedIn = profileIsUserLoggedIn,
+            currentUsername = settingsUsername,
+            hasSavedApiKey = isGeminiKeyConfigured,
+            savedApiKey = geminiApiKey,
+            currentThemeTitle = themeMode.title,
+            hasCfClearance = hasCfClearance,
+            onOpenLogin = {
+                showSettingsSheet = false
+                viewModel.openUserLogin()
+            },
+            onLogout = {
+                showSettingsSheet = false
+                viewModel.logout()
+            },
+            onSaveApiKey = { key ->
+                viewModel.saveGeminiApiKey(key)
+                showSettingsSheet = false
+            },
+            onClearApiKey = { viewModel.clearGeminiApiKey() },
+            onOpenThemeSelector = {
+                showSettingsSheet = false
+                viewModel.openThemeDialog()
+            },
+            onOpenCloudflare = {
+                showSettingsSheet = false
+                viewModel.openCloudflareVerification()
+            },
+            onDismiss = { showSettingsSheet = false }
         )
     }
 
@@ -397,6 +436,14 @@ fun MainScaffold(
                                         viewModel.triggerRefresh()
                                     }
                                 }
+                            )
+
+                            TopBarIconAction(
+                                icon = Icons.Default.Settings,
+                                contentDescription = "Ayarlar",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                testTag = "top_settings_button",
+                                onClick = { showSettingsSheet = true }
                             )
                         }
                     )

@@ -1282,6 +1282,23 @@ class EksinViewModel @Inject constructor(
         }
     }
 
+    /** Ayarlar üzerinden çıkış: oturum çerezlerini ve kişisel UI durumunu sıfırlar. */
+    fun logout() {
+        cookieJar.clearAllCookies()
+        _activeAuthSheet.value = null
+        _activeAuthorNick.value = null
+        _selectedAuthorProfileState.value = ProfileUiState.Idle
+        _activeThreadDetailState.value = ThreadDetailUiState.Hidden
+        _isUserLoggedIn.value = false
+        _hasUserSession.value = false
+        _currentUsername.value = null
+        _myProfileState.value = ProfileUiState.Idle
+        _messageThreadsState.value = MessagesUiState.Idle
+        _messageSubmitState.value = ActionSubmitState.Idle
+        repository.setUserLoggedInState(false)
+        triggerRefresh()
+    }
+
     fun loadMyProfile(forceRefresh: Boolean = false) {
         if (!_isUserLoggedIn.value) {
             _myProfileState.value = ProfileUiState.Idle
