@@ -1623,7 +1623,7 @@ class EksiRepository @Inject constructor(
                 formFields = formFields
             )
             val status = response.statusCode
-            val body = response.body
+            val body = response.html
             val validationError = extractFormValidationError(body)
             if (status in 200..399 && validationError == null) {
                 Result.success(Unit)
@@ -1759,7 +1759,7 @@ class EksiRepository @Inject constructor(
                 formFields = formFields
             )
             val status = response.statusCode
-            val body = response.body
+            val body = response.html
             val validationError = extractFormValidationError(body)
             if (status in 200..399 && validationError == null) {
                 Result.success(Unit)

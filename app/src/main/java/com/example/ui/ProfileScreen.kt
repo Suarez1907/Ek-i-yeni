@@ -133,7 +133,7 @@ fun ProfileScreen(
             }
             if (selectedTab == 0) {
                 MyProfileTab(
-                    username = currentUsername,
+                    username = currentUsername.orEmpty(),
                     state = myProfileState,
                     onRefresh = viewModel::loadMyProfile,
                     onOpenTopic = onOpenTopic
@@ -391,7 +391,7 @@ private fun MessageThreadCard(thread: MessageThreadItem, onClick: () -> Unit) {
                     color = MaterialTheme.colorScheme.onSurface
                 )
                 Text(
-                    text = thread.lastMessage,
+                    text = thread.lastMessageSnippet,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1
@@ -399,13 +399,13 @@ private fun MessageThreadCard(thread: MessageThreadItem, onClick: () -> Unit) {
             }
             Column(horizontalAlignment = Alignment.End) {
                 Text(
-                    text = thread.lastMessageDate,
+                    text = thread.lastDateText,
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                if (thread.unreadCount > 0) {
+                if (thread.isUnread) {
                     Text(
-                        text = thread.unreadCount.toString(),
+                        text = "Yeni",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.primary
                     )
