@@ -128,6 +128,7 @@ import com.example.ui.theme.ActiveThemeState
 import com.example.ui.theme.AppThemeMode
 import com.example.ui.theme.EksiDeepGreen
 import com.example.ui.theme.EksiNeonGreen
+import com.example.ui.theme.OledCardSurface
 import com.example.ui.theme.OledDivider
 import com.example.ui.theme.OledElevatedCard
 import com.example.ui.theme.OledHairlineDivider
@@ -457,7 +458,7 @@ fun TopicDetailScreen(
                         FilterChip(
                             selected = isSelected,
                             onClick = { viewModel.selectTopicFilterMode(mode) },
-                            shape = RoundedCornerShape(50),
+                            shape = RoundedCornerShape(12.dp),
                             label = {
                                 Text(
                                     text = label,
@@ -466,16 +467,16 @@ fun TopicDetailScreen(
                                 )
                             },
                             colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = EksiNeonGreen,
-                                selectedLabelColor = OledOnAccentColor,
-                                containerColor = MaterialTheme.colorScheme.surfaceVariant,
-                                labelColor = OledTextPrimary
+                                selectedContainerColor = OledPillGreenBg,
+                                selectedLabelColor = EksiNeonGreen,
+                                containerColor = OledElevatedCard,
+                                labelColor = OledTextSecondary
                             ),
                             border = FilterChipDefaults.filterChipBorder(
                                 enabled = true,
                                 selected = isSelected,
                                 borderColor = OledHairlineDivider,
-                                selectedBorderColor = EksiNeonGreen
+                                selectedBorderColor = EksiNeonGreen.copy(alpha = 0.6f)
                             ),
                             modifier = Modifier.testTag("topic_filter_${mode.name.lowercase()}")
                         )
@@ -490,7 +491,7 @@ fun TopicDetailScreen(
                                 entries = currentEntries.take(40)
                             )
                         },
-                        shape = RoundedCornerShape(50),
+                        shape = RoundedCornerShape(12.dp),
                         label = {
                             Text(
                                 text = "✨ AI Özet",
@@ -961,7 +962,7 @@ fun SwipeableEntryOledCard(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .clip(RoundedCornerShape(14.dp))
+                    .clip(RoundedCornerShape(16.dp))
                     .background(bgColor)
                     .padding(horizontal = 20.dp),
                 contentAlignment = when (direction) {
@@ -1012,15 +1013,15 @@ fun SwipeableEntryOledCard(
         }
     ) {
         Card(
-            shape = MaterialTheme.shapes.large,
+            shape = RoundedCornerShape(16.dp),
             colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                containerColor = if (isLight) Color(0xFFFFFFFF) else OledCardSurface,
                 contentColor = MaterialTheme.colorScheme.onSurface
             ),
-            elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+            elevation = CardDefaults.cardElevation(defaultElevation = if (isLight) 1.dp else 0.dp),
             border = BorderStroke(
-                width = if (isFavorited) 1.5.dp else 0.5.dp,
-                color = if (isFavorited) MaterialTheme.colorScheme.primary.copy(alpha = 0.65f) else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f)
+                width = if (isFavorited) 1.dp else 0.5.dp,
+                color = if (isFavorited) MaterialTheme.colorScheme.primary.copy(alpha = 0.6f) else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)
             ),
             modifier = Modifier.fillMaxWidth()
         ) {
@@ -1050,28 +1051,6 @@ fun SwipeableEntryOledCard(
                             Icon(
                                 imageVector = Icons.Default.PersonSearch,
                                 contentDescription = "Sadece bu yazarın entry'lerini filtrele",
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(16.dp)
-                            )
-                        }
-                        IconButton(
-                            onClick = onSummarizeSingle,
-                            modifier = Modifier.size(32.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.AutoAwesome,
-                                contentDescription = "Entry AI Özetle",
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(16.dp)
-                            )
-                        }
-                        IconButton(
-                            onClick = onShareEntry,
-                            modifier = Modifier.size(32.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Share,
-                                contentDescription = "Paylaş",
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.size(16.dp)
                             )
@@ -1136,53 +1115,21 @@ fun SwipeableEntryOledCard(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    val displayFavCount = entry.favoriteCount + if (isFavorited && !entry.isFavorited) 1 else 0
-                    Surface(
-                        color = if (isFavorited) OledPillGreenBg else OledElevatedCard,
-                        shape = RoundedCornerShape(50),
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(50))
-                            .clickable { onSwipeRightSukelaFav() }
-                            .border(
-                                width = 0.5.dp,
-                                color = if (isFavorited) EksiNeonGreen else OledHairlineDivider,
-                                shape = RoundedCornerShape(50)
-                            )
-                            .testTag("entry_fav_button_${entry.id}")
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(5.dp)
-                        ) {
-                            Icon(
-                                imageVector = if (isFavorited) {
-                                    Icons.Default.Favorite
-                                } else {
-                                    Icons.Default.FavoriteBorder
-                                },
-                                contentDescription = "Şükela / Favori",
-                                tint = if (isFavorited) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(15.dp)
-                            )
-                            Text(
-                                text = if (displayFavCount > 0) "$displayFavCount Şükela" else "Şükela",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = if (isFavorited) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                                fontWeight = if (isFavorited) FontWeight.Bold else FontWeight.Medium
-                            )
-                        }
-                    }
-
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         modifier = Modifier
-                            .clip(MaterialTheme.shapes.small)
+                            .weight(1f)
+                            .clip(RoundedCornerShape(12.dp))
                             .clickable { onAuthorClick(entry.author) }
-                            .padding(horizontal = 4.dp, vertical = 2.dp)
+                            .padding(vertical = 4.dp)
                     ) {
-                        Column(horizontalAlignment = Alignment.End) {
+                        AuthorMiniAvatar(
+                            authorName = entry.author,
+                            avatarUrl = entry.avatarUrl,
+                            size = 30.dp
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
                             Text(
                                 text = entry.author,
                                 style = MaterialTheme.typography.labelLarge,
@@ -1200,24 +1147,68 @@ fun SwipeableEntryOledCard(
                                 text = dateLabel,
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
-                                fontSize = 11.sp
+                                fontSize = 11.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
+                    }
 
-                        if (!entry.avatarUrl.isNullOrBlank()) {
-                            AsyncImage(
-                                model = entry.avatarUrl,
-                                contentDescription = entry.author,
-                                modifier = Modifier
-                                    .size(28.dp)
-                                    .clip(CircleShape)
-                                    .border(0.5.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.5f), CircleShape),
-                                contentScale = ContentScale.Crop
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        val displayFavCount = entry.favoriteCount + if (isFavorited && !entry.isFavorited) 1 else 0
+                        Surface(
+                            color = if (isFavorited) OledPillGreenBg else OledElevatedCard,
+                            shape = RoundedCornerShape(50),
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(50))
+                                .clickable { onSwipeRightSukelaFav() }
+                                .border(
+                                    width = 0.5.dp,
+                                    color = if (isFavorited) EksiNeonGreen else OledHairlineDivider,
+                                    shape = RoundedCornerShape(50)
+                                )
+                                .testTag("entry_fav_button_${entry.id}")
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(5.dp)
+                            ) {
+                                Icon(
+                                    imageVector = if (isFavorited) {
+                                        Icons.Default.Favorite
+                                    } else {
+                                        Icons.Default.FavoriteBorder
+                                    },
+                                    contentDescription = "Şükela / Favori",
+                                    tint = if (isFavorited) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(15.dp)
+                                )
+                                Text(
+                                    text = if (displayFavCount > 0) "$displayFavCount Şükela" else "Şükela",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = if (isFavorited) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    fontWeight = if (isFavorited) FontWeight.Bold else FontWeight.Medium
+                                )
+                            }
+                        }
+                        IconButton(onClick = onShareEntry, modifier = Modifier.size(32.dp)) {
+                            Icon(
+                                imageVector = Icons.Default.Share,
+                                contentDescription = "Paylaş",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(16.dp)
                             )
-                        } else {
-                            AuthorMiniAvatar(
-                                authorName = entry.author,
-                                size = 28.dp
+                        }
+                        IconButton(onClick = onSummarizeSingle, modifier = Modifier.size(32.dp)) {
+                            Icon(
+                                imageVector = Icons.Default.AutoAwesome,
+                                contentDescription = "Entry AI Özetle",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(16.dp)
                             )
                         }
                     }

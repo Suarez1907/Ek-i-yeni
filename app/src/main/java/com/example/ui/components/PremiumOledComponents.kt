@@ -64,6 +64,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -368,12 +369,12 @@ fun FloatingPagerCapsuleBar(
     Surface(
         modifier = modifier
             .testTag("floating_pager_bar"),
-        shape = CircleShape,
-        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        shape = RoundedCornerShape(24.dp),
+        color = OledElevatedCard,
         contentColor = MaterialTheme.colorScheme.onSurface,
-        tonalElevation = 6.dp,
-        shadowElevation = 10.dp,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f))
+        tonalElevation = 3.dp,
+        shadowElevation = 12.dp,
+        border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
@@ -395,11 +396,12 @@ fun FloatingPagerCapsuleBar(
             )
 
             Surface(
-                color = MaterialTheme.colorScheme.primaryContainer,
-                contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                shape = CircleShape,
+                color = OledPillGreenBg,
+                contentColor = EksiNeonGreen,
+                shape = RoundedCornerShape(50),
+                border = BorderStroke(0.5.dp, EksiNeonGreen.copy(alpha = 0.4f)),
                 modifier = Modifier
-                    .clip(CircleShape)
+                    .clip(RoundedCornerShape(50))
                     .clickable { showPagePickerDialog = true }
                     .testTag("pager_center_selector")
             ) {
@@ -407,7 +409,8 @@ fun FloatingPagerCapsuleBar(
                     text = "Sayfa $safeCurrent / $safeTotal",
                     style = MaterialTheme.typography.labelMedium,
                     fontWeight = FontWeight.Bold,
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
+                    color = EksiNeonGreen,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp)
                 )
             }
 
@@ -592,6 +595,7 @@ fun ThemeSelectorDialog(
         containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
         titleContentColor = MaterialTheme.colorScheme.onSurface,
         textContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+        shape = RoundedCornerShape(24.dp),
         title = {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -617,19 +621,20 @@ fun ThemeSelectorDialog(
             ) {
                 AppThemeMode.entries.forEach { mode ->
                     val isSelected = currentTheme == mode
+                    val optionShape = RoundedCornerShape(16.dp)
                     Card(
-                        shape = MaterialTheme.shapes.medium,
+                        shape = optionShape,
                         colors = CardDefaults.cardColors(
                             containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
                         ),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clip(MaterialTheme.shapes.medium)
+                            .clip(optionShape)
                             .clickable { onSelectTheme(mode) }
                             .border(
-                                width = if (isSelected) 2.dp else 0.8.dp,
+                                width = if (isSelected) 1.5.dp else 0.5.dp,
                                 color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
-                                shape = MaterialTheme.shapes.medium
+                                shape = optionShape
                             )
                             .testTag("theme_option_${mode.storageKey}")
                     ) {
@@ -667,14 +672,18 @@ fun ThemeSelectorDialog(
                                         text = mode.title,
                                         style = MaterialTheme.typography.titleSmall,
                                         fontWeight = FontWeight.Bold,
-                                        color = MaterialTheme.colorScheme.onBackground
+                                        color = MaterialTheme.colorScheme.onBackground,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
                                     )
                                     Spacer(modifier = Modifier.height(2.dp))
                                     Text(
                                         text = mode.subtitle,
                                         style = MaterialTheme.typography.labelSmall,
                                         fontSize = 11.sp,
-                                        color = OledTextSecondary
+                                        color = OledTextSecondary,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis
                                     )
                                 }
                             }
