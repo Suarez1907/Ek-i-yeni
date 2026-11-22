@@ -89,7 +89,8 @@ import kotlinx.coroutines.isActive
  */
 enum class AuthWebViewMode {
     CLOUDFLARE_CHALLENGE,
-    USER_LOGIN
+    USER_LOGIN,
+    EKSI_LOGIN
 }
 
 /**
@@ -132,7 +133,7 @@ fun AuthWebViewScreen(
             when (mode) {
                 AuthWebViewMode.CLOUDFLARE_CHALLENGE ->
                     "Cloudflare doğrulama kutucuğunu işaretleyin. Ekşi Sözlük içeriği (#top-bar / .topic-list / #entry-item-list) doğrulandığında veya üstteki butona bastığınızda devam edilir."
-                AuthWebViewMode.USER_LOGIN ->
+                AuthWebViewMode.USER_LOGIN, AuthWebViewMode.EKSI_LOGIN ->
                     "Ekşi Sözlük hesabınızla giriş yapın ve işlem bittiğinde 'Doğrulamayı Tamamladım (Devam Et)' butonuna dokunun."
             }
         )
@@ -377,7 +378,7 @@ fun AuthWebViewScreen(
                             selected = isCurrentDomain,
                             onClick = {
                                 webViewFetchBridge.setActiveBaseDomain(domain)
-                                val nextUrl = if (mode == AuthWebViewMode.USER_LOGIN) {
+                                val nextUrl = if (mode == AuthWebViewMode.USER_LOGIN || mode == AuthWebViewMode.EKSI_LOGIN) {
                                     "$domain/giris"
                                 } else {
                                     domain
@@ -490,6 +491,8 @@ fun AuthWebViewScreen(
                             } catch (_: Throwable) {
                             }
 
+                            cookieJar.enableWebViewBridge()
+
                             addJavascriptInterface(
                                 object {
                                     @JavascriptInterface
@@ -510,7 +513,7 @@ fun AuthWebViewScreen(
                                                 return@post
                                             }
 
-                                            if (mode == AuthWebViewMode.USER_LOGIN) {
+                                            if (mode == AuthWebViewMode.USER_LOGIN || mode == AuthWebViewMode.EKSI_LOGIN) {
                                                 val leftLoginPage = !url.contains("/giris", ignoreCase = true)
                                                 cookieJar.syncFromWebViewCookieManager(url.ifBlank { currentUrl })
                                                 if (hasRealEksiDom && leftLoginPage && cookieJar.hasActiveUserSession(url)) {
@@ -578,6 +581,14 @@ fun AuthWebViewScreen(
                                     currentUrl = resolvedUrl
                                     cookieJar.syncFromWebViewCookieManager(resolvedUrl)
                                     cookieJar.flush()
+
+                                    if (mode == AuthWebViewMode.EKSI_LOGIN &&
+                                        !resolvedUrl.contains("/giris", ignoreCase = true) &&
+                                        cookieJar.hasActiveUserSession(resolvedUrl) &&
+                                        !verificationCompleted
+                                    ) {
+                                        completeWithDomAndUrl(resolvedUrl, null)
+                                    }
 
                                     inspectLiveDomForEksiElements(
                                         view = view,

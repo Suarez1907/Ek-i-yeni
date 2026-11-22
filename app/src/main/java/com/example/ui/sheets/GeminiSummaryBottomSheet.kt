@@ -66,6 +66,8 @@ import com.example.ui.theme.OledOnAccentColor
 import com.example.ui.theme.OledTextMuted
 import com.example.ui.theme.OledTextPrimary
 import com.example.ui.theme.OledTextSecondary
+import androidx.compose.ui.res.stringResource
+import com.example.R
 
 /**
  * `✨ AI Özet` çipine basıldığında açılan ve başlığın:
@@ -150,7 +152,7 @@ fun GeminiSummaryBottomSheet(
                     )
                     Column {
                         Text(
-                            text = "Gemini 3.5 Flash-Lite Canlı Özet",
+                            text = stringResource(R.string.ai_openrouter_title),
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.ExtraBold,
                             color = EksiNeonGreen
@@ -253,7 +255,7 @@ fun GeminiSummaryBottomSheet(
                         }
 
                         Text(
-                            text = "Ücretsiz Google AI Studio API anahtarınızı girerek Gemini 3.5 Flash-Lite ile canlı SSE özetlemeyi başlatın. Anahtarınız cihazınızda Android Keystore (AES-GCM) ile şifrelenerek saklanır.",
+                            text = stringResource(R.string.ai_openrouter_key_hint),
                             style = MaterialTheme.typography.labelSmall,
                             color = OledTextSecondary
                         )
@@ -261,10 +263,10 @@ fun GeminiSummaryBottomSheet(
                         OutlinedTextField(
                             value = apiKeyInput,
                             onValueChange = { apiKeyInput = it },
-                            label = { Text("Google AI Studio API Anahtarınızı Girin") },
+                            label = { Text("OpenRouter API Anahtarı") },
                             placeholder = {
                                 Text(
-                                    text = "AIzaSy...",
+                                    text = "sk-or-v1-...",
                                     color = OledTextMuted
                                 )
                             },
@@ -372,7 +374,7 @@ fun GeminiSummaryBottomSheet(
                                         strokeWidth = 2.5.dp
                                     )
                                     Text(
-                                        text = "Entry'ler taranıyor, Gemini 3.5 Flash-Lite SSE akışı başlatılıyor...",
+                                        text = "Entry'ler taranıyor, OpenRouter SSE akışı başlatılıyor...",
                                         style = MaterialTheme.typography.bodyMedium,
                                         color = OledTextSecondary
                                     )
@@ -396,7 +398,7 @@ fun GeminiSummaryBottomSheet(
                                         )
                                         Spacer(modifier = Modifier.width(6.dp))
                                         Text(
-                                            text = "Gemini 3.5 Flash-Lite Canlı SSE Akışı...",
+                                            text = "OpenRouter Canlı SSE Akışı...",
                                             style = MaterialTheme.typography.labelSmall,
                                             color = EksiNeonGreen,
                                             fontWeight = FontWeight.Bold

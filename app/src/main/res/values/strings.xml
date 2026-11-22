@@ -8,4 +8,24 @@
     <string name="tab_ai_studio">AI Stüdyo</string>
     <string name="cloudflare_verify_button">Cloudflare Doğrula</string>
     <string name="eksi_login_button">Giriş Yap</string>
+    <string name="tab_mesajlar">Mesajlar</string>
+    <string name="eksi_login_title">Ekşi Sözlük Girişi</string>
+    <string name="eksi_login_hint">Ekşi Sözlük hesabınızla giriş yapın</string>
+    <string name="eksi_login_success">Giriş başarılı</string>
+    <string name="entry_compose_title">Yeni Entry</string>
+    <string name="entry_compose_hint">Düşüncelerinizi yazın…</string>
+    <string name="entry_compose_submit">Gönder</string>
+    <string name="entry_compose_empty">Entry boş olamaz</string>
+    <string name="entry_compose_success">Entry gönderildi</string>
+    <string name="entry_compose_error">Entry gönderilemedi</string>
+    <string name="messages_empty">Henüz mesaj yok</string>
+    <string name="messages_new">Yeni Mesaj</string>
+    <string name="messages_send">Gönder</string>
+    <string name="messages_hint">Mesajınızı yazın…</string>
+    <string name="messages_error">Mesajlar yüklenemedi</string>
+    <string name="ai_openrouter_title">OpenRouter Canlı Özet</string>
+    <string name="ai_openrouter_key_hint">OpenRouter API anahtarınızı openrouter.ai/keys adresinden alıp girin. Anahtar cihazınızda şifrelenerek saklanır.</string>
+    <string name="ai_image_disabled">Görsel özet devre dışı</string>
+    <string name="suggestions_empty">Öneri yok</string>
+    <string name="autocomplete_title">Otomatik Tamamlama</string>
 </resources>
