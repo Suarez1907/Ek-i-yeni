@@ -81,10 +81,10 @@ fun ProfileScreen(
     var showThreadDetail by remember { mutableStateOf(false) }
     val snackbarHostState = remember { SnackbarHostState() }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(isUserLoggedIn) {
         if (isUserLoggedIn) {
-            if (myProfileState is ProfileUiState.Idle) viewModel.loadMyProfile()
-            if (messageThreadsState is MessagesUiState.Idle) viewModel.loadMessageThreads()
+            viewModel.loadMyProfile()
+            viewModel.loadMessageThreads()
         }
     }
 
@@ -136,7 +136,8 @@ fun ProfileScreen(
                     username = currentUsername.orEmpty(),
                     state = myProfileState,
                     onRefresh = viewModel::loadMyProfile,
-                    onOpenTopic = onOpenTopic
+                    onOpenTopic = onOpenTopic,
+                    onRequestLogin = onRequestLogin
                 )
             } else {
                 MessagesTab(
@@ -154,7 +155,8 @@ fun ProfileScreen(
                         viewModel.sendDirectMessage(to, message, threadUrl)
                     },
                     onNewMessage = { showNewMessageDialog = true },
-                    onRefresh = viewModel::loadMessageThreads
+                    onRefresh = viewModel::loadMessageThreads,
+                    onRequestLogin = onRequestLogin
                 )
             }
         }
@@ -211,7 +213,8 @@ private fun MyProfileTab(
     username: String,
     state: ProfileUiState,
     onRefresh: () -> Unit,
-    onOpenTopic: (TopicItem) -> Unit
+    onOpenTopic: (TopicItem) -> Unit,
+    onRequestLogin: () -> Unit
 ) {
     when (state) {
         is ProfileUiState.Loading -> Box(
@@ -220,7 +223,7 @@ private fun MyProfileTab(
         ) {
             CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
         }
-        is ProfileUiState.Error -> ErrorCard(state.message, onRefresh)
+        is ProfileUiState.Error -> ErrorCard(state.message, onRefresh, onLoginClick = onRequestLogin)
         is ProfileUiState.Success -> {
             val profile = state.profile
             LazyColumn(
@@ -286,7 +289,8 @@ private fun MessagesTab(
     onOpenAuthorProfile: (String) -> Unit,
     onSendReply: (String, String, String) -> Unit,
     onNewMessage: () -> Unit,
-    onRefresh: () -> Unit
+    onRefresh: () -> Unit,
+    onRequestLogin: () -> Unit
 ) {
     if (showThreadDetail && detailState !is ThreadDetailUiState.Hidden) {
         when (detailState) {
@@ -296,7 +300,7 @@ private fun MessagesTab(
             ) {
                 CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
             }
-            is ThreadDetailUiState.Error -> ErrorCard(detailState.message, onRefresh)
+            is ThreadDetailUiState.Error -> ErrorCard(detailState.message, onRefresh, onLoginClick = onRequestLogin)
             is ThreadDetailUiState.Success -> ThreadDetailContent(
                 detail = detailState.detail,
                 submitState = submitState,
@@ -314,7 +318,7 @@ private fun MessagesTab(
             ) {
                 CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
             }
-            is MessagesUiState.Error -> ErrorCard(threadsState.message, onRefresh)
+            is MessagesUiState.Error -> ErrorCard(threadsState.message, onRefresh, onLoginClick = onRequestLogin)
             is MessagesUiState.Success -> ThreadListContent(
                 threads = threadsState.threads,
                 onOpenThread = onOpenThread,
@@ -674,7 +678,11 @@ private fun EntryCard(entry: EntryItem, onClick: () -> Unit) {
 }
 
 @Composable
-private fun ErrorCard(message: String, onRetry: () -> Unit) {
+private fun ErrorCard(
+    message: String,
+    onRetry: () -> Unit,
+    onLoginClick: (() -> Unit)? = null
+) {
     Box(
         modifier = Modifier.fillMaxSize(),
         contentAlignment = Alignment.Center
@@ -695,8 +703,18 @@ private fun ErrorCard(message: String, onRetry: () -> Unit) {
                     text = message,
                     color = MaterialTheme.colorScheme.onErrorContainer
                 )
-                Button(onClick = onRetry) {
-                    Text("Yeniden Dene")
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Button(onClick = onRetry) {
+                        Text("Yeniden Dene")
+                    }
+                    if (onLoginClick != null) {
+                        Button(onClick = onLoginClick) {
+                            Text("Ekşi Sözlük'e Giriş Yap")
+                        }
+                    }
                 }
             }
         }
