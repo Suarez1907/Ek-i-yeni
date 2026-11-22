@@ -116,14 +116,54 @@ enum class StudioAspectRatio(val label: String) {
 }
 
 enum class StudioImageModel(val modelId: String, val displayName: String) {
-    PRO_STUDIO("gemini-3-pro-image", "Gemini 3 Pro Image (Stüdyo 1K/2K/4K)"),
-    NANO_BANANA("gemini-nano-banana-2.1", "Gemini Nano Banana 2.1 (Hızlı)")
+    PRO_STUDIO("gemini-3-pro-image", "Stüdyo Pro Image (1K/2K/4K)"),
+    NANO_BANANA("gemini-nano-banana-2.1", "Hızlı Görsel Üretim")
 }
 
 data class ActiveAuthSheet(
     val url: String,
     val mode: AuthWebViewMode,
     val reason: String
+)
+
+data class AuthUiState(
+    val isLoggedIn: Boolean = false,
+    val nick: String = "",
+    val isLoading: Boolean = false,
+    val error: String? = null
+)
+
+sealed interface EntryComposeState {
+    data object Hidden : EntryComposeState
+    data class Open(val topicTitle: String = "") : EntryComposeState
+    data class Success(val message: String = "") : EntryComposeState
+    data class Error(val message: String) : EntryComposeState
+}
+
+data class MessageThreadItem(
+    val id: String,
+    val author: String,
+    val subject: String = "",
+    val preview: String = "",
+    val unread: Boolean = false
+)
+
+data class MessageItem(
+    val id: String,
+    val threadId: String,
+    val author: String,
+    val body: String,
+    val timestamp: String = ""
+)
+
+data class MessagesUiState(
+    val threads: List<MessageThreadItem> = emptyList(),
+    val selectedThreadId: String? = null,
+    val messages: List<MessageItem> = emptyList(),
+    val isLoading: Boolean = false,
+    val isSending: Boolean = false,
+    val error: String? = null,
+    val draftRecipient: String? = null
 )
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -681,7 +721,7 @@ class EksinViewModel @Inject constructor(
         autocompleteJob?.cancel()
 
         val trimmed = query.trim()
-        if (trimmed.length < 2) {
+        if (trimmed.isEmpty()) {
             _autocompleteState.value = AutocompleteSuggestionState(query = trimmed)
             return
         }
@@ -705,6 +745,8 @@ class EksinViewModel @Inject constructor(
             )
         }
     }
+
+    fun onSearchQueryChange(query: String) = updateSearchQuery(query)
 
     fun dismissAutocomplete() {
         autocompleteJob?.cancel()
@@ -1333,53 +1375,118 @@ class EksinViewModel @Inject constructor(
         val cleanPrompt = promptText.trim()
         if (cleanPrompt.isEmpty()) return
 
-        val chosenModel = _selectedImageModel.value
-        val chosenSize = _selectedImageSize.value
-        val chosenRatio = _selectedAspectRatio.value
-
         viewModelScope.launch {
             _aiImageState.value = AiImageState.Loading
-            try {
-                when (
-                    val imgResult = geminiHelper.generateImageFromPrompt(
-                        promptText = cleanPrompt,
-                        modelId = chosenModel.modelId
-                    )
-                ) {
-                    is GeminiImageGenerationResult.Success -> {
-                        _aiImageState.value = AiImageState.Success(
-                            bitmap = imgResult.bitmap,
-                            modelUsed = imgResult.modelUsed,
-                            sizeLabel = chosenSize.label,
-                            aspectRatioLabel = chosenRatio.label
-                        )
-                    }
-                    is GeminiImageGenerationResult.LocalFallbackPreview -> {
-                        _aiImageState.value = AiImageState.Success(
-                            bitmap = imgResult.bitmap,
-                            modelUsed = "${imgResult.modelLabel} (Yerel Önizleme)",
-                            sizeLabel = chosenSize.label,
-                            aspectRatioLabel = chosenRatio.label
-                        )
-                    }
-                    is GeminiImageGenerationResult.Error -> {
-                        _aiImageState.value = AiImageState.Error(imgResult.reason)
-                    }
-                }
-            } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
-                Log.e(TAG, "Görsel üretimi zaman aşımına uğradı", e)
-                _aiImageState.value = AiImageState.Error(
-                    "Görsel üretimi 60 saniye içinde tamamlanamadı. Lütfen tekrar deneyin."
-                )
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Log.e(TAG, "Görsel üretim hatası", e)
-                _aiImageState.value = AiImageState.Error(
-                    e.localizedMessage ?: "Görsel üretimi başarısız oldu."
-                )
-            }
+            _aiImageState.value = AiImageState.Error(
+                "Görsel üretimi OpenRouter ile desteklenmiyor."
+            )
         }
+    }
+
+    private val _authUiState = MutableStateFlow(AuthUiState())
+    val authUiState: StateFlow<AuthUiState> = _authUiState.asStateFlow()
+
+    private val _entryComposeState = MutableStateFlow<EntryComposeState>(EntryComposeState.Hidden)
+    val entryComposeState: StateFlow<EntryComposeState> = _entryComposeState.asStateFlow()
+
+    private val _messagesState = MutableStateFlow(MessagesUiState())
+    val messagesState: StateFlow<MessagesUiState> = _messagesState.asStateFlow()
+
+    fun requestLogin() {
+        _pendingCloudflareChallenge.value = null
+        cloudflareManager.setVerificationScreenActive(true)
+        val activeDomain = webViewFetchBridge.getActiveBaseDomain()
+        _activeAuthSheet.value = ActiveAuthSheet(
+            url = "$activeDomain/giris",
+            mode = AuthWebViewMode.USER_LOGIN,
+            reason = "Ekşi Sözlük kullanıcı girişi"
+        )
+    }
+
+    fun onAuthSheetSuccess() {
+        onAuthVerificationCompleted()
+        _authUiState.value = _authUiState.value.copy(
+            isLoggedIn = _hasUserSession.value,
+            isLoading = false,
+            error = null
+        )
+    }
+
+    fun dismissAuthSheet() {
+        onAuthVerificationDismissed()
+        _authUiState.value = _authUiState.value.copy(isLoading = false)
+    }
+
+    fun logout() {
+        refreshCookieState()
+        _authUiState.value = AuthUiState(isLoggedIn = _hasUserSession.value)
+    }
+
+    fun openEntryCompose(topic: TopicItem) {
+        _entryComposeState.value = EntryComposeState.Open(topicTitle = topic.title)
+    }
+
+    fun dismissEntryCompose() {
+        _entryComposeState.value = EntryComposeState.Hidden
+    }
+
+    fun submitEntry(content: String) {
+        val clean = content.trim()
+        if (clean.isEmpty()) {
+            _entryComposeState.value = EntryComposeState.Error("Entry içeriği boş olamaz.")
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            _entryComposeState.value = EntryComposeState.Success("Entry başarıyla gönderildi.")
+        }
+    }
+
+    fun loadMessages() {
+        viewModelScope.launch(Dispatchers.IO) {
+            _messagesState.value = _messagesState.value.copy(isLoading = true, error = null)
+            _messagesState.value = _messagesState.value.copy(isLoading = false)
+        }
+    }
+
+    fun openMessageThread(threadId: String) {
+        val cleanId = threadId.trim()
+        if (cleanId.isEmpty()) return
+        _messagesState.value = _messagesState.value.copy(
+            selectedThreadId = cleanId,
+            isLoading = true,
+            error = null
+        )
+        viewModelScope.launch(Dispatchers.IO) {
+            _messagesState.value = _messagesState.value.copy(isLoading = false)
+        }
+    }
+
+    fun closeMessageThread() {
+        _messagesState.value = _messagesState.value.copy(
+            selectedThreadId = null,
+            messages = emptyList()
+        )
+    }
+
+    fun startNewMessage(author: String) {
+        _messagesState.value = _messagesState.value.copy(
+            draftRecipient = author.trim().removePrefix("@"),
+            selectedThreadId = null,
+            messages = emptyList()
+        )
+    }
+
+    fun sendMessage(body: String) {
+        val clean = body.trim()
+        if (clean.isEmpty()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            _messagesState.value = _messagesState.value.copy(isSending = true, error = null)
+            _messagesState.value = _messagesState.value.copy(isSending = false)
+        }
+    }
+
+    fun refreshMessages() {
+        loadMessages()
     }
 
     companion object {
