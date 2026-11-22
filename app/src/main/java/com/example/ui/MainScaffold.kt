@@ -1,5 +1,6 @@
 package com.example.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
@@ -157,7 +158,7 @@ enum class MainNavDestination(
     KANALLAR("Kanallar", Icons.Default.Tag, "nav_kanallar"),
     DEBE_ENLER("DEBE", Icons.Default.EmojiEvents, "nav_debe_enler"),
     ARAMA("Arama", Icons.Default.Search, "nav_arama"),
-    PROFIL("Profil", Icons.Default.Person, "nav_profil")
+    PROFIL("Profilim", Icons.Default.Person, "nav_profil")
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -175,6 +176,7 @@ fun MainScaffold(
     val lastSeenEntryCounts by viewModel.lastSeenEntryCounts.collectAsStateWithLifecycle()
     val themeMode by viewModel.themeMode.collectAsStateWithLifecycle()
     val showThemeDialog by viewModel.showThemeDialog.collectAsStateWithLifecycle()
+    val activeAuthorNick by viewModel.activeAuthorNick.collectAsStateWithLifecycle()
 
     val readStateByUrl = remember(allReadStates) {
         allReadStates.associateBy { it.topicKey }
@@ -635,20 +637,13 @@ fun MainScaffold(
                         }
 
                         MainNavDestination.PROFIL -> {
-                            ProfileAndStudioScreenContent(
+                            ProfileScreen(
                                 viewModel = viewModel,
-                                hasUserSession = hasUserSession,
-                                onOpenTopicUrl = { title, url ->
-                                    viewModel.openTopic(
-                                        TopicItem(
-                                            id = url,
-                                            title = title,
-                                            slug = title.replace(" ", "-"),
-                                            url = url
-                                        ),
-                                        preferTodayMode = false
-                                    )
-                                }
+                                onOpenTopic = { topic ->
+                                    viewModel.openTopic(topic, preferTodayMode = false)
+                                },
+                                onOpenAuthorProfile = { nick -> viewModel.openAuthorProfile(nick) },
+                                onRequestLogin = { viewModel.openUserLogin() }
                             )
                         }
                     }
@@ -667,6 +662,27 @@ fun MainScaffold(
                     topic = topic,
                     viewModel = viewModel,
                     onBack = { viewModel.closeTopicDetail() }
+                )
+            }
+        }
+
+        // Yazar Profili Ekranı (seçili başlık detayının da üzerine açılır)
+        activeAuthorNick?.let { nick ->
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(MaterialTheme.colorScheme.background)
+            ) {
+                BackHandler { viewModel.closeAuthorProfile() }
+                AuthorProfileScreen(
+                    viewModel = viewModel,
+                    authorNick = nick,
+                    onBack = { viewModel.closeAuthorProfile() },
+                    onOpenTopic = { topic ->
+                        viewModel.closeAuthorProfile()
+                        viewModel.openTopic(topic, preferTodayMode = false)
+                    },
+                    onOpenAuthorProfile = { otherNick -> viewModel.openAuthorProfile(otherNick) }
                 )
             }
         }

@@ -122,4 +122,98 @@ class ExampleUnitTest {
         assertNotNull(firstEntry.annotatedContent)
         assertTrue(firstEntry.plainText.contains("jetpack compose"))
     }
+
+    @Test
+    fun parseCurrentUsername_extractsLoggedInNickFromTopBar() {
+        val html = """
+            <html><body>
+                <ul class="top-bar">
+                    <li><a href="/biri/gece_okuru" class="username">gece_okuru</a></li>
+                </ul>
+            </body></html>
+        """.trimIndent()
+
+        val nick = parser.parseCurrentUsername(html)
+        assertEquals("gece_okuru", nick)
+    }
+
+    @Test
+    fun parseEntryFormMetadata_extractsTokenTitleAndTopicId() {
+        val html = """
+            <html><body>
+                <form id="entry-form" action="/entry/add">
+                    <input type="hidden" name="__RequestVerificationToken" value="abc123token" />
+                    <input type="hidden" name="TopicId" value="7894120" />
+                    <input type="hidden" name="Title" value="eksin oled" />
+                </form>
+            </body></html>
+        """.trimIndent()
+
+        val metadata = parser.parseEntryFormMetadata(html)
+        assertNotNull(metadata)
+        assertEquals("abc123token", metadata?.token)
+        assertEquals("7894120", metadata?.topicId)
+    }
+
+    @Test
+    fun parseAuthorProfile_extractsStatsAndRecentEntries() {
+        val html = """
+            <html><body>
+                <section class="author-profile">
+                    <h1 class="username">gece_okuru</h1>
+                    <div class="stats">
+                        <span class="entry-count">128</span>
+                        <span class="follower-count">64</span>
+                    </div>
+                    <ul class="recent-entries">
+                        <li><a href="/entry/169000101">bir entry</a></li>
+                        <li><a href="/entry/169000102">ikinci entry</a></li>
+                    </ul>
+                </section>
+            </body></html>
+        """.trimIndent()
+
+        val profile = parser.parseAuthorProfile(html)
+        assertNotNull(profile)
+    }
+
+    @Test
+    fun parseMessageThreads_extractsThreadsAndUnreadState() {
+        val html = """
+            <html><body>
+                <ul class="message-threads">
+                    <li class="thread unread">
+                        <a href="/mesajlar/thread/42">ilk konuşma</a>
+                        <span class="unread-count">2</span>
+                    </li>
+                    <li class="thread">
+                        <a href="/mesajlar/thread/43">ikinci konuşma</a>
+                    </li>
+                </ul>
+            </body></html>
+        """.trimIndent()
+
+        val threads = parser.parseMessageThreads(html)
+        assertNotNull(threads)
+    }
+
+    @Test
+    fun parseMessageThreadDetail_extractsMessagesAndReplyToken() {
+        val html = """
+            <html><body>
+                <div class="message-thread">
+                    <ul class="messages">
+                        <li class="message"><div class="content">merhaba</div></li>
+                        <li class="message"><div class="content">selam</div></li>
+                    </ul>
+                    <form id="reply-form">
+                        <input type="hidden" name="__RequestVerificationToken" value="replytoken" />
+                    </form>
+                </div>
+            </body></html>
+        """.trimIndent()
+
+        val detail = parser.parseMessageThreadDetail(html)
+        assertNotNull(detail)
+    }
 }
