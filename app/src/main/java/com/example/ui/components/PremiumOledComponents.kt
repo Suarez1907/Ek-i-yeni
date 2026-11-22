@@ -73,6 +73,7 @@ import com.example.ui.theme.ActiveThemeState
 import com.example.ui.theme.AppThemeMode
 import com.example.ui.theme.EksiNeonGreen
 import com.example.ui.theme.OledCardSurface
+import com.example.ui.theme.OledElevatedCard
 import com.example.ui.theme.OledHairlineDivider
 import com.example.ui.theme.OledOnAccentColor
 import com.example.ui.theme.OledPillGreenBg
