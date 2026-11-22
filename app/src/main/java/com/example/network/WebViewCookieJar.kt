@@ -190,12 +190,41 @@ class WebViewCookieJar @Inject constructor() : CookieJar {
 
     /**
      * Kullanıcının Ekşi Sözlük'e giriş yapmış olup olmadığını çerezler üzerinden kontrol eder.
+     *
+     * `cf_clearance` tek başına bir oturum sayılmaz; yalnızca gerçek Ekşi Sözlük oturum,
+     * token ve nick çerezleri (`a`, `.ASPXAUTH`, `iq`, `nick`, `AccessToken`, `token`, `user`)
+     * kontrol edilir.
      */
     fun hasActiveUserSession(url: String = DEFAULT_BASE_URL): Boolean {
         val cookies = getCookieMap(url)
-        return !cookies["a"].isNullOrBlank() ||
-            !cookies[".ASPXAUTH"].isNullOrBlank() ||
-            cookies.keys.any { it.equals("iq", ignoreCase = true) }
+        if (cookies.isEmpty()) return false
+        return cookies.entries.any { (key, value) ->
+            value.isNotBlank() && SESSION_COOKIE_KEYS.any { it.equals(key, ignoreCase = true) }
+        }
+    }
+
+    /**
+     * Çerezler arasından gerçek kullanıcı nick'ini çözmeye çalışır. Bulunamazsa `null` döner.
+     */
+    fun extractUserNickFromCookies(url: String = DEFAULT_BASE_URL): String? {
+        val cookies = getCookieMap(url)
+        if (cookies.isEmpty()) return null
+        for (candidateKey in NICK_COOKIE_KEYS) {
+            val rawValue = cookies.entries.firstOrNull { it.key.equals(candidateKey, ignoreCase = true) }
+                ?.value
+                ?: continue
+            if (rawValue.isBlank()) continue
+            val decoded = try {
+                java.net.URLDecoder.decode(rawValue, "UTF-8")
+            } catch (_: Throwable) {
+                rawValue
+            }
+            val cleaned = decoded.trim()
+            if (cleaned.isNotEmpty()) {
+                return cleaned
+            }
+        }
+        return null
     }
 
     /**
@@ -303,6 +332,23 @@ class WebViewCookieJar @Inject constructor() : CookieJar {
         private const val TAG = "WebViewCookieJar"
         const val DEFAULT_BASE_URL = "https://eksisozluk.com"
         const val CF_CLEARANCE_COOKIE = "cf_clearance"
+
+        private val SESSION_COOKIE_KEYS = listOf(
+            "a",
+            ".ASPXAUTH",
+            "iq",
+            "nick",
+            "AccessToken",
+            "token",
+            "user"
+        )
+
+        private val NICK_COOKIE_KEYS = listOf(
+            "nick",
+            "username",
+            "user",
+            "UserName"
+        )
 
         /**
          * Gerçek Android cihazlarda (ARM / x86 fark etmeksizin) her zaman `true` döner.

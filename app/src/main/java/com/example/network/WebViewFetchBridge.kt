@@ -27,6 +27,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -35,6 +36,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
+import okhttp3.FormBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
@@ -470,6 +472,112 @@ class WebViewFetchBridge @Inject constructor(
             }
         } finally {
             PerfLog.logDuration("fetchHtml", SystemClock.elapsedRealtime() - startMs)
+        }
+    }
+
+    /**
+     * Mevcut `fetchHtml(rawUrl, isAjax, bypassCache)` zincirini sarmalayıp zengin
+     * [FetchBridgeResult] döndüren yardımcı katman. Hiçbir koşulda exception fırlatmaz.
+     */
+    suspend fun fetchHtml(
+        url: String,
+        forceFresh: Boolean = false
+    ): FetchBridgeResult {
+        return try {
+            val html = fetchHtml(url, isAjax = true, bypassCache = forceFresh)
+            val hasValidDom = hasEksiDomElements(html)
+            FetchBridgeResult(
+                statusCode = if (html.isBlank()) 0 else 200,
+                finalUrl = url,
+                html = html,
+                hasValidEksiDom = hasValidDom,
+                isCloudflareChallenge = false
+            )
+        } catch (e: Throwable) {
+            if (e is CancellationException) throw e
+            Log.w(TAG, "fetchHtml(FetchBridgeResult) uyarısı")
+            FetchBridgeResult(
+                statusCode = 0,
+                finalUrl = url,
+                html = "",
+                hasValidEksiDom = false,
+                isCloudflareChallenge = false
+            )
+        }
+    }
+
+    /**
+     * Oturum çerezleri ve senkronize `User-Agent` ile UTF-8 `application/x-www-form-urlencoded`
+     * POST isteği yapar. Cloudflare challenge tespit edilirse [cloudflareManager] üzerinden
+     * olay yayınlar. Hata durumunda `statusCode = 0`, boş `html` döner ve exception fırlatmaz.
+     */
+    suspend fun postForm(
+        url: String,
+        formFields: Map<String, String>,
+        referer: String? = null
+    ): FetchBridgeResult = withContext(Dispatchers.IO) {
+        try {
+            ensureActive()
+            ensureNetworkAvailable()
+            cookieJar.syncFromWebViewCookieManager(url)
+
+            val formBodyBuilder = FormBody.Builder()
+            formFields.forEach { (key, value) ->
+                formBodyBuilder.add(key, value)
+            }
+
+            val requestBuilder = Request.Builder()
+                .url(url)
+                .post(formBodyBuilder.build())
+                .header("User-Agent", userAgentProvider.getUserAgent())
+                .header("Accept-Language", "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7")
+                .header(
+                    "Accept",
+                    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+                )
+                .header("X-Requested-With", "XMLHttpRequest")
+
+            if (!referer.isNullOrBlank()) {
+                requestBuilder.header("Referer", referer)
+            }
+
+            directHttpClient.newCall(requestBuilder.build()).execute().use { response ->
+                ensureActive()
+                val code = response.code
+                val finalUrl = response.request.url.toString()
+                val bodyHtml = response.body?.string().orEmpty()
+                val hasValidDom = hasEksiDomElements(bodyHtml)
+                val isChallenge = isCloudflareChallengeHtml(bodyHtml, code, hasValidDom)
+
+                if (isChallenge) {
+                    domVerifiedState.set(false)
+                    cloudflareManager.emitChallenge(
+                        CloudflareChallengeEvent(
+                            targetUrl = getActiveBaseDomain(),
+                            statusCode = code,
+                            reason = "Cloudflare güvenlik doğrulaması gerekiyor. Üstteki 'Doğrula' butonuna dokunarak doğrulamayı tamamlayın."
+                        )
+                    )
+                }
+
+                FetchBridgeResult(
+                    statusCode = code,
+                    finalUrl = finalUrl,
+                    html = bodyHtml,
+                    hasValidEksiDom = hasValidDom,
+                    isCloudflareChallenge = isChallenge
+                )
+            }
+        } catch (e: Throwable) {
+            if (e is CancellationException) throw e
+            Log.w(TAG, "postForm uyarısı")
+            FetchBridgeResult(
+                statusCode = 0,
+                finalUrl = url,
+                html = "",
+                hasValidEksiDom = false,
+                isCloudflareChallenge = false
+            )
         }
     }
 

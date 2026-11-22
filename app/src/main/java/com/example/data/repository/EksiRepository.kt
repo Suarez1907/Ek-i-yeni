@@ -12,8 +12,11 @@ import com.example.data.local.EksinDao
 import com.example.data.local.ReadStateDao
 import com.example.data.local.TopicReadStateEntity
 import com.example.data.model.EksiChannel
+import com.example.data.model.EntryCreateResult
 import com.example.data.model.EntryItem
 import com.example.data.model.LeftFrameSection
+import com.example.data.model.MessageItem
+import com.example.data.model.MessageThreadItem
 import com.example.data.model.PeriodicRankingTab
 import com.example.data.model.PeriodicTimeRange
 import com.example.data.model.RankedTopicOrEntryItem
@@ -1523,6 +1526,193 @@ class EksiRepository @Inject constructor(
             )
         } catch (e: Throwable) {
             Result.failure(e)
+        }
+    }
+
+    /**
+     * Aktif oturumdaki kullanıcının nick'ini çerezlerden okur.
+     */
+    suspend fun getCurrentUserNick(): String? = withContext(Dispatchers.IO) {
+        try {
+            val baseDomain = webViewFetchBridge.getActiveBaseDomain().ifBlank {
+                WebViewCookieJar.DEFAULT_BASE_URL
+            }.trimEnd('/')
+            WebViewCookieJar.extractUserNickFromCookies(baseDomain)
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    /**
+     * Autocomplete uç noktasından başlık ve yazar önerilerini getirir.
+     */
+    suspend fun fetchAutocomplete(
+        query: String
+    ): Pair<List<TopicItem>, List<String>> = withContext(Dispatchers.IO) {
+        val cleanQuery = query.trim()
+        if (cleanQuery.length < 2) return@withContext emptyList<TopicItem>() to emptyList()
+
+        val baseDomain = webViewFetchBridge.getActiveBaseDomain().ifBlank {
+            WebViewCookieJar.DEFAULT_BASE_URL
+        }.trimEnd('/')
+
+        val localMatches = getInstantLocalTopicMatches(cleanQuery)
+
+        try {
+            val autocompleteUrl = eksiParser.buildAutocompleteUrl(
+                query = cleanQuery,
+                baseDomain = baseDomain
+            )
+            val rawResponse = runCatching {
+                webViewFetchBridge.fetchHtml(rawUrl = autocompleteUrl, isAjax = true)
+            }.getOrDefault("")
+
+            val (parsedTitles, parsedNicks) = withContext(Dispatchers.Default) {
+                eksiParser.parseAutocompleteResponse(
+                    rawResponse = rawResponse,
+                    baseDomain = baseDomain
+                )
+            }
+
+            val mergedTitles = (localMatches + parsedTitles)
+                .distinctBy { it.title.trim().lowercase() }
+                .take(12)
+
+            if (mergedTitles.isNotEmpty()) {
+                cacheKnownTopics(mergedTitles)
+            }
+
+            mergedTitles to parsedNicks.take(8)
+        } catch (_: Throwable) {
+            localMatches to emptyList()
+        }
+    }
+
+    /**
+     * Başlığa yeni entry gönderir.
+     */
+    suspend fun createEntry(
+        topicId: String,
+        topicTitle: String,
+        content: String
+    ): EntryCreateResult = withContext(Dispatchers.IO) {
+        try {
+            if (content.isBlank()) {
+                return@withContext EntryCreateResult(
+                    success = false,
+                    message = "İçerik boş olamaz"
+                )
+            }
+
+            val baseDomain = webViewFetchBridge.getActiveBaseDomain().ifBlank {
+                WebViewCookieJar.DEFAULT_BASE_URL
+            }.trimEnd('/')
+
+            val createUrl = eksiParser.buildEntryCreateUrl(topicId)
+            val referer = when {
+                topicId.isNotBlank() -> "$baseDomain/basliklar/$topicId"
+                topicTitle.isNotBlank() -> "$baseDomain/basliklar/${Uri.encode(topicTitle)}"
+                else -> null
+            }
+
+            val result = webViewFetchBridge.postForm(
+                url = createUrl,
+                formFields = mapOf("Content" to content),
+                referer = referer
+            )
+
+            if (result.statusCode == 0) {
+                return@withContext EntryCreateResult(
+                    success = false,
+                    message = "Bağlantı kurulamadı"
+                )
+            }
+
+            eksiParser.parseEntryCreateResult(result.html)
+        } catch (_: Throwable) {
+            EntryCreateResult(success = false, message = "Entry gönderilemedi")
+        }
+    }
+
+    /**
+     * Kullanıcının mesaj kutusundaki konuşma (thread) listesini getirir.
+     */
+    suspend fun loadMessageThreads(): List<MessageThreadItem> = withContext(Dispatchers.IO) {
+        try {
+            val url = eksiParser.buildMessagesUrl()
+            val html = webViewFetchBridge.fetchHtml(rawUrl = url, isAjax = false)
+            if (html.isBlank()) return@withContext emptyList()
+            withContext(Dispatchers.Default) {
+                eksiParser.parseMessageThreads(html)
+            }
+        } catch (_: Throwable) {
+            emptyList()
+        }
+    }
+
+    /**
+     * Belirtilen mesaj konuşmasındaki mesajları getirir.
+     */
+    suspend fun loadMessageThread(threadId: String): List<MessageItem> =
+        withContext(Dispatchers.IO) {
+            try {
+                if (threadId.isBlank()) return@withContext emptyList()
+                val url = eksiParser.buildMessageThreadUrl(threadId)
+                val html = webViewFetchBridge.fetchHtml(rawUrl = url, isAjax = false)
+                if (html.isBlank()) return@withContext emptyList()
+                withContext(Dispatchers.Default) {
+                    eksiParser.parseMessageThread(html, threadId)
+                }
+            } catch (_: Throwable) {
+                emptyList()
+            }
+        }
+
+    /**
+     * Yeni mesaj gönderir.
+     */
+    suspend fun sendMessage(
+        threadId: String?,
+        recipient: String,
+        body: String
+    ): EntryCreateResult = withContext(Dispatchers.IO) {
+        try {
+            if (body.isBlank()) {
+                return@withContext EntryCreateResult(
+                    success = false,
+                    message = "Mesaj boş olamaz"
+                )
+            }
+
+            val baseDomain = webViewFetchBridge.getActiveBaseDomain().ifBlank {
+                WebViewCookieJar.DEFAULT_BASE_URL
+            }.trimEnd('/')
+
+            val url = eksiParser.buildMessagesUrl()
+            val fields = mutableMapOf("Message" to body)
+            if (!threadId.isNullOrBlank()) {
+                fields["ThreadId"] = threadId
+            }
+            if (recipient.isNotBlank()) {
+                fields["To"] = recipient
+            }
+
+            val result = webViewFetchBridge.postForm(
+                url = url,
+                formFields = fields,
+                referer = "$baseDomain/mesajlar"
+            )
+
+            if (result.statusCode == 0) {
+                return@withContext EntryCreateResult(
+                    success = false,
+                    message = "Bağlantı kurulamadı"
+                )
+            }
+
+            eksiParser.parseMessageSendResult(result.html)
+        } catch (_: Throwable) {
+            EntryCreateResult(success = false, message = "Mesaj gönderilemedi")
         }
     }
 }

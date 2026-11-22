@@ -250,7 +250,8 @@ data class AutocompleteSuggestionState(
     val query: String = "",
     val isLoading: Boolean = false,
     val titleSuggestions: List<TopicItem> = emptyList(),
-    val nickSuggestions: List<String> = emptyList()
+    val nickSuggestions: List<String> = emptyList(),
+    val errorMessage: String? = null
 ) {
     val hasAnySuggestion: Boolean
         get() = titleSuggestions.isNotEmpty() || nickSuggestions.isNotEmpty()
@@ -285,6 +286,39 @@ data class SearchPageData(
     val currentPage: Int,
     val pageCount: Int,
     val topics: List<TopicItem>
+)
+
+/**
+ * Özel mesaj (DM) konuşma başlığı modeli.
+ */
+data class MessageThreadItem(
+    val id: String,
+    val author: String,
+    val avatarUrl: String? = null,
+    val snippet: String,
+    val dateText: String,
+    val unread: Boolean = false
+)
+
+/**
+ * Özel mesaj konuşması içerisindeki tekil mesaj modeli.
+ */
+data class MessageItem(
+    val id: String,
+    val threadId: String,
+    val author: String,
+    val body: String,
+    val dateText: String,
+    val isMine: Boolean = false
+)
+
+/**
+ * Entry oluşturma / mesaj gönderme gibi yazma işlemlerinin sonucu.
+ */
+data class EntryCreateResult(
+    val success: Boolean,
+    val entryId: String? = null,
+    val message: String = ""
 )
 
 /**

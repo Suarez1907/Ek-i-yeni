@@ -9,7 +9,10 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import com.example.data.model.EksiChannel
+import com.example.data.model.EntryCreateResult
 import com.example.data.model.EntryItem
+import com.example.data.model.MessageItem
+import com.example.data.model.MessageThreadItem
 import com.example.data.model.PeriodicTimeRange
 import com.example.data.model.RankedTopicOrEntryItem
 import com.example.data.model.SearchFilter
@@ -20,6 +23,7 @@ import com.example.data.model.TopicPageData
 import com.example.network.WebViewCookieJar
 import com.example.ui.theme.ActiveThemeState
 import com.example.ui.theme.AppThemeMode
+import org.json.JSONArray
 import org.json.JSONObject
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
@@ -1186,73 +1190,387 @@ class EksiParser @Inject constructor() {
         if (rawResponse.isBlank()) return emptyList<TopicItem>() to emptyList()
         val safeDomain = baseDomain.ifBlank { BASE_URL }.trimEnd('/')
 
-        val trimmed = rawResponse.trim()
-        val candidateJsonText = when {
-            trimmed.startsWith("{") && trimmed.endsWith("}") -> trimmed
-            trimmed.contains("\"Titles\"") || trimmed.contains("\"Nicks\"") -> {
-                val extracted = if (trimmed.startsWith("<")) {
-                    Jsoup.parse(trimmed).text().trim()
-                } else {
-                    trimmed
-                }
-                val firstBrace = extracted.indexOf('{')
-                val lastBrace = extracted.lastIndexOf('}')
-                if (firstBrace >= 0 && lastBrace > firstBrace) {
-                    extracted.substring(firstBrace, lastBrace + 1)
-                } else {
-                    ""
-                }
-            }
-            else -> ""
-        }
+        val decoded = decodeHtmlEntities(rawResponse).trim()
+        if (decoded.isBlank()) return emptyList<TopicItem>() to emptyList()
 
-        if (candidateJsonText.isNotBlank()) {
+        val titles = mutableListOf<TopicItem>()
+        val nicks = mutableListOf<String>()
+
+        val jsonCandidate = extractAutocompleteJsonCandidate(decoded)
+        if (jsonCandidate.isNotBlank()) {
             try {
-                val jsonObject = JSONObject(candidateJsonText)
-                val titles = mutableListOf<TopicItem>()
-                val nicks = mutableListOf<String>()
-
-                val titlesArray = jsonObject.optJSONArray("Titles")
-                    ?: jsonObject.optJSONArray("titles")
-                if (titlesArray != null) {
-                    for (i in 0 until titlesArray.length()) {
-                        val rawTitle = titlesArray.optString(i).trim()
-                        if (rawTitle.isNotBlank()) {
-                            val slug = rawTitle.lowercase().replace(" ", "-")
-                            val url = "$safeDomain/?q=${Uri.encode(rawTitle)}"
-                            titles.add(
-                                TopicItem(
-                                    id = "auto_title_${slug}_$i",
-                                    title = rawTitle,
-                                    slug = slug,
-                                    url = url
-                                )
-                            )
+                if (jsonCandidate.startsWith("[")) {
+                    val arr = JSONArray(jsonCandidate)
+                    for (i in 0 until arr.length()) {
+                        when (val element = arr.opt(i)) {
+                            is String -> addAutocompletePlainItem(element, safeDomain, titles, nicks, i)
+                            is JSONObject -> {
+                                val title = element.optString("title")
+                                    .ifBlank { element.optString("Title") }
+                                    .ifBlank { element.optString("query") }
+                                    .ifBlank { element.optString("value") }
+                                    .trim()
+                                val nick = element.optString("nick")
+                                    .ifBlank { element.optString("Nick") }
+                                    .trim()
+                                    .removePrefix("@")
+                                if (title.isNotBlank()) addAutocompleteTitle(title, safeDomain, titles, i)
+                                if (nick.isNotBlank()) nicks.add(nick)
+                            }
+                            else -> Unit
                         }
                     }
-                }
-
-                val nicksArray = jsonObject.optJSONArray("Nicks")
-                    ?: jsonObject.optJSONArray("nicks")
-                if (nicksArray != null) {
-                    for (i in 0 until nicksArray.length()) {
-                        val rawNick = nicksArray.optString(i).trim().removePrefix("@")
-                        if (rawNick.isNotBlank()) {
-                            nicks.add(rawNick)
+                } else {
+                    val jsonObject = JSONObject(jsonCandidate)
+                    val titlesArray = jsonObject.optJSONArray("Titles")
+                        ?: jsonObject.optJSONArray("titles")
+                        ?: jsonObject.optJSONArray("Topics")
+                        ?: jsonObject.optJSONArray("topics")
+                    if (titlesArray != null) {
+                        for (i in 0 until titlesArray.length()) {
+                            val rawTitle = titlesArray.optString(i).trim()
+                            if (rawTitle.isNotBlank()) addAutocompleteTitle(rawTitle, safeDomain, titles, i)
                         }
                     }
-                }
-
-                if (titles.isNotEmpty() || nicks.isNotEmpty()) {
-                    return titles.distinctBy { it.title.lowercase() } to nicks.distinctBy { it.lowercase() }
+                    val nicksArray = jsonObject.optJSONArray("Nicks")
+                        ?: jsonObject.optJSONArray("nicks")
+                    if (nicksArray != null) {
+                        for (i in 0 until nicksArray.length()) {
+                            val rawNick = nicksArray.optString(i).trim().removePrefix("@")
+                            if (rawNick.isNotBlank()) nicks.add(rawNick)
+                        }
+                    }
                 }
             } catch (_: Throwable) {
-                // JSON parse hatası olursa HTML fallback'e geç
+                // JSON ayrıştırma başarısız olursa düz metin/HTML fallback'e geç
             }
         }
 
-        val fallbackTopics = parseLeftFrameTopics(html = rawResponse, isTrackedSection = false)
+        if (titles.isNotEmpty() || nicks.isNotEmpty()) {
+            return finalizeAutocomplete(titles, nicks)
+        }
+
+        val plainText = if (decoded.startsWith("<")) {
+            runCatching { Jsoup.parse(decoded).text() }.getOrDefault("")
+        } else {
+            decoded
+        }
+        if (plainText.isNotBlank() && !plainText.contains("{")) {
+            for (segment in plainText.split('\n', '\r', '|', ';')) {
+                addAutocompletePlainItem(segment, safeDomain, titles, nicks, titles.size)
+            }
+        }
+
+        if (titles.isNotEmpty() || nicks.isNotEmpty()) {
+            return finalizeAutocomplete(titles, nicks)
+        }
+
+        val fallbackTopics = runCatching {
+            parseLeftFrameTopics(html = rawResponse, isTrackedSection = false)
+        }.getOrDefault(emptyList())
         return fallbackTopics to emptyList()
+    }
+
+    private fun decodeHtmlEntities(input: String): String {
+        if (!input.contains('&')) return input
+        return input
+            .replace("&amp;", "&")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&#39;", "'")
+            .replace("&apos;", "'")
+            .replace("&nbsp;", " ")
+    }
+
+    private fun extractAutocompleteJsonCandidate(text: String): String {
+        val source = if (text.startsWith("<")) {
+            runCatching { Jsoup.parse(text).text().trim() }.getOrDefault("")
+        } else {
+            text.trim()
+        }
+        if (source.isEmpty()) return ""
+        if (source.startsWith("{") && source.endsWith("}")) return source
+        if (source.startsWith("[") && source.endsWith("]")) return source
+
+        val firstObj = source.indexOf('{')
+        val firstArr = source.indexOf('[')
+        if (firstObj < 0 && firstArr < 0) return ""
+        val startIsArray = firstArr >= 0 && (firstObj < 0 || firstArr < firstObj)
+        if (startIsArray) {
+            val lastArr = source.lastIndexOf(']')
+            if (lastArr > firstArr) return source.substring(firstArr, lastArr + 1)
+        }
+        if (firstObj >= 0) {
+            val lastObj = source.lastIndexOf('}')
+            if (lastObj > firstObj) return source.substring(firstObj, lastObj + 1)
+        }
+        return ""
+    }
+
+    private fun addAutocompleteTitle(
+        rawTitle: String,
+        safeDomain: String,
+        titles: MutableList<TopicItem>,
+        index: Int
+    ) {
+        val title = rawTitle.trim()
+        if (title.isBlank()) return
+        val slug = title.lowercase().replace(" ", "-")
+        val url = "$safeDomain/?q=${Uri.encode(title)}"
+        titles.add(
+            TopicItem(
+                id = "auto_title_${slug}_$index",
+                title = title,
+                slug = slug,
+                url = url
+            )
+        )
+    }
+
+    private fun addAutocompletePlainItem(
+        rawItem: String,
+        safeDomain: String,
+        titles: MutableList<TopicItem>,
+        nicks: MutableList<String>,
+        index: Int
+    ) {
+        val trimmed = rawItem.trim().trim('"', '\'', ',')
+        if (trimmed.isBlank()) return
+        if (trimmed.startsWith("@")) {
+            val nick = trimmed.removePrefix("@").trim()
+            if (nick.isNotBlank()) nicks.add(nick)
+        } else {
+            addAutocompleteTitle(trimmed, safeDomain, titles, index)
+        }
+    }
+
+    private fun finalizeAutocomplete(
+        titles: List<TopicItem>,
+        nicks: List<String>
+    ): Pair<List<TopicItem>, List<String>> {
+        val dedupedTitles = titles
+            .filter { it.title.trim().isNotBlank() }
+            .distinctBy { it.title.trim().lowercase() }
+            .take(10)
+        val dedupedNicks = nicks
+            .map { it.trim().removePrefix("@") }
+            .filter { it.isNotBlank() }
+            .distinctBy { it.lowercase() }
+            .take(10)
+        return dedupedTitles to dedupedNicks
+    }
+
+    /**
+     * Anlık arama önerisi isteği için URL oluşturucu:
+     * `https://eksisozluk.com/autocomplete/query?q={query}`
+     */
+    fun buildAutocompleteUrl(query: String, baseDomain: String = BASE_URL): String {
+        val safeDomain = baseDomain.ifBlank { BASE_URL }.trimEnd('/')
+        return "$safeDomain/autocomplete/query?q=${Uri.encode(query.trim())}"
+    }
+
+    /**
+     * Giriş sayfası URL'si: `https://eksisozluk.com/giris`
+     */
+    fun buildLoginUrl(baseDomain: String = BASE_URL): String {
+        val safeDomain = baseDomain.ifBlank { BASE_URL }.trimEnd('/')
+        return "$safeDomain/giris"
+    }
+
+    /**
+     * Özel mesaj kutusu URL'si: `https://eksisozluk.com/mesaj`
+     */
+    fun buildMessagesUrl(baseDomain: String = BASE_URL): String {
+        val safeDomain = baseDomain.ifBlank { BASE_URL }.trimEnd('/')
+        return "$safeDomain/mesaj"
+    }
+
+    /**
+     * Tekil mesaj konuşması URL'si: `https://eksisozluk.com/mesaj/{threadId}`
+     */
+    fun buildMessageThreadUrl(threadId: String, baseDomain: String = BASE_URL): String {
+        val safeDomain = baseDomain.ifBlank { BASE_URL }.trimEnd('/')
+        val cleanId = threadId.trim().trimStart('/')
+        return "$safeDomain/mesaj/$cleanId"
+    }
+
+    /**
+     * Yeni entry gönderme uç noktası: `https://eksisozluk.com/entry/create?topicId={topicId}`
+     */
+    fun buildEntryCreateUrl(topicId: String, baseDomain: String = BASE_URL): String {
+        val safeDomain = baseDomain.ifBlank { BASE_URL }.trimEnd('/')
+        return "$safeDomain/entry/create?topicId=${topicId.trim()}"
+    }
+
+    /**
+     * Oturum açmış kullanıcının nick'ini sayfa HTML'inden çıkarır.
+     */
+    fun parseCurrentUserNick(html: String): String? {
+        if (html.isBlank()) return null
+        return runCatching {
+            val doc = Jsoup.parse(html, BASE_URL)
+            val selectors = listOf(
+                "#top-navigation a.username",
+                "a.username",
+                "a[href^=/biri/]",
+                "#user-menu a[href^=/biri/]",
+                "li.me a"
+            )
+            var nick: String? = null
+            for (selector in selectors) {
+                val el = doc.selectFirst(selector) ?: continue
+                val text = el.text().trim().removePrefix("@").trim()
+                if (text.isNotBlank()) {
+                    nick = text
+                    break
+                }
+            }
+            nick
+        }.getOrNull()
+    }
+
+    /**
+     * Özel mesaj kutusu HTML'inden konuşma başlıklarını ayrıştırır.
+     */
+    fun parseMessageThreads(html: String): List<MessageThreadItem> {
+        if (html.isBlank()) return emptyList()
+        return runCatching {
+            val doc = Jsoup.parse(html, BASE_URL)
+            val selectors = listOf(
+                "ul.message-list li",
+                "div.message-thread",
+                "ul#threads li",
+                "div.messages-list li",
+                "li.message-item"
+            )
+            var elements: List<Element> = emptyList()
+            for (selector in selectors) {
+                val found = doc.select(selector)
+                if (found.isNotEmpty()) {
+                    elements = found
+                    break
+                }
+            }
+            elements.mapNotNull { el ->
+                val anchor = el.selectFirst("a[href*=/mesaj/]") ?: el.selectFirst("a[href]")
+                val href = anchor?.attr("href").orEmpty()
+                val id = href.substringAfter("/mesaj/", "")
+                    .substringBefore("/")
+                    .substringBefore("?")
+                    .trim()
+                val author = el.selectFirst("a[href*=/biri/], .author, .username")
+                    ?.text()?.trim()?.removePrefix("@").orEmpty()
+                val snippet = el.selectFirst(".snippet, .message-preview, .content, .preview")
+                    ?.text()?.trim().orEmpty()
+                val dateText = el.selectFirst("time, .date, .message-date, a.entry-date")
+                    ?.text()?.trim().orEmpty()
+                val avatarUrl = el.selectFirst("img")?.let { img ->
+                    img.attr("src").takeIf { it.isNotBlank() && !it.startsWith("data:") }
+                        ?.let { normalizeUrl(it) }
+                }
+                val unread = el.hasClass("unread") || el.selectFirst(".unread, .badge") != null
+                if (id.isBlank() && author.isBlank() && snippet.isBlank()) return@mapNotNull null
+                MessageThreadItem(
+                    id = id.ifBlank { author.ifBlank { "thread_${snippet.hashCode()}" } },
+                    author = author,
+                    avatarUrl = avatarUrl,
+                    snippet = snippet,
+                    dateText = dateText,
+                    unread = unread
+                )
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    /**
+     * Tekil mesaj konuşması HTML'inden mesajları ayrıştırır.
+     */
+    fun parseMessageThread(html: String, threadId: String): List<MessageItem> {
+        if (html.isBlank()) return emptyList()
+        return runCatching {
+            val doc = Jsoup.parse(html, BASE_URL)
+            val selectors = listOf(
+                "div.message",
+                "li.message",
+                "div.conversation-message",
+                "ul.messages li",
+                "div.messages > div"
+            )
+            var elements: List<Element> = emptyList()
+            for (selector in selectors) {
+                val found = doc.select(selector)
+                if (found.isNotEmpty()) {
+                    elements = found
+                    break
+                }
+            }
+            elements.mapNotNull { el ->
+                val author = el.selectFirst("a[href*=/biri/], .author, .username")
+                    ?.text()?.trim()?.removePrefix("@").orEmpty()
+                val body = el.selectFirst(".message-body, .content, .body, p")
+                    ?.text()?.trim().orEmpty()
+                if (body.isBlank()) return@mapNotNull null
+                val dateText = el.selectFirst("time, .date, .message-date")
+                    ?.text()?.trim().orEmpty()
+                val isMine = el.hasClass("me") || el.hasClass("sent") || el.hasClass("self")
+                val id = el.attr("data-id")
+                    .ifBlank { el.id().removePrefix("message-") }
+                    .ifBlank { "msg_${body.hashCode()}" }
+                MessageItem(
+                    id = id,
+                    threadId = threadId,
+                    author = author,
+                    body = body,
+                    dateText = dateText,
+                    isMine = isMine
+                )
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    /**
+     * Yeni entry gönderme yanıtını (HTML/JSON) sonuç modeline çevirir.
+     */
+    fun parseEntryCreateResult(html: String): EntryCreateResult {
+        return parseGenericActionResult(html)
+    }
+
+    /**
+     * Özel mesaj gönderme yanıtını (HTML/JSON) sonuç modeline çevirir.
+     */
+    fun parseMessageSendResult(html: String): EntryCreateResult {
+        return parseGenericActionResult(html)
+    }
+
+    private fun parseGenericActionResult(html: String): EntryCreateResult {
+        if (html.isBlank()) return EntryCreateResult(success = false, message = "Boş yanıt")
+        return runCatching {
+            val doc = Jsoup.parse(html, BASE_URL)
+            val entryId = doc.selectFirst("#entry-item-list li[data-id], li[data-id]")
+                ?.attr("data-id")
+                ?.filter { it.isDigit() }
+                ?.takeIf { it.isNotBlank() }
+                ?: doc.selectFirst("a[href*=/entry/], a.permalink")
+                    ?.attr("href")
+                    ?.substringAfter("/entry/", "")
+                    ?.substringBefore("?")
+                    ?.substringBefore("/")
+                    ?.filter { it.isDigit() }
+                    ?.takeIf { it.isNotBlank() }
+            val errorText = doc.selectFirst(".error, .alert-danger, .error-message, ul.errorlist li")
+                ?.text()?.trim().orEmpty()
+            val successText = doc.selectFirst(".alert-success, .success, .info")
+                ?.text()?.trim().orEmpty()
+            val hasError = errorText.isNotBlank()
+            val success = !hasError &&
+                (entryId != null || successText.isNotBlank() || doc.selectFirst("#entry-item-list") != null)
+            EntryCreateResult(
+                success = success,
+                entryId = entryId,
+                message = errorText.ifBlank { successText }
+            )
+        }.getOrDefault(EntryCreateResult(success = false, message = "Yanıt ayrıştırılamadı"))
     }
 
     /**
