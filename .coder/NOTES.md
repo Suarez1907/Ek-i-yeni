@@ -6,7 +6,7 @@ Jetpack Compose ile yazılmış modern Ekşi Sözlük istemcisi.
 - `ui/` — Compose ekranları, bileşenler ve tema (`ui/theme/`).
 - `data/` — Yerel depolama, modeller ve repository katmanı.
 - `network/` — Sözlük API istemcisi ve DTO eşlemeleri.
-- `ai/` — Akıllı özet/öneri yardımcıları.
+- `ai/` — Akıllı özet/öneri yardımcıları (OpenRouter).
 
 ## Tema Sistemi
 `Color.kt` üç tema modu tanımlar (`AppThemeMode`):
@@ -14,18 +14,21 @@ Jetpack Compose ile yazılmış modern Ekşi Sözlük istemcisi.
 - `DARK_GRAY` — Koyu arduvaz-zümrüt tonları.
 - `CLASSIC_LIGHT` — Modern kağıt/slate-zümrüt açık tema.
 
-Aktif tema `ActiveThemeState` ile reaktif tutulur; `Theme.kt` içindeki
-`ColorScheme`, `EksinShapes` ve edge-to-edge sistem çubukları bu moda göre
-güncellenir. Tercih `ThemePreferencesManager` ile `SharedPreferences`'a
-`selected_theme_mode` anahtarı altında yazılır.
+Aktif tema `ActiveThemeState` ile reaktif tutulur; tercih
+`ThemePreferencesManager` ile `selected_theme_mode` anahtarı altında saklanır.
+
+## AI (OpenRouter)
+- API anahtarı `.env.example` -> `BuildConfig.OPENROUTER_*` ile sağlanır.
+- Gemini/DeepSeek entegrasyonları kapalı; uyumluluk için isimleri korunur.
+- WebView köprüsü: `WebViewFetchBridge.fetchHtml` / `WebViewFetchBridge.postForm`.
+
+## Oturum ve İçerik
+- Ekşi girişi WebView + çerez ile yapılır; entry ve mesaj aynı oturumu paylaşır.
+- Otomatik tamamlama: 1+ harf sonrası 250ms debounce ile öneri kuralı.
 
 ## Kurallar
 - Mevcut public sembol isimleri ve `storageKey` değerleri korunur.
 - UI tamamen `MaterialTheme` semantik renkleri üzerinden çizilir.
-- Tema değişimleri anında yeniden çizilir (recompose).
 
 ## Derleme ve Test
-GitHub Actions:
-```
-./gradlew testDebugUnitTest assembleDebug
-```
+CI: `./gradlew testDebugUnitTest assembleDebug`
