@@ -1,6 +1,6 @@
 package com.example
 
-import com.example.network.EksiParser
+import com.example.data.remote.EksiParser
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull

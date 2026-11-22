@@ -9,7 +9,6 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import com.example.data.model.EksiChannel
-import com.example.data.model.EntryCreateResult
 import com.example.data.model.EntryItem
 import com.example.data.model.MessageItem
 import com.example.data.model.MessageThreadItem
@@ -42,6 +41,24 @@ data class EntryDetailMetadata(
     val author: String?,
     val topicTitle: String?,
     val entryDate: String = ""
+)
+
+/**
+ * Tekil bir mesaj konuşması detayı (başlık + mesajlar).
+ */
+data class MessageThreadDetail(
+    val threadId: String,
+    val title: String,
+    val messages: List<MessageItem>
+)
+
+/**
+ * Entry oluşturma / mesaj gönderme sonucu.
+ */
+data class EntryCreateResult(
+    val isSuccess: Boolean,
+    val message: String? = null,
+    val entryId: String? = null
 )
 
 /**
@@ -1185,7 +1202,7 @@ class EksiParser @Inject constructor() {
      */
     fun parseAutocompleteResponse(
         rawResponse: String,
-        baseDomain: String = BASE_URL
+        baseDomain: String
     ): Pair<List<TopicItem>, List<String>> {
         if (rawResponse.isBlank()) return emptyList<TopicItem>() to emptyList()
         val safeDomain = baseDomain.ifBlank { BASE_URL }.trimEnd('/')
@@ -1269,6 +1286,96 @@ class EksiParser @Inject constructor() {
             parseLeftFrameTopics(html = rawResponse, isTrackedSection = false)
         }.getOrDefault(emptyList())
         return fallbackTopics to emptyList()
+    }
+
+    /**
+     * Testin beklediği tek parametreli overload: yalnızca başlık/nick metinlerini döndürür.
+     */
+    fun parseAutocompleteResponse(rawResponse: String): List<String> {
+        if (rawResponse.isBlank()) return emptyList()
+        val decoded = decodeHtmlEntities(rawResponse).trim()
+        if (decoded.isBlank()) return emptyList()
+
+        val results = mutableListOf<String>()
+
+        val jsonCandidate = extractAutocompleteJsonCandidate(decoded)
+        if (jsonCandidate.isNotBlank()) {
+            try {
+                if (jsonCandidate.startsWith("[")) {
+                    val arr = JSONArray(jsonCandidate)
+                    for (i in 0 until arr.length()) {
+                        when (val element = arr.opt(i)) {
+                            is String -> {
+                                val trimmed = element.trim()
+                                if (trimmed.isNotBlank()) results.add(trimmed)
+                            }
+                            is JSONObject -> {
+                                val title = element.optString("title")
+                                    .ifBlank { element.optString("Title") }
+                                    .ifBlank { element.optString("query") }
+                                    .ifBlank { element.optString("value") }
+                                    .trim()
+                                if (title.isNotBlank()) results.add(title)
+                            }
+                            else -> Unit
+                        }
+                    }
+                } else {
+                    val jsonObject = JSONObject(jsonCandidate)
+                    val titlesArray = jsonObject.optJSONArray("Titles")
+                        ?: jsonObject.optJSONArray("titles")
+                        ?: jsonObject.optJSONArray("Topics")
+                        ?: jsonObject.optJSONArray("topics")
+                    if (titlesArray != null) {
+                        for (i in 0 until titlesArray.length()) {
+                            when (val element = titlesArray.opt(i)) {
+                                is String -> {
+                                    val trimmed = element.trim()
+                                    if (trimmed.isNotBlank()) results.add(trimmed)
+                                }
+                                is JSONObject -> {
+                                    val title = element.optString("title")
+                                        .ifBlank { element.optString("Title") }
+                                        .trim()
+                                    if (title.isNotBlank()) results.add(title)
+                                }
+                                else -> Unit
+                            }
+                        }
+                    }
+                    val nicksArray = jsonObject.optJSONArray("Nicks")
+                        ?: jsonObject.optJSONArray("nicks")
+                    if (nicksArray != null) {
+                        for (i in 0 until nicksArray.length()) {
+                            val nick = nicksArray.optString(i).trim().removePrefix("@")
+                            if (nick.isNotBlank()) results.add(nick)
+                        }
+                    }
+                }
+            } catch (_: Throwable) {
+                // JSON ayrıştırma başarısız olursa düz metin/HTML fallback'e geç
+            }
+        }
+
+        if (results.isNotEmpty()) {
+            return results.filter { it.isNotBlank() }.distinct().take(10)
+        }
+
+        val plainText = if (decoded.startsWith("<")) {
+            runCatching { Jsoup.parse(decoded).text() }.getOrDefault("")
+        } else {
+            decoded
+        }
+        if (plainText.isNotBlank() && !plainText.contains("{")) {
+            for (segment in plainText.split('\n', '\r', '|', ';')) {
+                val trimmed = segment.trim().trim('"', '\'', ',')
+                if (trimmed.isNotBlank()) {
+                    results.add(trimmed.removePrefix("@"))
+                }
+            }
+        }
+
+        return results.filter { it.isNotBlank() }.distinct().take(10)
     }
 
     private fun decodeHtmlEntities(input: String): String {
@@ -1442,7 +1549,8 @@ class EksiParser @Inject constructor() {
                 "div.message-thread",
                 "ul#threads li",
                 "div.messages-list li",
-                "li.message-item"
+                "li.message-item",
+                "li[data-thread-id]"
             )
             var elements: List<Element> = emptyList()
             for (selector in selectors) {
@@ -1530,9 +1638,56 @@ class EksiParser @Inject constructor() {
     }
 
     /**
+     * Tekil mesaj konuşması HTML'ini [MessageThreadDetail] olarak ayrıştırır.
+     * Boş veya geçersiz HTML için `null` döner.
+     */
+    fun parseMessageThread(html: String): MessageThreadDetail? {
+        if (html.isBlank()) return null
+        return runCatching {
+            val doc = Jsoup.parse(html, BASE_URL)
+            val title = doc.selectFirst("h1, .thread-title, .conversation-title")
+                ?.text()?.trim().orEmpty()
+            val threadId = doc.selectFirst("[data-thread-id]")
+                ?.attr("data-thread-id")?.trim()
+                ?.takeIf { it.isNotBlank() }
+                ?: doc.selectFirst("a[href*=/mesaj/]")
+                    ?.attr("href")
+                    ?.substringAfter("/mesaj/", "")
+                    ?.substringBefore("/")
+                    ?.substringBefore("?")
+                    ?.trim()
+                    ?.takeIf { it.isNotBlank() }
+                ?: ""
+            val messages = parseMessageThread(html, threadId)
+            MessageThreadDetail(
+                threadId = threadId,
+                title = title,
+                messages = messages
+            )
+        }.getOrNull()
+    }
+
+    /**
      * Yeni entry gönderme yanıtını (HTML/JSON) sonuç modeline çevirir.
      */
     fun parseEntryCreateResult(html: String): EntryCreateResult {
+        if (html.isBlank()) return EntryCreateResult(isSuccess = false, message = "Boş yanıt")
+        val trimmed = html.trim()
+        if (trimmed.startsWith("{")) {
+            try {
+                val json = JSONObject(trimmed)
+                val success = json.optBoolean("success", false)
+                val message = json.optString("message").ifBlank { json.optString("error") }
+                val entryId = json.optString("entryId").ifBlank { json.optString("entry_id") }
+                return EntryCreateResult(
+                    isSuccess = success,
+                    message = message.takeIf { it.isNotBlank() },
+                    entryId = entryId.takeIf { it.isNotBlank() }
+                )
+            } catch (_: Throwable) {
+                // JSON değilse HTML fallback
+            }
+        }
         return parseGenericActionResult(html)
     }
 
@@ -1544,7 +1699,7 @@ class EksiParser @Inject constructor() {
     }
 
     private fun parseGenericActionResult(html: String): EntryCreateResult {
-        if (html.isBlank()) return EntryCreateResult(success = false, message = "Boş yanıt")
+        if (html.isBlank()) return EntryCreateResult(isSuccess = false, message = "Boş yanıt")
         return runCatching {
             val doc = Jsoup.parse(html, BASE_URL)
             val entryId = doc.selectFirst("#entry-item-list li[data-id], li[data-id]")
@@ -1566,11 +1721,11 @@ class EksiParser @Inject constructor() {
             val success = !hasError &&
                 (entryId != null || successText.isNotBlank() || doc.selectFirst("#entry-item-list") != null)
             EntryCreateResult(
-                success = success,
-                entryId = entryId,
-                message = errorText.ifBlank { successText }
+                isSuccess = success,
+                message = errorText.ifBlank { successText }.takeIf { it.isNotBlank() },
+                entryId = entryId
             )
-        }.getOrDefault(EntryCreateResult(success = false, message = "Yanıt ayrıştırılamadı"))
+        }.getOrDefault(EntryCreateResult(isSuccess = false, message = "Yanıt ayrıştırılamadı"))
     }
 
     /**
