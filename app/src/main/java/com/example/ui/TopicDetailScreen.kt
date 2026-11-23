@@ -218,6 +218,8 @@ fun TopicDetailScreen(
     val isSingleEntryOrFiltered = activeFilterMode != TopicFilterMode.ALL ||
         metadata?.isSingleEntryView == true ||
         topic.url.contains("/entry/", ignoreCase = true)
+    val showPagerCapsule = metadata?.isSingleEntryView != true &&
+        !topic.url.contains("/entry/", ignoreCase = true)
 
     val isWaybackArchiveActive = metadata?.isFromWaybackArchive == true ||
         lastContentSource == ContentSource.WAYBACK_ARCHIVE
@@ -767,7 +769,7 @@ fun TopicDetailScreen(
                             start = 12.dp,
                             end = 12.dp,
                             top = 10.dp,
-                            bottom = 96.dp
+                            bottom = if (showPagerCapsule) 144.dp else 96.dp
                         ),
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
@@ -949,7 +951,7 @@ fun TopicDetailScreen(
             // Kullanıcı hangi sayfayı seçerse (İlk, Önceki, Sayfa X, Sonraki, Son)
             // doğrudan `viewModel.goToPage(targetPage)` çağrılır ve veri yüklendiğinde
             // `LaunchedEffect(latestLoadSequence)` ile liste en üste (`scrollToItem(0)`) sarılır.
-            if (metadata?.isSingleEntryView != true && !topic.url.contains("/entry/", ignoreCase = true)) {
+            if (showPagerCapsule) {
                 FloatingPagerCapsuleBar(
                     currentPage = safeCurrentPage,
                     totalPages = safeTotalPages,
@@ -958,7 +960,7 @@ fun TopicDetailScreen(
                     },
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
-                        .padding(bottom = 12.dp)
+                        .padding(bottom = 84.dp)
                 )
             }
         }
