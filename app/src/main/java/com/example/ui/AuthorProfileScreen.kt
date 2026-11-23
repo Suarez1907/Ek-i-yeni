@@ -2,6 +2,7 @@ package com.example.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -13,6 +14,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -28,6 +30,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
@@ -55,6 +58,9 @@ fun AuthorProfileScreen(
     profileState: ProfileUiState,
     messageSubmitState: ActionSubmitState,
     isUserLoggedIn: Boolean,
+    entryTab: AuthorEntryTab,
+    entryTabState: AuthorProfileEntriesUiState,
+    onEntryTabChange: (AuthorEntryTab) -> Unit,
     onBack: () -> Unit,
     onRefresh: () -> Unit,
     onOpenTopic: (TopicItem) -> Unit,
@@ -121,7 +127,6 @@ fun AuthorProfileScreen(
                 is ProfileUiState.Error -> ErrorCard(profileState.message, onRefresh)
                 is ProfileUiState.Success -> {
                     val profile = profileState.profile
-                    val entries = profileState.profile.recentEntries
                     LazyColumn(
                         modifier = Modifier.fillMaxSize(),
                         contentPadding = PaddingValues(16.dp),
@@ -144,26 +149,50 @@ fun AuthorProfileScreen(
                             )
                         }
                         item {
-                            Text(
-                                "Son Entry'ler",
-                                style = MaterialTheme.typography.titleMedium,
-                                color = MaterialTheme.colorScheme.onSurface
+                            AuthorEntryTabRow(
+                                current = entryTab,
+                                onTabSelected = { tab -> onEntryTabChange(tab) }
                             )
                         }
-                        items(entries) { entry ->
-                            EntryCard(
-                                entry = entry,
-                                onClick = {
-                                    onOpenTopic(
-                                        TopicItem(
-                                            id = entry.id,
-                                            title = entry.topicTitle,
-                                            slug = "",
-                                            url = entry.topicUrl
+                        if (entryTabState is AuthorProfileEntriesUiState.Success) {
+                            items(entryTabState.entries) { entry ->
+                                EntryCard(
+                                    entry = entry,
+                                    onClick = {
+                                        onOpenTopic(
+                                            TopicItem(
+                                                id = entry.id,
+                                                title = entry.topicTitle,
+                                                slug = "",
+                                                url = entry.topicUrl
+                                            )
                                         )
+                                    }
+                                )
+                            }
+                        } else if (entryTabState is AuthorProfileEntriesUiState.Loading) {
+                            item {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(24.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    CircularProgressIndicator(
+                                        color = MaterialTheme.colorScheme.primary
                                     )
                                 }
-                            )
+                            }
+                        } else if (entryTabState is AuthorProfileEntriesUiState.Error) {
+                            item {
+                                Text(
+                                    text = entryTabState.message,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.error
+                                )
+                            }
+                        } else {
+                            item { }
                         }
                     }
                 }
@@ -180,6 +209,44 @@ fun AuthorProfileScreen(
             onSend = { to, msg -> onSendMessage(to, msg) },
             onDismiss = { showMessageDialog = false }
         )
+    }
+}
+
+@Composable
+private fun AuthorEntryTabRow(
+    current: AuthorEntryTab,
+    onTabSelected: (AuthorEntryTab) -> Unit
+) {
+    val labels = listOf("Son", "En Çok Favori", "En Beğenilen", "Favoriler")
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        AuthorEntryTab.entries.forEachIndexed { index, tab ->
+            val selected = tab == current
+            Surface(
+                modifier = Modifier.clickable { onTabSelected(tab) },
+                color = if (selected) {
+                    MaterialTheme.colorScheme.primaryContainer
+                } else {
+                    MaterialTheme.colorScheme.surfaceVariant
+                },
+                shape = MaterialTheme.shapes.small
+            ) {
+                Text(
+                    text = labels.getOrElse(index) { tab.name },
+                    style = MaterialTheme.typography.labelLarge,
+                    color = if (selected) {
+                        MaterialTheme.colorScheme.onPrimaryContainer
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                )
+            }
+        }
     }
 }
 
