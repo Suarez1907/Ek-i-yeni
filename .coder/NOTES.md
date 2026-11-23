@@ -34,6 +34,12 @@ güncellenir. Tercih `ThemePreferencesManager` ile `SharedPreferences`'a
 - UI tamamen `MaterialTheme` semantik renkleri üzerinden çizilir.
 - Tema değişimleri anında yeniden çizilir (recompose).
 
+## Sürümleme
+- Sürüm bilgisi `app/build.gradle.kts` içindeki `versionCode`/`versionName` alanlarındadır.
+- Release akışı: sürüm artışı PR ile `main`'e -> `.github/workflows/release.yml` `workflow_dispatch`
+  (input: `tag`, `title`) -> GitHub Release + `app-release.apk` / `app-debug.apk` varlıkları.
+- Sürüm notları `CHANGELOG.md` dosyasında tutulur.
+
 ## Derleme ve Test
 GitHub Actions:
 ```
