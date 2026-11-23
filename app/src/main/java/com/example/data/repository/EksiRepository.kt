@@ -11,6 +11,7 @@ import com.example.data.local.BookmarkedEntryEntity
 import com.example.data.local.EksinDao
 import com.example.data.local.ReadStateDao
 import com.example.data.local.TopicReadStateEntity
+import com.example.data.model.AuthorEntryTab
 import com.example.data.model.AuthorProfileData
 import com.example.data.model.EksiChannel
 import com.example.data.model.EntryItem
@@ -85,6 +86,12 @@ class EksiRepository @Inject constructor(
     private val entryAuthorCache = ConcurrentHashMap<String, String>()
     private val entryResolvedIdCache = ConcurrentHashMap<String, String>()
     private val entryTopicTitleCache = ConcurrentHashMap<String, String>()
+
+    /**
+     * Yazar profil sekmelerindeki (son, en çok fav, en beğenilen, favoriler) entry listeleri için
+     * basit bellek içi önbellek. Anahtar: `"nick|tab"`.
+     */
+    private val authorProfileEntriesCache = ConcurrentHashMap<String, List<EntryItem>>()
 
     /**
      * Hafızadaki Gündem 1. sayfa başlıkları (`gundemTopics`) ve hızlı URL seti (`gundemPage1UrlCache`).
@@ -1666,6 +1673,49 @@ class EksiRepository @Inject constructor(
         } catch (e: Throwable) {
             Result.failure(e)
         }
+    }
+
+    /**
+     * Yazar profilindeki sekmelere (son entry'leri, en çok fav, en beğenilen, favoriler) ait
+     * entry listesini çeker. İstek AJAX başlığı ve çerez gerektirdiği için düz HTTP yerine
+     * [WebViewFetchBridge] üzerinden yapılır.
+     *
+     * @param nick yazar kullanıcı adı
+     * @param tab profil sekmesi (endpoint yolu bu modelden gelir)
+     * @param forceRefresh true ise bellek önbelleği atlanır ve yenilenir
+     */
+    suspend fun fetchAuthorProfileEntries(
+        nick: String,
+        tab: AuthorEntryTab,
+        forceRefresh: Boolean = false
+    ): List<EntryItem> = withContext(Dispatchers.IO) {
+        val cleanNick = nick.trim()
+        if (cleanNick.isBlank()) {
+            throw IllegalArgumentException("Yazar adi bos olamaz.")
+        }
+
+        val cacheKey = "$cleanNick|${tab.name}"
+        if (!forceRefresh) {
+            val cached = authorProfileEntriesCache[cacheKey]
+            if (cached != null) {
+                return@withContext cached
+            }
+        }
+
+        val baseDomain = activeBaseDomainTrimmed()
+        val url = "$baseDomain/${tab.endpointPath}?nick=${Uri.encode(cleanNick)}&p=1&_=${System.currentTimeMillis()}"
+
+        val html = webViewFetchBridge.fetchHtml(
+            rawUrl = url,
+            isAjax = true
+        )
+
+        val entries = withContext(Dispatchers.Default) {
+            eksiParser.parseAuthorProfileEntries(html, cleanNick)
+        }
+
+        authorProfileEntriesCache[cacheKey] = entries
+        entries
     }
 
     /**
