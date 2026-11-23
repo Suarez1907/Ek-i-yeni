@@ -25,6 +25,7 @@ android {
     signingConfigs {
         create("release") {
             // Do not remove or modify this signingConfig
+            storeType = "PKCS12"
             storeFile = file("../debug.keystore")
             storePassword = "android"
             keyAlias = "androiddebugkey"
@@ -32,6 +33,7 @@ android {
         }
         create("debugConfig") {
             // Do not remove or modify this signingConfig
+            storeType = "PKCS12"
             storeFile = file("../debug.keystore")
             storePassword = "android"
             keyAlias = "androiddebugkey"

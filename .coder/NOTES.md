@@ -40,6 +40,14 @@ güncellenir. Tercih `ThemePreferencesManager` ile `SharedPreferences`'a
   (input: `tag`, `title`) -> GitHub Release + `app-release.apk` / `app-debug.apk` varlıkları.
 - Sürüm notları `CHANGELOG.md` dosyasında tutulur.
 
+## İmzalama (Keystore)
+- Sabit imza anahtarı `keystore/debug.keystore.b64` (base64 PKCS12, alias `androiddebugkey`,
+  store/key password `android`) olarak repoda tutulur.
+- CI iş akışları (`release.yml`, `android-apk.yml`) bu dosyayı `debug.keystore` olarak çözer;
+  yoksa geçici anahtar üretir. Böylece APK'lar her derlemede aynı imzayı alır ve
+  üzerine kurulabilir.
+- `tools/gen_keystore.py` ile üretilir, `tools/verify_keystore.py` ile doğrulanır.
+
 ## Derleme ve Test
 GitHub Actions:
 ```
