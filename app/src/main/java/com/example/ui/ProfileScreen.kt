@@ -61,6 +61,12 @@ import com.example.data.model.ThreadDetailUiState
 import com.example.data.model.TopicItem
 import com.example.ui.sheets.SendMessageDialog
 
+/**
+ * Kullanıcının kendi profili ve mesaj sekmeleri.
+ *
+ * Not: Yazar profili (AuthorProfileScreen) burada çağrılmaz; sekme parametreleri
+ * doğrudan ViewModel state'inden okunduğu için buradan ek parametre geçilmesi gerekmez.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ProfileScreen(
