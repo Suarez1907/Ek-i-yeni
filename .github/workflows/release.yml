@@ -46,8 +46,7 @@ jobs:
       - name: Prepare Environment
         run: |
           touch .env
-          keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US" || true
-          cp debug.keystore app/debug.keystore || true
+          cp debug.keystore app/debug.keystore
 
       - name: Build Release and Debug APKs with Gradle
         run: gradle assembleRelease assembleDebug --no-daemon
