@@ -124,10 +124,38 @@ class ExampleUnitTest {
     }
 
     @Test
+    fun parseAuthorProfileEntries_extractsTopicItemEntriesAndFavorites() {
+        val partialHtml = """
+            <div class="topic-item">
+                <h1 id="title"><a href="/yapay-zeka--7894120">yapay zeka</a></h1>
+                <ul id="entry-item-list">
+                    <li data-id="169000101" data-author="gece_okuru" data-favorite-count="27">
+                        <div class="content">profil partial içeriği: jsoup ile ayrıştırıldı.</div>
+                        <a class="entry-date" href="/entry/169000101">05.11.2026 21:15</a>
+                    </li>
+                </ul>
+            </div>
+        """.trimIndent()
+
+        val entries = parser.parseAuthorProfileEntries(partialHtml, fallbackAuthor = "fallback_yazar")
+
+        assertEquals(1, entries.size)
+        val firstEntry = entries.first()
+        assertEquals("yapay zeka", firstEntry.topicTitle)
+        assertEquals("169000101", firstEntry.id)
+        assertEquals(27, firstEntry.favoriteCount)
+        assertEquals("05.11.2026 21:15", firstEntry.date)
+        assertEquals("gece_okuru", firstEntry.author)
+        assertEquals("https://eksisozluk.com/yapay-zeka--7894120", firstEntry.topicUrl)
+        assertTrue(firstEntry.plainText.contains("profil partial içeriği"))
+        assertTrue(firstEntry.plainText.contains("jsoup ile ayrıştırıldı"))
+    }
+
+    @Test
     fun parseCurrentUsername_extractsLoggedInNickFromTopBar() {
         val html = """
             <html><body>
-                <ul class="top-bar">
+                <ul id="top-navigation">
                     <li><a href="/biri/gece_okuru" class="username">gece_okuru</a></li>
                 </ul>
             </body></html>
@@ -141,9 +169,9 @@ class ExampleUnitTest {
     fun parseEntryFormMetadata_extractsTokenTitleAndTopicId() {
         val html = """
             <html><body>
-                <form id="entry-form" action="/entry/add">
+                <form id="entry-add-form" action="/entry/ekle">
                     <input type="hidden" name="__RequestVerificationToken" value="abc123token" />
-                    <input type="hidden" name="TopicId" value="7894120" />
+                    <input type="hidden" name="Id" value="7894120" />
                     <input type="hidden" name="Title" value="eksin oled" />
                 </form>
             </body></html>
@@ -151,7 +179,7 @@ class ExampleUnitTest {
 
         val metadata = parser.parseEntryFormMetadata(html)
         assertNotNull(metadata)
-        assertEquals("abc123token", metadata?.token)
+        assertEquals("abc123token", metadata?.verificationToken)
         assertEquals("7894120", metadata?.topicId)
     }
 
@@ -173,7 +201,7 @@ class ExampleUnitTest {
             </body></html>
         """.trimIndent()
 
-        val profile = parser.parseAuthorProfile(html)
+        val profile = parser.parseAuthorProfile(html, requestedNick = "gece_okuru")
         assertNotNull(profile)
     }
 
@@ -213,7 +241,10 @@ class ExampleUnitTest {
             </body></html>
         """.trimIndent()
 
-        val detail = parser.parseMessageThreadDetail(html)
+        val detail = parser.parseMessageThreadDetail(
+            html = html,
+            threadUrl = "https://eksisozluk.com/mesaj/42"
+        )
         assertNotNull(detail)
     }
 }
