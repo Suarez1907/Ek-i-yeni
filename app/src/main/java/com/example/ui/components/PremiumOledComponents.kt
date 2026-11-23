@@ -383,14 +383,14 @@ fun FloatingPagerCapsuleBar(
             horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             PagerCapsuleButton(
-                label = "İlk (1)",
+                label = "İlk",
                 enabled = safeCurrent > 1,
                 onClick = { onSelectPage(1) },
                 testTag = "pager_first_button"
             )
 
             PagerCapsuleButton(
-                label = "< Önceki",
+                label = "<",
                 enabled = safeCurrent > 1,
                 onClick = { onSelectPage((safeCurrent - 1).coerceAtLeast(1)) },
                 testTag = "pager_prev_button"
@@ -407,23 +407,23 @@ fun FloatingPagerCapsuleBar(
                     .testTag("pager_center_selector")
             ) {
                 Text(
-                    text = "Sayfa $safeCurrent / $safeTotal",
+                    text = "$safeCurrent/$safeTotal",
                     style = MaterialTheme.typography.labelMedium,
                     fontWeight = FontWeight.Bold,
                     color = EksiNeonGreen,
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp)
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)
                 )
             }
 
             PagerCapsuleButton(
-                label = "Sonraki >",
+                label = ">",
                 enabled = safeCurrent < safeTotal,
                 onClick = { onSelectPage((safeCurrent + 1).coerceAtMost(safeTotal)) },
                 testTag = "pager_next_button"
             )
 
             PagerCapsuleButton(
-                label = "Son ($safeTotal)",
+                label = "Son",
                 enabled = safeCurrent < safeTotal,
                 onClick = { onSelectPage(safeTotal) },
                 testTag = "pager_last_button"
@@ -444,7 +444,7 @@ private fun PagerCapsuleButton(
         modifier = Modifier
             .clip(RoundedCornerShape(50))
             .clickable(enabled = enabled, onClick = onClick)
-            .padding(horizontal = 9.dp, vertical = 7.dp)
+            .padding(horizontal = 6.dp, vertical = 7.dp)
             .testTag(testTag),
         contentAlignment = Alignment.Center
     ) {
