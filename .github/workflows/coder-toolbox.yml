@@ -1,0 +1,62 @@
+# coder-cloud-tool: toolbox v1 (Coder tarafından oluşturuldu; Ayarlar > Yetenekler'den güncellenir)
+name: Coder Toolbox
+
+on:
+  workflow_dispatch:
+    inputs:
+      script_path:
+        description: Python betiği (repo içi yol)
+        required: true
+      output_dir:
+        description: Çıktı klasörü
+        required: false
+        default: coder-out
+      requirements:
+        description: pip gereksinim dosyası (isteğe bağlı)
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: coder-toolbox-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  toolbox:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SCRIPT: ${{ inputs.script_path }}
+      CODER_OUTPUT_DIR: ${{ inputs.output_dir }}
+      REQUIREMENTS: ${{ inputs.requirements }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: "**/requirements*.txt"
+
+      - name: FFmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg > /dev/null
+
+      - name: Gereksinimler
+        run: |
+          if [ -n "$REQUIREMENTS" ] && [ -f "$REQUIREMENTS" ]; then pip install -q -r "$REQUIREMENTS"; fi
+
+      - name: Betiği çalıştır
+        run: |
+          mkdir -p "$CODER_OUTPUT_DIR"
+          python "$SCRIPT"
+
+      - name: Çıktıları yükle
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coder-toolbox-output
+          if-no-files-found: warn
+          retention-days: 7
+          path: ${{ env.CODER_OUTPUT_DIR }}/
