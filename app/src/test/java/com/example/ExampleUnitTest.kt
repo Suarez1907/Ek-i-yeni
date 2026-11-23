@@ -201,8 +201,15 @@ class ExampleUnitTest {
             </body></html>
         """.trimIndent()
 
-        val profile = parser.parseAuthorProfile(html, requestedNick = "gece_okuru")
+        val profile = parser.parseAuthorProfile(
+            html = html,
+            requestedNick = "gece_okuru",
+            isCurrentUser = false
+        )
         assertNotNull(profile)
+        assertEquals("gece_okuru", profile?.nick)
+        assertTrue(profile?.entryCountText?.contains("128") == true)
+        assertEquals(2, profile?.recentEntries?.size)
     }
 
     @Test
