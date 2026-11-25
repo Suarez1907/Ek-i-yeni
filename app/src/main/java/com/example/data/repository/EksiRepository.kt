@@ -548,7 +548,7 @@ class EksiRepository @Inject constructor(
                     page = 1
                 )
                 val searchHtml = runCatching {
-                    webViewFetchBridge.fetchHtml(rawUrl = searchFallbackUrl, isAjax = true)
+                    webViewFetchBridge.fetchHtml(rawUrl = searchFallbackUrl, isAjax = false)
                 }.getOrDefault("")
                 val searchParsed = withContext(Dispatchers.Default) {
                     eksiParser.parseSearchResults(
@@ -1595,7 +1595,7 @@ class EksiRepository @Inject constructor(
     suspend fun submitEntry(
         topicUrl: String,
         topicTitle: String,
-        topicId: String,
+        @Suppress("UNUSED_PARAMETER") topicId: String,
         content: String
     ): Result<Unit> = withContext(Dispatchers.IO) {
         try {
@@ -1620,14 +1620,13 @@ class EksiRepository @Inject constructor(
             }
             val formFields = mapOf(
                 "__RequestVerificationToken" to metadata.verificationToken,
-                "Title" to topicTitle,
-                "Id" to topicId,
-                "Content" to content,
-                "ReturnUrl" to topicUrl
+                "Title" to metadata.title.ifBlank { topicTitle },
+                "Content" to content
             )
             val response = webViewFetchBridge.postForm(
-                rawUrl = topicUrl,
-                formFields = formFields
+                rawUrl = metadata.actionUrl,
+                formFields = formFields,
+                refererUrl = topicUrl
             )
             val status = response.statusCode
             val body = response.html
@@ -1637,7 +1636,10 @@ class EksiRepository @Inject constructor(
             } else {
                 Result.failure(
                     IllegalStateException(
-                        validationError ?: "Entry gonderilemedi. (HTTP $status)"
+                        validationError ?: when (status) {
+                            404 -> "Entry gonderilemedi. (HTTP 404) Lutfen oturumunuzu kontrol edin ve dogru baslik adresini kullanin."
+                            else -> "Entry gonderilemedi. (HTTP $status)"
+                        }
                     )
                 )
             }
