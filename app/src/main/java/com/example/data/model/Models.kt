@@ -316,7 +316,7 @@ enum class AuthorEntryTab(
 ) {
     RECENT("Son Entry'ler", "son-entryleri"),
     MOST_FAVORITED("En Çok Favorilenen", "en-cok-favorilenen-entryleri"),
-    TOP_RATED("En Beğenilen", "en-begenilen-entryleri"),
+    TOP_RATED("En Beğenilen", "en-begenilenleri"),
     FAVORITES("Favorileri", "favori-entryleri")
 }
 
