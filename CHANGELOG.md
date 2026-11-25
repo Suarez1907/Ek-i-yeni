@@ -2,6 +2,10 @@
 
 Tüm önemli değişiklikler bu dosyada listelenir.
 
+## [1.2.1] - 2026-11-25
+### Düzeltilen
+- Sürüm artışı (versionCode 4); v1.2.0 sonrası CI/bulut araç (coder-toolbox, coder-index) ve NOTES.md güncellemelerini içeren bakım sürümü.
+
 ## [1.2.0] - 2026-11-23
 ### Eklenen
 - Ayarlar ekranı (`SettingsBottomSheet`): Ekşi Sözlük giriş/çıkışı, Gemini API anahtarı yönetimi, tema seçimi ve Cloudflare kısayolları.
