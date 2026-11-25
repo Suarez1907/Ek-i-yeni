@@ -1,0 +1,131 @@
+# coder-cloud-tool: quick v4 (Coder tarafından oluşturuldu; Ayarlar > Yetenekler'den güncellenir)
+name: Coder Quick Check
+
+on:
+  workflow_dispatch:
+    inputs:
+      script_path:
+        description: Özel kontrol betiği (varsa)
+        required: false
+        default: .coder/quick-check.sh
+      output_dir:
+        description: Çıktı klasörü
+        required: false
+        default: coder-out
+      test_module:
+        description: Gradle modülü (hedefli testler)
+        required: false
+        default: ""
+      test_classes:
+        description: Çalıştırılacak test sınıfları (boşlukla)
+        required: false
+        default: ""
+      test_files:
+        description: Çalıştırılacak test dosyaları (JS/Python, boşlukla)
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: coder-quick-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      SCRIPT: ${{ inputs.script_path }}
+      CODER_OUTPUT_DIR: ${{ inputs.output_dir }}
+      TEST_MODULE: ${{ inputs.test_module }}
+      TEST_CLASSES: ${{ inputs.test_classes }}
+      TEST_FILES: ${{ inputs.test_files }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Proje türü
+        id: kind
+        run: |
+          if [ -n "$SCRIPT" ] && [ -f "$SCRIPT" ]; then k=custom
+          elif [ -f gradlew ]; then k=gradle
+          elif [ -f package.json ]; then k=node
+          elif ls requirements*.txt pyproject.toml setup.py *.py > /dev/null 2>&1; then k=python
+          else k=none; fi
+          echo "kind=$k" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-java@v4
+        if: steps.kind.outputs.kind == 'gradle'
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        if: steps.kind.outputs.kind == 'gradle'
+
+      - uses: actions/setup-node@v4
+        if: steps.kind.outputs.kind == 'node'
+        with:
+          node-version: "20"
+
+      - uses: actions/setup-python@v5
+        if: steps.kind.outputs.kind == 'python'
+        with:
+          python-version: "3.12"
+
+      - name: Kontrol
+        env:
+          KIND: ${{ steps.kind.outputs.kind }}
+        run: |
+          set -o pipefail
+          case "$KIND" in
+            custom) bash "$SCRIPT" ;;
+            gradle)
+              chmod +x gradlew
+              if ! ./gradlew compileDebugSources --console=plain 2>&1 | tee check.log; then
+                if grep -q "Task 'compileDebugSources' not found" check.log; then ./gradlew classes --console=plain; else exit 1; fi
+              fi ;;
+            node)
+              if [ -f package-lock.json ]; then npm ci --no-audit --no-fund; else npm install --no-audit --no-fund; fi
+              if [ -f tsconfig.json ]; then npx --no-install tsc --noEmit || npx -y -p typescript tsc --noEmit; else echo "tsconfig yok: yalnızca kurulum denetlendi"; fi ;;
+            python)
+              python -m compileall -q .
+              pip install -q ruff && ruff check --select E9,F63,F7,F82 --output-format concise . ;;
+            *) echo "Tanınan proje türü yok; kontrol atlandı" ;;
+          esac
+
+      - name: Etkilenen testler
+        if: env.TEST_CLASSES != '' || env.TEST_FILES != ''
+        env:
+          KIND: ${{ steps.kind.outputs.kind }}
+        run: |
+          set -o pipefail
+          set -f
+          ARGS=""; for c in $TEST_CLASSES; do c=$(printf '%s' "$c" | tr -cd 'A-Za-z0-9_.*'); if [ -n "$c" ]; then ARGS="$ARGS --tests $c"; fi; done
+          FILES=""; for f in $TEST_FILES; do f=$(printf '%s' "$f" | tr -cd 'A-Za-z0-9_./@-'); if [ -n "$f" ]; then FILES="$FILES $f"; fi; done
+          MOD=$(printf '%s' "$TEST_MODULE" | tr -cd 'A-Za-z0-9_:-')
+          case "$KIND" in
+            gradle)
+              P=""; if [ -n "$MOD" ]; then P=":$MOD:"; fi
+              if ! ./gradlew "${P}testDebugUnitTest" $ARGS --console=plain 2>&1 | tee tests.log; then
+                if grep -q "not found in" tests.log; then ./gradlew "${P}test" $ARGS --console=plain; else exit 1; fi
+              fi ;;
+            node)
+              if grep -q '"vitest"' package.json; then npx --no-install vitest run $FILES
+              elif grep -q '"jest"' package.json; then npx --no-install jest $FILES
+              else echo "Test çalıştırıcısı bulunamadı (jest/vitest)"; fi ;;
+            python)
+              pip install -q pytest
+              set +f; for r in requirements*.txt; do if [ -f "$r" ]; then pip install -q -r "$r"; fi; done; set -f
+              python -m pytest -q $FILES ;;
+          esac
+
+      - name: Günlüğü yükle
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coder-quick-output
+          if-no-files-found: ignore
+          retention-days: 1
+          path: check.log
