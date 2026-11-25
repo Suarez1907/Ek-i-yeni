@@ -740,11 +740,16 @@ class EksinViewModel @Inject constructor(
 
         autocompleteJob = viewModelScope.launch {
             delay(250L)
+            if (_searchQuery.value.trim() != trimmed) return@launch
             val (remoteTitles, remoteNicks) = repository.fetchAutocompleteSuggestions(trimmed)
+            if (_searchQuery.value.trim() != trimmed) return@launch
+            val mergedTitles = (instantLocalMatches + remoteTitles)
+                .distinctBy { it.title.trim().lowercase() }
+                .take(12)
             _autocompleteState.value = AutocompleteSuggestionState(
                 query = trimmed,
                 isLoading = false,
-                titleSuggestions = remoteTitles,
+                titleSuggestions = mergedTitles,
                 nickSuggestions = remoteNicks
             )
         }
