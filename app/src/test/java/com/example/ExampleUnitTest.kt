@@ -188,14 +188,21 @@ class ExampleUnitTest {
         val html = """
             <html><body>
                 <section class="author-profile">
-                    <h1 class="username">gece_okuru</h1>
+                    <h1 id="user-profile-title" data-nick="gece_okuru">gece_okuru</h1>
                     <div class="stats">
-                        <span class="entry-count">128</span>
-                        <span class="follower-count">64</span>
+                        <span id="entry-count-total">128</span>
+                        <span id="user-follower-count">64</span>
+                        <span id="user-following-count">30</span>
                     </div>
-                    <ul class="recent-entries">
-                        <li><a href="/entry/169000101">bir entry</a></li>
-                        <li><a href="/entry/169000102">ikinci entry</a></li>
+                    <ul id="entry-item-list">
+                        <li data-id="169000101">
+                            <div class="content">bir entry</div>
+                            <a class="entry-date permalink" href="/entry/169000101">05.11.2026 21:15</a>
+                        </li>
+                        <li data-id="169000102">
+                            <div class="content">ikinci entry</div>
+                            <a class="entry-date permalink" href="/entry/169000102">05.11.2026 21:16</a>
+                        </li>
                     </ul>
                 </section>
             </body></html>

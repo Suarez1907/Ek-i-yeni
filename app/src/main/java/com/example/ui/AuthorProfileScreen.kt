@@ -46,6 +46,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.data.model.ActionSubmitState
+import com.example.data.model.AuthorEntryTab
+import com.example.data.model.AuthorProfileEntriesUiState
 import com.example.data.model.EntryItem
 import com.example.data.model.ProfileUiState
 import com.example.data.model.TopicItem
