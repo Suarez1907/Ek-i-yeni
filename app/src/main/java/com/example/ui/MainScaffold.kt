@@ -120,6 +120,7 @@ import androidx.paging.compose.LazyPagingItems
 import androidx.paging.compose.collectAsLazyPagingItems
 import com.example.data.local.BookmarkedEntryEntity
 import com.example.data.local.TopicReadStateEntity
+import com.example.data.model.AuthorEntryTab
 import com.example.data.model.DebeAndStatsCategory
 import com.example.data.model.DebeAndStatsUiState
 import com.example.data.model.EksiChannel
@@ -180,6 +181,8 @@ fun MainScaffold(
     val showThemeDialog by viewModel.showThemeDialog.collectAsStateWithLifecycle()
     val activeAuthorNick by viewModel.activeAuthorNick.collectAsStateWithLifecycle()
     val authorProfileState by viewModel.selectedAuthorProfileState.collectAsStateWithLifecycle()
+    val authorEntryTab by viewModel.authorEntryTab.collectAsStateWithLifecycle()
+    val authorProfileEntriesState by viewModel.authorProfileEntriesState.collectAsStateWithLifecycle()
     val messageSubmitState by viewModel.messageSubmitState.collectAsStateWithLifecycle()
     val profileIsUserLoggedIn by viewModel.isUserLoggedIn.collectAsStateWithLifecycle()
     val settingsUsername by viewModel.currentUsername.collectAsStateWithLifecycle()
@@ -211,6 +214,14 @@ fun MainScaffold(
     val searchPagingItems = viewModel.searchTopicsPagingFlow.collectAsLazyPagingItems()
 
     var didInitialCookieSync by remember { mutableStateOf(false) }
+
+    LaunchedEffect(activeAuthorNick) {
+        viewModel.resetAuthorEntryTab()
+        activeAuthorNick?.let { nick ->
+            viewModel.selectAuthorEntryTab(nick, AuthorEntryTab.RECENT)
+        }
+    }
+
     LaunchedEffect(gundemPagingItems.itemCount, bugunPagingItems.itemCount) {
         if (!didInitialCookieSync && (gundemPagingItems.itemCount > 0 || bugunPagingItems.itemCount > 0)) {
             didInitialCookieSync = true
@@ -727,6 +738,9 @@ fun MainScaffold(
                 AuthorProfileScreen(
                     authorNick = nick,
                     profileState = authorProfileState,
+                    entryTab = authorEntryTab,
+                    entriesState = authorProfileEntriesState,
+                    onEntryTabChange = { tab -> viewModel.selectAuthorEntryTab(nick, tab) },
                     messageSubmitState = messageSubmitState,
                     isUserLoggedIn = profileIsUserLoggedIn,
                     onBack = { viewModel.closeAuthorProfile() },
@@ -1427,7 +1441,8 @@ private fun SearchScreenContent(
         // Anlık Arama Önerileri (Autocomplete) Açılır Kartı / Listesi:
         // Kullanıcı en az 2 harf yazdığında ve öneri varsa arama kutusunun hemen altında belirir.
         AnimatedVisibility(
-            visible = query.trim().length >= 2 && autocompleteState.hasAnySuggestion
+            visible = query.trim().length >= 2 &&
+                (autocompleteState.hasAnySuggestion || autocompleteState.isLoading)
         ) {
             Card(
                 shape = MaterialTheme.shapes.large,
@@ -1440,6 +1455,15 @@ private fun SearchScreenContent(
                     .testTag("autocomplete_suggestions_card")
             ) {
                 Column(modifier = Modifier.fillMaxWidth()) {
+                    if (!autocompleteState.hasAnySuggestion && autocompleteState.isLoading) {
+                        Text(
+                            text = "Öneriler aranıyor…",
+                            fontSize = 12.sp,
+                            color = OledTextMuted,
+                            modifier = Modifier.padding(12.dp)
+                        )
+                    }
+
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()

@@ -16,6 +16,8 @@ import com.example.ai.GeminiStreamState
 import com.example.data.local.BookmarkedEntryEntity
 import com.example.data.local.TopicReadStateEntity
 import com.example.data.model.ActionSubmitState
+import com.example.data.model.AuthorEntryTab
+import com.example.data.model.AuthorProfileEntriesUiState
 import com.example.data.model.AutocompleteSuggestionState
 import com.example.data.model.DebeAndStatsCategory
 import com.example.data.model.MessageThreadItem
@@ -268,6 +270,15 @@ class EksinViewModel @Inject constructor(
 
     private val _activeAuthorNick = MutableStateFlow<String?>(null)
     val activeAuthorNick: StateFlow<String?> = _activeAuthorNick.asStateFlow()
+
+    private val _authorEntryTab = MutableStateFlow(AuthorEntryTab.RECENT)
+    val authorEntryTab: StateFlow<AuthorEntryTab> = _authorEntryTab.asStateFlow()
+
+    private val _authorProfileEntriesState =
+        MutableStateFlow<AuthorProfileEntriesUiState>(AuthorProfileEntriesUiState.Idle)
+    val authorProfileEntriesState: StateFlow<AuthorProfileEntriesUiState> =
+        _authorProfileEntriesState.asStateFlow()
+    private var activeAuthorEntryTabJob: Job? = null
 
     private val _selectedAuthorProfileState = MutableStateFlow<ProfileUiState>(ProfileUiState.Idle)
     val selectedAuthorProfileState: StateFlow<ProfileUiState> = _selectedAuthorProfileState.asStateFlow()
@@ -729,11 +740,16 @@ class EksinViewModel @Inject constructor(
 
         autocompleteJob = viewModelScope.launch {
             delay(250L)
+            if (_searchQuery.value.trim() != trimmed) return@launch
             val (remoteTitles, remoteNicks) = repository.fetchAutocompleteSuggestions(trimmed)
+            if (_searchQuery.value.trim() != trimmed) return@launch
+            val mergedTitles = (instantLocalMatches + remoteTitles)
+                .distinctBy { it.title.trim().lowercase() }
+                .take(12)
             _autocompleteState.value = AutocompleteSuggestionState(
                 query = trimmed,
                 isLoading = false,
-                titleSuggestions = remoteTitles,
+                titleSuggestions = mergedTitles,
                 nickSuggestions = remoteNicks
             )
         }
@@ -1352,6 +1368,9 @@ class EksinViewModel @Inject constructor(
     fun openAuthorProfile(nick: String) {
         val cleanNick = nick.trim().removePrefix("@")
         if (cleanNick.isEmpty()) return
+        if (_activeAuthorNick.value != cleanNick) {
+            resetAuthorEntryTab()
+        }
         _activeAuthorNick.value = cleanNick
         viewModelScope.launch {
             _selectedAuthorProfileState.value = ProfileUiState.Loading
@@ -1382,7 +1401,73 @@ class EksinViewModel @Inject constructor(
 
     fun closeAuthorProfile() {
         _activeAuthorNick.value = null
+        resetAuthorEntryTab()
         _selectedAuthorProfileState.value = ProfileUiState.Idle
+    }
+
+    /**
+     * Yazar profili sekmelerinden birini seçer ve ilgili entry listesini yükler.
+     * Önceki sekmenin isteği iptal edilir; geç gelen sonuçlar yeni sekmenin state'ini ezmez.
+     */
+    fun selectAuthorEntryTab(nick: String, tab: AuthorEntryTab) {
+        val cleanNick = nick.trim().removePrefix("@")
+        if (cleanNick.isEmpty()) return
+        _authorEntryTab.value = tab
+        loadAuthorEntryTab(cleanNick, tab, forceRefresh = false)
+    }
+
+    /** Aktif yazar profil sekmesini önbellekten bağımsız olarak yeniden yükler. */
+    fun refreshAuthorEntryTab(nick: String) {
+        val cleanNick = nick.trim().removePrefix("@")
+        if (cleanNick.isEmpty()) return
+        loadAuthorEntryTab(cleanNick, _authorEntryTab.value, forceRefresh = true)
+    }
+
+    /** Yazar değiştiğinde sekmeyi "Son" sekmesine sıfırlar ve bekleyen isteği iptal eder. */
+    fun resetAuthorEntryTab() {
+        activeAuthorEntryTabJob?.cancel()
+        activeAuthorEntryTabJob = null
+        _authorEntryTab.value = AuthorEntryTab.RECENT
+        _authorProfileEntriesState.value = AuthorProfileEntriesUiState.Idle
+    }
+
+    private fun loadAuthorEntryTab(
+        nick: String,
+        tab: AuthorEntryTab,
+        forceRefresh: Boolean
+    ) {
+        activeAuthorEntryTabJob?.cancel()
+        activeAuthorEntryTabJob = viewModelScope.launch {
+            _authorProfileEntriesState.value = AuthorProfileEntriesUiState.Loading
+            try {
+                val result = repository.fetchAuthorProfileEntries(
+                    nick = nick,
+                    tab = tab,
+                    forceRefresh = forceRefresh
+                )
+                if (_authorEntryTab.value != tab) return@launch
+                result.fold(
+                    onSuccess = { entries ->
+                        if (_authorEntryTab.value != tab) return@fold
+                        _authorProfileEntriesState.value =
+                            AuthorProfileEntriesUiState.Success(tab, entries)
+                    },
+                    onFailure = { error ->
+                        if (_authorEntryTab.value != tab) return@fold
+                        _authorProfileEntriesState.value = AuthorProfileEntriesUiState.Error(
+                            error.localizedMessage ?: "Entry listesi yüklenemedi."
+                        )
+                    }
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (_authorEntryTab.value != tab) return@launch
+                _authorProfileEntriesState.value = AuthorProfileEntriesUiState.Error(
+                    e.localizedMessage ?: "Entry listesi yüklenemedi."
+                )
+            }
+        }
     }
 
     fun loadMessageThreads(forceRefresh: Boolean = false) {

@@ -1,12 +1,13 @@
 # Eksi — Modern Ekşi Sözlük İstemcisi
 
-Jetpack Compose ile yazılmış modern Ekşi Sözlük istemcisi.
+Amaç: Jetpack Compose ile yazılmış modern Ekşi Sözlük Android istemcisi.
 
-## Paket Yapısı
-- `ui/` — Compose ekranları, bileşenler ve tema (`ui/theme/`).
-- `data/` — Yerel depolama, modeller ve repository katmanı.
-- `network/` — Sözlük API istemcisi ve DTO eşlemeleri.
-- `ai/` — Akıllı özet/öneri yardımcıları.
+## Yapı
+- `data/repository/EksiRepository.kt` — API çağrıları, entry gönderimi ve arama önerileri.
+- `data/remote/EksiParser.kt` — HTML/API yanıtlarının modellere dönüştürülmesi.
+- `network/WebViewFetchBridge.kt` — Çerezli AJAX ve form POST işlemleri.
+- `ui/EksinViewModel.kt` — Ekran durumu, yerel/uzak veri birleştirme.
+- `ui/MainScaffold.kt` — Ana ekran, sekmeler ve öneri kartları.
 
 ## Tema Sistemi
 `Color.kt` üç tema modu tanımlar (`AppThemeMode`):
@@ -21,17 +22,28 @@ güncellenir. Tercih `ThemePreferencesManager` ile `SharedPreferences`'a
 
 ## Öne Çıkan Akışlar
 - Profil/Mesajlar — `ProfileScreen` ve `AuthorProfileScreen` yazar istatistikleri,
-  son entry'ler ve mesaj thread'lerini listeler; `MainScaffold` "Profilim" sekmesi
+  entry sekmeleri ve mesaj thread'lerini listeler; `MainScaffold` "Profilim" sekmesi
   ve `activeAuthorNick` overlay'i ile açılır.
 - Entry yazma — `EntryComposerBottomSheet` başlık detayındaki "Entry Gir" FAB'ından
-  açılır; doğrulama token'ı `parseEntryFormMetadata` ile alınır, gönderim
-  `WebViewFetchBridge.postForm` POST akışıyla yapılır.
+  açılır; doğrulama token'ı `parseEntryFormMetadata` ile alınır.
 - Mesaj gönderme — `SendMessageDialog` reply token ile POST isteğini tetikler.
-- Ayarlar — `MainScaffold` üst çubuğundaki dişli ikonu `SettingsBottomSheet` açar; Ekşi Sözlük giriş/çıkışı, Gemini API anahtarı, tema ve Cloudflare kısayolları buradan yönetilir.
+- Ayarlar — `MainScaffold` üst çubuğundaki dişli ikonu `SettingsBottomSheet` açar.
 
-## Kurallar
+## Kritik Kurallar
+- Entry gönderimi `POST /entry/ekle` adresine yapılır; bu, form action URL'sidir.
+  Başlık URL'sine POST göndermek 404 döner.
+- Profil sekmeleri son-entryleri, en-cok-favorilenen-entryleri, en-begenilenleri ve
+  favori-entryleri endpoint'lerinden AJAX ile alınır; çerez gerekir ve istekler
+  `WebViewFetchBridge` üzerinden yapılır.
+- Autocomplete `/autocomplete/query` AJAX endpoint'ini kullanır; hata/boş sonuçta
+  `/basliklar/ara` düz GET adresine düşer.
+- Yerel eşleşmeler uzak sonuçla birleştirilir; uzak sonuç boşsa yerel öneriler korunur.
 - Mevcut public sembol isimleri ve `storageKey` değerleri korunur.
 - UI tamamen `MaterialTheme` semantik renkleri üzerinden çizilir.
+
+## Tuzaklar
+- Profil entry kodu `main` dalında yoktur; özellik dalı `feat/author-profile-entries-tabs`'tir.
+- Canlı testlerde bazı endpoint'ler çerez olmadan 500 dönebilir.
 - Tema değişimleri anında yeniden çizilir (recompose).
 
 ## Sürümleme
@@ -41,7 +53,4 @@ güncellenir. Tercih `ThemePreferencesManager` ile `SharedPreferences`'a
 - Sürüm notları `CHANGELOG.md` dosyasında tutulur.
 
 ## Derleme ve Test
-GitHub Actions:
-```
-./gradlew testDebugUnitTest assembleDebug
-```
+GitHub Actions derlemesi: `./gradlew testDebugUnitTest assembleDebug`

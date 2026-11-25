@@ -1335,6 +1335,150 @@ class EksiParser @Inject constructor() {
     }
 
     /**
+     * Yazar profili entry sekmelerinden (`/son-entryleri`, `/en-cok-favorilenen-entryleri`,
+     * `/en-begenilen-entryleri`, `/favori-entryleri`) gelen partial HTML yanıtlarını ayrıştırır.
+     */
+    fun parseAuthorProfileEntries(html: String, fallbackAuthor: String = ""): List<EntryItem> {
+        if (html.isBlank()) return emptyList()
+        val doc: Document = Jsoup.parse(html, BASE_URL)
+        val entryIdRegex = Regex("/entry/(\\d+)")
+
+        fun extractTitleInfo(scope: Element?): Pair<String, String> {
+            if (scope == null) return "" to ""
+            val titleContainer = scope.selectFirst("h1#title, h1, .topic-title, [data-title]")
+            val titleAnchor = scope.selectFirst(
+                "h1#title a[href], h1 a[href], .topic-title a[href], a.topic-title[href], a[data-title][href]"
+            ) ?: titleContainer?.takeIf {
+                it.tagName().equals("a", ignoreCase = true) && it.hasAttr("href")
+            }
+
+            val topicTitle = titleAnchor?.text()?.trim().orEmpty()
+                .ifBlank { titleContainer?.attr("data-title")?.trim().orEmpty() }
+                .ifBlank {
+                    titleContainer?.takeIf { it !== titleAnchor }?.text()?.trim().orEmpty()
+                }
+                .ifBlank { scope.attr("data-title").trim() }
+
+            val topicUrl = titleAnchor?.attr("href")?.trim()
+                ?.takeIf { it.isNotBlank() && !it.startsWith("javascript:", ignoreCase = true) }
+                ?.let { normalizeUrl(it) }
+                .orEmpty()
+
+            return topicTitle to topicUrl
+        }
+
+        fun parseEntryNode(entryElement: Element, titleScope: Element?): EntryItem? {
+            val contentElement = entryElement.selectFirst("div.content, .content") ?: return null
+            val contentHtml = contentElement.html().trim()
+            if (contentHtml.isBlank() && contentElement.text().isBlank()) return null
+
+            val dateElement = entryElement.selectFirst(
+                "a.entry-date, .entry-date, footer a.entry-date, a.permalink, time.entry-date"
+            )
+            val dateText = splitEntryDates(dateElement?.text()?.trim().orEmpty()).first
+
+            val dateLink = entryElement.selectFirst(
+                "a.entry-date[href], a.permalink[href], a[href*=\"/entry/\"]"
+            )
+            val idFromHref = dateLink?.attr("href")?.trim()?.let { href ->
+                entryIdRegex.find(href)?.groupValues?.getOrNull(1)
+            }.orEmpty()
+
+            val entryId = entryElement.attr("data-id")
+                .ifBlank { entryElement.id().removePrefix("entry-item-") }
+                .trim()
+                .filter { it.isDigit() }
+                .ifBlank { idFromHref }
+                .ifBlank {
+                    entryElement.selectFirst("a[href*=\"/entry/\"]")
+                        ?.attr("href")
+                        ?.let { href -> entryIdRegex.find(href)?.groupValues?.getOrNull(1) }
+                        .orEmpty()
+                }
+            if (entryId.isBlank()) return null
+
+            val scopeTitle = extractTitleInfo(titleScope)
+            val ownTitle = extractTitleInfo(entryElement)
+            val topicTitle = scopeTitle.first.ifBlank { ownTitle.first }
+            val topicUrl = scopeTitle.second.ifBlank {
+                ownTitle.second.ifBlank { normalizeUrl("/entry/$entryId") }
+            }
+
+            val author = entryElement.attr("data-author").trim()
+                .ifBlank { entryElement.selectFirst("a.entry-author, .entry-author")?.text()?.trim().orEmpty() }
+                .ifBlank { fallbackAuthor.trim() }
+
+            val favoriteCount = entryElement.attr("data-favorite-count").toIntOrNull()
+                ?: entryElement.selectFirst(".favorite-count")
+                    ?.text()
+                    ?.trim()
+                    ?.let { parseEntryCount(it) }
+                ?: 0
+
+            val annotatedContent = buildEntryAnnotatedString(contentElement)
+            val hasExternalLink = contentElement.selectFirst("a.url") != null
+            val authorProfileUrl = if (author.isBlank()) {
+                ""
+            } else {
+                "$BASE_URL/biri/${Uri.encode(author)}"
+            }
+
+            return EntryItem(
+                id = entryId,
+                contentHtml = contentHtml,
+                annotatedContent = annotatedContent,
+                author = author,
+                date = dateText,
+                editDate = null,
+                favoriteCount = favoriteCount,
+                isFavorited = false,
+                topicTitle = topicTitle,
+                topicUrl = topicUrl,
+                authorProfileUrl = authorProfileUrl,
+                avatarUrl = null,
+                pageNumber = 1,
+                hasExternalLink = hasExternalLink
+            )
+        }
+
+        val parsedEntries = mutableListOf<EntryItem>()
+        val seenIds = mutableSetOf<String>()
+        fun addParsedEntry(entry: EntryItem?) {
+            if (entry != null && seenIds.add(entry.id)) {
+                parsedEntries.add(entry)
+            }
+        }
+
+        val topicItems = doc.select(".topic-item")
+        for (topicItem in topicItems) {
+            val entryElements = linkedSetOf<Element>()
+            entryElements.addAll(
+                topicItem.select("#entry-item-list li[data-id], ul#entry-item-list > li, li[data-id], article.entry-item")
+            )
+            if (entryElements.isEmpty() && topicItem.selectFirst(".content") != null) {
+                entryElements.add(topicItem)
+            }
+            for (entryElement in entryElements) {
+                addParsedEntry(parseEntryNode(entryElement, topicItem))
+            }
+        }
+
+        if (topicItems.isEmpty() || parsedEntries.isEmpty()) {
+            val directEntryElements = linkedSetOf<Element>()
+            directEntryElements.addAll(
+                doc.select("ul#entry-item-list > li, #entry-item-list li[data-id], li[data-id], article.entry-item")
+            )
+            for (entryElement in directEntryElements) {
+                val closestScope = entryElement.parents()
+                    .firstOrNull { it.hasClass("topic-item") || it.id() == "topic" }
+                addParsedEntry(parseEntryNode(entryElement, closestScope ?: doc.body()))
+            }
+        }
+
+        return parsedEntries
+    }
+
+    /**
      * `/biri/{nick}` HTML'inden yazar nick'i, avatarı, rozet/karma bilgisi, istatistikleri ve
      * son entry'leri çıkararak [AuthorProfileData] üretir.
      */
@@ -1368,14 +1512,7 @@ class EksiParser @Inject constructor() {
 
         val profileUrl = "$BASE_URL/biri/${Uri.encode(nick)}"
 
-        val recentEntries = doc.select("#entry-item-list > li").mapNotNull { li ->
-            parseEntryElement(
-                li = li,
-                topicTitle = li.attr("data-title").ifBlank { "" },
-                topicUrl = profileUrl,
-                pageNumber = 1
-            )
-        }
+        val recentEntries = parseAuthorProfileEntries(html = html, fallbackAuthor = nick)
 
         return AuthorProfileData(
             nick = nick,

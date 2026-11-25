@@ -308,6 +308,29 @@ data class EntryFormMetadata(
 )
 
 /**
+ * Yazar profili entry sekmeleri ve Ekşi Sözlük endpoint path'leri.
+ */
+enum class AuthorEntryTab(
+    val title: String,
+    val endpointPath: String
+) {
+    RECENT("Son Entry'ler", "son-entryleri"),
+    MOST_FAVORITED("En Çok Favorilenen", "en-cok-favorilenen-entryleri"),
+    TOP_RATED("En Beğenilen", "en-begenilenleri"),
+    FAVORITES("Favorileri", "favori-entryleri")
+}
+
+/**
+ * Yazar profili entry sekmelerinin yükleme durumları.
+ */
+sealed interface AuthorProfileEntriesUiState {
+    data object Idle : AuthorProfileEntriesUiState
+    data object Loading : AuthorProfileEntriesUiState
+    data class Success(val tab: AuthorEntryTab, val entries: List<EntryItem>) : AuthorProfileEntriesUiState
+    data class Error(val message: String) : AuthorProfileEntriesUiState
+}
+
+/**
  * Yazar profili (`/biri/{nick}`) verileri.
  */
 data class AuthorProfileData(
