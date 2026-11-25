@@ -739,7 +739,7 @@ fun MainScaffold(
                     authorNick = nick,
                     profileState = authorProfileState,
                     entryTab = authorEntryTab,
-                    entriesState = authorProfileEntriesState,
+                    entryTabState = authorProfileEntriesState,
                     onEntryTabChange = { tab -> viewModel.selectAuthorEntryTab(nick, tab) },
                     messageSubmitState = messageSubmitState,
                     isUserLoggedIn = profileIsUserLoggedIn,

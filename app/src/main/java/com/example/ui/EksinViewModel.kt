@@ -1440,25 +1440,14 @@ class EksinViewModel @Inject constructor(
         activeAuthorEntryTabJob = viewModelScope.launch {
             _authorProfileEntriesState.value = AuthorProfileEntriesUiState.Loading
             try {
-                val result = repository.fetchAuthorProfileEntries(
+                val entries = repository.fetchAuthorProfileEntries(
                     nick = nick,
                     tab = tab,
                     forceRefresh = forceRefresh
                 )
                 if (_authorEntryTab.value != tab) return@launch
-                result.fold(
-                    onSuccess = { entries ->
-                        if (_authorEntryTab.value != tab) return@fold
-                        _authorProfileEntriesState.value =
-                            AuthorProfileEntriesUiState.Success(tab, entries)
-                    },
-                    onFailure = { error ->
-                        if (_authorEntryTab.value != tab) return@fold
-                        _authorProfileEntriesState.value = AuthorProfileEntriesUiState.Error(
-                            error.localizedMessage ?: "Entry listesi yüklenemedi."
-                        )
-                    }
-                )
+                _authorProfileEntriesState.value =
+                    AuthorProfileEntriesUiState.Success(tab, entries)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
