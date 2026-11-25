@@ -1441,7 +1441,8 @@ private fun SearchScreenContent(
         // Anlık Arama Önerileri (Autocomplete) Açılır Kartı / Listesi:
         // Kullanıcı en az 2 harf yazdığında ve öneri varsa arama kutusunun hemen altında belirir.
         AnimatedVisibility(
-            visible = query.trim().length >= 2 && autocompleteState.hasAnySuggestion
+            visible = query.trim().length >= 2 &&
+                (autocompleteState.hasAnySuggestion || autocompleteState.isLoading)
         ) {
             Card(
                 shape = MaterialTheme.shapes.large,
@@ -1454,6 +1455,15 @@ private fun SearchScreenContent(
                     .testTag("autocomplete_suggestions_card")
             ) {
                 Column(modifier = Modifier.fillMaxWidth()) {
+                    if (!autocompleteState.hasAnySuggestion && autocompleteState.isLoading) {
+                        Text(
+                            text = "Öneriler aranıyor…",
+                            fontSize = 12.sp,
+                            color = OledTextMuted,
+                            modifier = Modifier.padding(12.dp)
+                        )
+                    }
+
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
